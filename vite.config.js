@@ -22,6 +22,21 @@ export default defineConfig({
         changeOrigin: true,
         rewrite: () => '/api/usdc/ars/1',
       },
+      '/api/bonos': {
+        target: 'https://data912.com',
+        changeOrigin: true,
+        rewrite: () => '/live/arg_bonds',
+      },
+      '/api/rem-tipo-cambio': {
+        target: 'https://bcra-rem-api.facujallia.workers.dev',
+        changeOrigin: true,
+        rewrite: () => '/api/tipo_cambio',
+      },
+      '/api/rem-ipc': {
+        target: 'https://bcra-rem-api.facujallia.workers.dev',
+        changeOrigin: true,
+        rewrite: () => '/api/ipc_general',
+      },
     },
   },
 })
