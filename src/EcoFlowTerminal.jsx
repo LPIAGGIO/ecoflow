@@ -300,6 +300,8 @@ export default function EcoFlowTerminal() {
         }
 
         .eco-table-row:hover { background-color: rgba(241, 245, 249, 0.025); }
+
+        .eco-th-sortable:hover { color: ${C.text} !important; }
       `}</style>
 
       {/* ─────────── NAVBAR ─────────── */}
@@ -651,7 +653,7 @@ export default function EcoFlowTerminal() {
               </span>
               <span style={{ color: C.faint }}>│</span>
               <span>
-                {active.replace(/-/g, " ")}
+                {(flattenNav(NAV).find((i) => i.id === active)?.label) || active.replace(/-/g, " ")}
               </span>
             </div>
             <div className="flex items-center gap-4">
@@ -993,8 +995,9 @@ function EmptyWorkspace({ active }) {
 
 
 const STABLE_TABS = [
-  { id: "usdt", label: "USDT", accent: C.cat.emerald },
-  { id: "usdc", label: "USDC", accent: C.cat.violet },
+  { id: "ccl",  label: "USD CCL", accent: C.cat.yellow },
+  { id: "usdt", label: "USDT",    accent: C.cat.emerald },
+  { id: "usdc", label: "USDC",    accent: C.cat.violet },
 ];
 
 const DOLLAR_TYPES = [
@@ -1028,10 +1031,12 @@ const colorForId = (id, idx = 0) => {
 };
 
 function ComparaDolarModule() {
-  const [stableTab, setStableTab] = useState("usdt");
+  const [stableTab, setStableTab] = useState("ccl");
   const [direction, setDirection] = useState("buy");
+  const [sortKey, setSortKey] = useState(null); // null = use direction default
+  const [sortDir, setSortDir] = useState("asc"); // "asc" | "desc"
   const [usdData, setUsdData] = useState([]);
-  const [stableData, setStableData] = useState({ usdt: [], usdc: [] });
+  const [stableData, setStableData] = useState({ ccl: [], usdt: [], usdc: [] });
   const [prevSnapshot, setPrevSnapshot] = useState({});
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -1054,7 +1059,7 @@ function ComparaDolarModule() {
 
     try {
       const snapshot = {};
-      [...usdData, ...stableData.usdt, ...stableData.usdc].forEach((r) => {
+      [...usdData, ...stableData.ccl, ...stableData.usdt, ...stableData.usdc].forEach((r) => {
         if (r.buy != null && r.sell != null) {
           snapshot[r.id] = { mid: (r.buy + r.sell) / 2 };
         }
@@ -1115,8 +1120,24 @@ function ComparaDolarModule() {
         }
       } catch (e) { console.warn("USDC failed", e); }
 
+      // CCL para tab "USD CCL" — usa el mismo dato fiat de dolarapi (un solo proveedor por ahora)
+      const cclMatch = fiat.find(
+        (d) => (d.casa || "").toLowerCase() === "contadoconliqui",
+      );
+      const cclRows = cclMatch
+        ? [
+            {
+              id: `ccl-${cclMatch.casa}`,
+              name: cclMatch.nombre || "CCL",
+              buy: cclMatch.compra ?? null,
+              sell: cclMatch.venta ?? null,
+              updatedAt: cclMatch.fechaActualizacion ? new Date(cclMatch.fechaActualizacion) : null,
+            },
+          ].filter((r) => r.buy && r.sell)
+        : [];
+
       setUsdData(usdRows);
-      setStableData({ usdt: usdtRows, usdc: usdcRows });
+      setStableData({ ccl: cclRows, usdt: usdtRows, usdc: usdcRows });
       if (Object.keys(snapshot).length > 0) setPrevSnapshot(snapshot);
       setError(null);
       setLastFetch(new Date());
@@ -1174,7 +1195,30 @@ function ComparaDolarModule() {
     return { ...r, mid, variation, spreadPct, color: colorForId(r.id, idx) };
   });
 
+  // Click en header: si era la misma columna, invierte dirección. Si es nueva, usa default según columna.
+  const handleSort = (key) => {
+    if (sortKey === key) {
+      setSortDir((d) => (d === "asc" ? "desc" : "asc"));
+    } else {
+      setSortKey(key);
+      // Default por columna: "buy" y "sell" desc (más alto primero); "spread"/"var" asc
+      setSortDir(key === "buy" || key === "sell" ? "desc" : "asc");
+    }
+  };
+
   const sortedStable = [...activeStable].sort((a, b) => {
+    // Sort manual tiene prioridad
+    if (sortKey) {
+      const fieldMap = { buy: "buy", sell: "sell", spread: "spreadPct", var: "spreadPct" };
+      const field = fieldMap[sortKey];
+      const av = a[field];
+      const bv = b[field];
+      if (av == null && bv == null) return 0;
+      if (av == null) return 1;
+      if (bv == null) return -1;
+      return sortDir === "asc" ? av - bv : bv - av;
+    }
+    // Sin sort manual: ordena según direction (default original)
     if (direction === "buy") {
       if (a.sell == null) return 1;
       if (b.sell == null) return -1;
@@ -1253,10 +1297,7 @@ function ComparaDolarModule() {
 
       {/* Sección 1: TIPOS DE DÓLAR */}
       <SectionLabel>Tipos de Dólar</SectionLabel>
-      <div
-        className="grid gap-3 mb-5"
-        style={{ gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))" }}
-      >
+      <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-3 mb-5">
         {enrichedUsd.map((row) => (
           <DolarTypeCard key={row.id} row={row} loading={loading} />
         ))}
@@ -1268,12 +1309,14 @@ function ComparaDolarModule() {
       {/* Divider */}
       <div className="my-7" style={{ height: 1, backgroundColor: C.border }} />
 
-      {/* Sección 2: STABLECOINS POR EXCHANGE */}
-      <SectionLabel>Stablecoins por Exchange</SectionLabel>
+      {/* Sección 2: Por Exchange */}
 
       {/* Toolbar */}
       <div className="flex flex-wrap items-center gap-3 mb-5">
-        <StableTabs value={stableTab} onChange={setStableTab} />
+        <StableTabs
+          value={stableTab}
+          onChange={(t) => { setStableTab(t); setSortKey(null); }}
+        />
         <span style={{ width: 1, height: 26, backgroundColor: C.border }} />
         <DirectionTabs value={direction} onChange={setDirection} />
         <div className="flex-1" />
@@ -1286,7 +1329,7 @@ function ComparaDolarModule() {
             fontWeight: 500,
           }}
         >
-          {sortedStable.length} exchanges
+          {sortedStable.length} {stableTab === "ccl" ? (sortedStable.length === 1 ? "fuente" : "fuentes") : "exchanges"}
         </span>
       </div>
 
@@ -1294,23 +1337,23 @@ function ComparaDolarModule() {
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-5">
         <BestCard
           icon={ArrowDown}
-          iconColor={C.cat.emerald}
-          label="Mejor para Vender"
-          provider={bestForSelling}
-          priceLabel="Vendés a"
-          priceField="buy"
-          valueColor={C.green}
-          accentTop={C.cat.emerald}
-        />
-        <BestCard
-          icon={ArrowUp}
-          iconColor={C.accent}
+          iconColor={C.green}
           label="Mejor para Comprar"
           provider={bestForBuying}
           priceLabel="Comprás a"
           priceField="sell"
-          valueColor={C.accent}
-          accentTop={C.accent}
+          valueColor={C.green}
+          accentTop={C.green}
+        />
+        <BestCard
+          icon={ArrowUp}
+          iconColor={C.red}
+          label="Mejor para Vender"
+          provider={bestForSelling}
+          priceLabel="Vendés a"
+          priceField="buy"
+          valueColor={C.red}
+          accentTop={C.red}
         />
         <BestCard
           icon={Activity}
@@ -1322,14 +1365,23 @@ function ComparaDolarModule() {
           valueColor={C.cat.yellow}
           accentTop={C.cat.yellow}
           isPercent
+          subValue={
+            lowestSpread && lowestSpread.buy != null && lowestSpread.sell != null
+              ? `· $${fmtARS(lowestSpread.sell - lowestSpread.buy)}`
+              : null
+          }
         />
       </div>
 
       {/* Ranking card */}
       <RankingCard
-        title="Ranking de Exchanges"
+        title={stableTab === "ccl" ? "Ranking de Fuentes" : "Ranking de Exchanges"}
         subtitle={
-          direction === "buy"
+          sortKey
+            ? `Ordenado por ${
+                { buy: "Vendés a", sell: "Comprás a", spread: "Spread", var: "Var" }[sortKey]
+              } (${sortDir === "asc" ? "menor a mayor" : "mayor a menor"})`
+            : direction === "buy"
             ? "Ordenado por menor venta (te lo venden más barato)"
             : "Ordenado por mayor compra (te pagan más por venderlo)"
         }
@@ -1338,6 +1390,9 @@ function ComparaDolarModule() {
         bestForBuying={bestForBuying}
         bestForSelling={bestForSelling}
         direction={direction}
+        sortKey={sortKey}
+        sortDir={sortDir}
+        onSort={handleSort}
         accentTop={C.cat.pink}
       />
 
@@ -1584,7 +1639,7 @@ function CardHeader({ icon: Icon, iconColor, label }) {
   );
 }
 
-function BestCard({ icon, iconColor, label, provider, priceLabel, priceField, valueColor, accentTop, isPercent }) {
+function BestCard({ icon, iconColor, label, provider, priceLabel, priceField, valueColor, accentTop, isPercent, subValue }) {
   const value = provider
     ? isPercent
       ? `${provider[priceField]?.toFixed(2)}%`
@@ -1634,17 +1689,32 @@ function BestCard({ icon, iconColor, label, provider, priceLabel, priceField, va
             {priceLabel}
           </span>
 
-          <div
-            className="eco-mono mt-auto pt-2"
-            style={{
-              fontSize: 24,
-              color: valueColor,
-              fontWeight: 600,
-              letterSpacing: "-0.01em",
-              lineHeight: 1.05,
-            }}
-          >
-            {value}
+          <div className="mt-auto pt-2 flex items-baseline gap-2 flex-wrap">
+            <div
+              className="eco-mono"
+              style={{
+                fontSize: 24,
+                color: valueColor,
+                fontWeight: 600,
+                letterSpacing: "-0.01em",
+                lineHeight: 1.05,
+              }}
+            >
+              {value}
+            </div>
+            {subValue && (
+              <div
+                className="eco-mono"
+                style={{
+                  fontSize: 13,
+                  color: C.muted,
+                  fontWeight: 500,
+                  letterSpacing: "0.01em",
+                }}
+              >
+                {subValue}
+              </div>
+            )}
           </div>
         </>
       ) : (
@@ -1812,7 +1882,7 @@ function RefreshButton({ onClick, spinning }) {
   );
 }
 
-function RankingCard({ title, subtitle, rows, loading, bestForBuying, bestForSelling, direction, accentTop }) {
+function RankingCard({ title, subtitle, rows, loading, bestForBuying, bestForSelling, direction, sortKey, sortDir, onSort, accentTop }) {
   return (
     <div
       style={{
@@ -1849,11 +1919,17 @@ function RankingCard({ title, subtitle, rows, loading, bestForBuying, bestForSel
             <thead>
               <tr style={{ borderBottom: `1px solid ${C.border}` }}>
                 <Th align="left" width={36}>#</Th>
-                <Th align="left">Exchange</Th>
-                <Th align="right" emphasized={direction === "sell"}>Vendés a</Th>
-                <Th align="right" emphasized={direction === "buy"}>Comprás a</Th>
-                <Th align="right">Spread</Th>
-                <Th align="right">Var</Th>
+                <Th align="left">Proveedor</Th>
+                <Th align="right" sortable sortKey="buy"
+                    activeSortKey={sortKey} sortDir={sortDir} onSort={onSort}
+                    emphasized={direction === "sell" && !sortKey}>Vendés a</Th>
+                <Th align="right" sortable sortKey="sell"
+                    activeSortKey={sortKey} sortDir={sortDir} onSort={onSort}
+                    emphasized={direction === "buy" && !sortKey}>Comprás a</Th>
+                <Th align="right" sortable sortKey="spread"
+                    activeSortKey={sortKey} sortDir={sortDir} onSort={onSort}>Spread</Th>
+                <Th align="right" sortable sortKey="var"
+                    activeSortKey={sortKey} sortDir={sortDir} onSort={onSort}>Var</Th>
               </tr>
             </thead>
             <tbody>
@@ -1884,15 +1960,13 @@ function RankingCard({ title, subtitle, rows, loading, bestForBuying, bestForSel
                       {row.sell != null ? `$${fmtARS(row.sell)}` : "—"}
                     </Td>
                     <Td align="right" mono>
-                      {row.spreadPct != null ? (
-                        <span style={{ color: C.muted }}>{row.spreadPct.toFixed(2)}%</span>
+                      {row.buy != null && row.sell != null ? (
+                        <span style={{ color: C.muted }}>${fmtARS(row.sell - row.buy)}</span>
                       ) : "—"}
                     </Td>
                     <Td align="right" mono>
-                      {row.variation != null ? (
-                        <span style={{ color: row.variation >= 0 ? C.green : C.red, fontWeight: 600 }}>
-                          {fmtPct(row.variation)}
-                        </span>
+                      {row.spreadPct != null ? (
+                        <span style={{ color: C.muted }}>{row.spreadPct.toFixed(2)}%</span>
                       ) : (
                         <span style={{ color: C.dim }}>—</span>
                       )}
@@ -1908,22 +1982,45 @@ function RankingCard({ title, subtitle, rows, loading, bestForBuying, bestForSel
   );
 }
 
-function Th({ children, align, emphasized, width }) {
+function Th({ children, align, emphasized, width, sortable, sortKey, activeSortKey, sortDir, onSort }) {
+  const isActive = sortable && activeSortKey === sortKey;
+  const color = isActive ? C.accent : emphasized ? C.accent : C.dim;
+  const indicator = isActive ? (sortDir === "asc" ? "▲" : "▼") : sortable ? "↕" : null;
+
   return (
     <th
+      onClick={sortable ? () => onSort(sortKey) : undefined}
+      className={sortable ? "eco-th-sortable" : ""}
       style={{
         padding: "10px 14px",
         textAlign: align,
         fontSize: 9,
-        color: emphasized ? C.accent : C.dim,
+        color: color,
         letterSpacing: "0.20em",
         textTransform: "uppercase",
         fontWeight: 600,
         fontFamily: "'Roboto', sans-serif",
         width: width,
+        cursor: sortable ? "pointer" : "default",
+        userSelect: "none",
+        transition: "color 0.15s ease",
       }}
     >
-      {children}
+      <span style={{
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 6,
+        justifyContent: align === "right" ? "flex-end" : "flex-start",
+      }}>
+        {children}
+        {indicator && (
+          <span style={{
+            fontSize: 8,
+            opacity: isActive ? 1 : 0.45,
+            letterSpacing: 0,
+          }}>{indicator}</span>
+        )}
+      </span>
     </th>
   );
 }
