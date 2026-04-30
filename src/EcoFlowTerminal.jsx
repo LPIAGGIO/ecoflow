@@ -1,4 +1,5 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo } from "react";
+import { resolveBond, daysToMaturity } from "./bondMaturities.js";
 import {
   Home,
   TrendingUp,
@@ -38,6 +39,7 @@ import {
   Loader2,
   ArrowUp,
   ArrowDown,
+  Pencil,
 } from "lucide-react";
 
 const C = {
@@ -617,6 +619,8 @@ export default function EcoFlowTerminal() {
           <div className="absolute inset-0 overflow-auto eco-scroll" style={{ paddingBottom: 26 }}>
             {active === "compara-dolar" ? (
               <ComparaDolarModule />
+            ) : active === "carry-trade" ? (
+              <CarryTradeModule />
             ) : (
               <EmptyWorkspace key={active} active={active} />
             )}
@@ -2044,4 +2048,1005 @@ function Td({ children, align, mono, highlighted }) {
       {children}
     </td>
   );
+}
+
+/* ─────────── Carry Trade Module ─────────── */
+
+// Banda BCRA: arrancó 14/04/2025, piso=$1000 / techo=$1400, crawling peg ±1%/mes
+// Hasta 31/12/2025 evoluciona con crawling peg fijo del 1% mensual.
+// Desde 01/01/2026 evoluciona según inflación T-2 del REM.
+const BAND_START_DATE = "2025-04-14";
+const BAND_START_FLOOR = 1000;
+const BAND_START_CEILING = 1400;
+const BAND_CRAWL_RATE_MONTHLY = 0.01; // 1% mensual hasta 31/12/2025
+
+const CARRY_MODES = [
+  {
+    id: "byDollar",
+    label: "Por Dólar",
+    sublabel: "Equilibrio vs Oficial · MEP · Blue · CCL",
+    icon: Coins,
+    color: "#38BDF8",       // accent (cyan)
+    soft: "rgba(56, 189, 248, 0.12)",
+    border: "rgba(56, 189, 248, 0.45)",
+  },
+  {
+    id: "byBands",
+    label: "Bandas BCRA + REM",
+    sublabel: "Escenarios Piso · REM · Techo",
+    icon: Landmark,
+    color: "#FACC15",       // yellow
+    soft: "rgba(250, 204, 21, 0.12)",
+    border: "rgba(250, 204, 21, 0.45)",
+  },
+  {
+    id: "manual",
+    label: "Dólar Manual",
+    sublabel: "Ingresá tu propio escenario",
+    icon: Pencil,
+    color: "#F472B6",       // pink
+    soft: "rgba(244, 114, 182, 0.12)",
+    border: "rgba(244, 114, 182, 0.45)",
+  },
+];
+
+const SCENARIOS = [
+  { id: "floor",   label: "Piso BCRA",   color: C.green,  desc: "Optimista — peso se aprecia al piso" },
+  { id: "rem",     label: "REM",         color: C.accent, desc: "Realista — proyección REM (BCRA)" },
+  { id: "ceiling", label: "Techo BCRA",  color: C.red,    desc: "Conservador — peso al techo" },
+];
+
+/**
+ * Calcula el valor de la banda (piso o techo) a una fecha dada.
+ */
+function projectBand(targetDate, boundary, remIpcByMonth = {}) {
+  const start = new Date(BAND_START_DATE + "T00:00:00");
+  const target = new Date(targetDate + "T00:00:00");
+  if (target <= start) return boundary === "floor" ? BAND_START_FLOOR : BAND_START_CEILING;
+
+  let value = boundary === "floor" ? BAND_START_FLOOR : BAND_START_CEILING;
+
+  let cursor = new Date(start);
+  cursor.setDate(1);
+  cursor.setMonth(cursor.getMonth() + 1);
+
+  while (cursor <= target) {
+    const y = cursor.getFullYear();
+    let rate;
+    if (y < 2026) {
+      rate = boundary === "floor" ? -BAND_CRAWL_RATE_MONTHLY : BAND_CRAWL_RATE_MONTHLY;
+    } else {
+      const ipcCursor = new Date(cursor);
+      ipcCursor.setMonth(ipcCursor.getMonth() - 2);
+      const ipcKey = `${ipcCursor.getFullYear()}-${String(ipcCursor.getMonth() + 1).padStart(2, "0")}`;
+      const ipc = remIpcByMonth[ipcKey];
+      const monthlyInfl = ipc != null ? ipc / 100 : 0.02;
+      rate = boundary === "floor" ? -monthlyInfl : monthlyInfl;
+    }
+    value = value * (1 + rate);
+    cursor.setMonth(cursor.getMonth() + 1);
+  }
+
+  return value;
+}
+
+function projectREMTC(targetDate, remTcByMonth = {}) {
+  const target = new Date(targetDate + "T00:00:00");
+  const targetYM = `${target.getFullYear()}-${String(target.getMonth() + 1).padStart(2, "0")}`;
+  if (remTcByMonth[targetYM] != null) return remTcByMonth[targetYM];
+  const sortedKeys = Object.keys(remTcByMonth).sort();
+  let lastBefore = null;
+  for (const k of sortedKeys) {
+    if (k <= targetYM) lastBefore = k;
+  }
+  return lastBefore ? remTcByMonth[lastBefore] : null;
+}
+
+function CarryTradeModule() {
+  const [mode, setMode] = useState("byDollar");
+  const [bondsRaw, setBondsRaw] = useState([]);
+  const [remTc, setRemTc] = useState({});
+  const [remIpc, setRemIpc] = useState({});
+  const [fxRates, setFxRates] = useState({}); // { oficial, blue, mep, ccl }
+  const [scenario, setScenario] = useState("ceiling");
+  const [manualUsd, setManualUsd] = useState(""); // input modo manual
+  const [usdAmount, setUsdAmount] = useState(1000);
+  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [error, setError] = useState(null);
+  const [lastFetch, setLastFetch] = useState(null);
+  const [now, setNow] = useState(new Date());
+  const [intervalMode, setIntervalMode] = useState(isActiveMarketWindow() ? "active" : "idle");
+
+  useEffect(() => {
+    const i = setInterval(() => {
+      setNow(new Date());
+      setIntervalMode(isActiveMarketWindow() ? "active" : "idle");
+    }, 1000);
+    return () => clearInterval(i);
+  }, []);
+
+  const fetchAll = async (isManual = false) => {
+    if (isManual) setRefreshing(true);
+    else if (bondsRaw.length === 0) setLoading(true);
+
+    try {
+      // 1) Bonos (data912)
+      const bondsRes = await fetch("/api/bonos");
+      if (!bondsRes.ok) throw new Error("API bonos respondió " + bondsRes.status);
+      const bonds = await bondsRes.json();
+      setBondsRaw(bonds);
+
+      // 2) Cotizaciones FX desde dolarapi
+      try {
+        const fxRes = await fetch("/api/dolares");
+        if (fxRes.ok) {
+          const fx = await fxRes.json();
+          const rates = {};
+          fx.forEach((d) => {
+            const casa = (d.casa || "").toLowerCase();
+            if (casa === "oficial") rates.oficial = d.venta;
+            else if (casa === "blue") rates.blue = d.venta;
+            else if (casa === "bolsa") rates.mep = d.venta;
+            else if (casa === "contadoconliqui") rates.ccl = d.venta;
+          });
+          setFxRates(rates);
+        }
+      } catch (e) { console.warn("FX fetch failed", e); }
+
+      // 3) REM tipo de cambio
+      try {
+        const remRes = await fetch("/api/rem-tipo-cambio");
+        if (remRes.ok) {
+          const remData = await remRes.json();
+          const map = {};
+          (remData.datos || []).forEach((d) => {
+            if (d.periodo && d.mediana != null) map[d.periodo] = d.mediana;
+          });
+          setRemTc(map);
+        }
+      } catch (e) { console.warn("REM tipo_cambio failed", e); }
+
+      // 4) REM IPC
+      try {
+        const ipcRes = await fetch("/api/rem-ipc");
+        if (ipcRes.ok) {
+          const ipcData = await ipcRes.json();
+          const map = {};
+          (ipcData.datos || []).forEach((d) => {
+            if (d.periodo && d.mediana != null) map[d.periodo] = d.mediana;
+          });
+          setRemIpc(map);
+        }
+      } catch (e) { console.warn("REM ipc_general failed", e); }
+
+      setError(null);
+      setLastFetch(new Date());
+    } catch (e) {
+      setError(e.message || "Error al cargar datos");
+    } finally {
+      setLoading(false);
+      setRefreshing(false);
+    }
+  };
+
+  useEffect(() => { fetchAll(); /* eslint-disable-next-line */ }, []);
+
+  useEffect(() => {
+    let timeoutId;
+    const schedule = () => {
+      const ms = getRefreshIntervalMs();
+      timeoutId = setTimeout(() => { fetchAll(); schedule(); }, ms);
+    };
+    schedule();
+    return () => clearTimeout(timeoutId);
+    // eslint-disable-next-line
+  }, [intervalMode]);
+
+  // Procesamiento base de bonos: filtra Lecaps/Boncaps + agrega métricas comunes
+  const processedBonds = useMemo(() => {
+    if (bondsRaw.length === 0) return [];
+
+    return bondsRaw
+      .map((row) => {
+        const ticker = row.symbol;
+        const resolved = resolveBond(ticker);
+        if (!resolved) return null;
+
+        const days = daysToMaturity(resolved.maturityDate);
+        if (days <= 0) return null;
+
+        const priceArs = (row.px_ask || row.c) ? ((row.px_ask || row.c) / 100) : null;
+        if (!priceArs || priceArs <= 0) return null;
+
+        // Asume VN=$100 al vencimiento
+        const valorFinal = 100;
+        const roiArs = valorFinal / priceArs - 1;
+        const tirAnual = Math.pow(1 + roiArs, 365 / days) - 1;
+        const tem = Math.pow(1 + roiArs, 30 / days) - 1;
+        const tea = Math.pow(1 + tem, 12) - 1;
+
+        return {
+          ticker,
+          type: resolved.type,
+          source: resolved.source,
+          maturityDate: resolved.maturityDate,
+          days,
+          priceArs,
+          valorFinal,
+          roiArs,
+          tirAnual,
+          tem,
+          tea,
+        };
+      })
+      .filter(Boolean)
+      .sort((a, b) => a.days - b.days);
+  }, [bondsRaw]);
+
+  // Bonos separados por tipo (para tablas separadas en modo "Por Dólar")
+  const lecaps = processedBonds.filter((b) => b.type === "lecap");
+  const boncaps = processedBonds.filter((b) => b.type === "boncap");
+
+  // Cálculo del dólar de equilibrio
+  // Eq = dolar_actual × (valorFinal / priceArs)
+  const equilibriumFor = (bond, fxNow) => {
+    if (!fxNow || !bond) return null;
+    return fxNow * (bond.valorFinal / bond.priceArs);
+  };
+
+  // Breakeven anual: la devaluación anual necesaria para empatar
+  // Si mantenés N días, breakeven_total = (Eq/dolarActual) - 1
+  // Anualizado: (1 + bk_total)^(365/dias) - 1
+  const breakevenAnual = (bond, fxNow) => {
+    if (!fxNow || !bond) return null;
+    const eq = equilibriumFor(bond, fxNow);
+    const bkTotal = eq / fxNow - 1;
+    return Math.pow(1 + bkTotal, 365 / bond.days) - 1;
+  };
+
+  // Para Modo Bandas: dólar de salida según escenario
+  const exitFxByScenario = (bond) => ({
+    floor: projectBand(bond.maturityDate, "floor", remIpc),
+    ceiling: projectBand(bond.maturityDate, "ceiling", remIpc),
+    rem: projectREMTC(bond.maturityDate, remTc),
+  });
+
+  // ROI USD = (capital_final_ARS / dolar_salida) / capital_inicial_USD - 1
+  const roiUsd = (bond, exitFx, mepEntry) => {
+    if (!exitFx || !mepEntry) return null;
+    const arsInvested = usdAmount * mepEntry;
+    const arsAtMaturity = arsInvested * (1 + bond.roiArs);
+    return (arsAtMaturity / exitFx) / usdAmount - 1;
+  };
+
+  const isStale = lastFetch && (now - lastFetch) / 1000 > (intervalMode === "active" ? 90 : 1900);
+  const activeMode = CARRY_MODES.find((m) => m.id === mode);
+
+  return (
+    <div className="px-6 py-5 eco-fade-in" style={{ minHeight: "100%" }}>
+      {/* Header */}
+      <div className="flex items-start justify-between gap-6 mb-5 flex-wrap">
+        <div className="flex flex-col gap-1.5">
+          <span style={{ fontSize: 9, color: C.dim, letterSpacing: "0.22em", textTransform: "uppercase", fontWeight: 500 }}>
+            Analizadores · Carry Trade
+          </span>
+          <h1 className="eco-display" style={{ fontSize: 24, fontWeight: 700, letterSpacing: "-0.01em", color: C.text, lineHeight: 1.1, margin: 0 }}>
+            Carry Trade Terminal
+          </h1>
+          <p style={{ fontSize: 11.5, color: C.muted, letterSpacing: "0.005em", maxWidth: 680, margin: "4px 0 0 0", lineHeight: 1.5 }}>
+            Vendés USD a MEP, comprás bono en pesos, mantenés al vencimiento, recomprás USD. Análisis bajo distintos escenarios.
+          </p>
+        </div>
+        <div className="flex items-center gap-2.5 flex-shrink-0">
+          <StatusPill error={error} loading={loading || refreshing} isStale={isStale} lastFetch={lastFetch} now={now} />
+          <RefreshButton onClick={() => fetchAll(true)} spinning={refreshing} />
+        </div>
+      </div>
+
+      {/* Error inline */}
+      {error && (
+        <div className="flex items-start gap-3 p-4 mb-5" style={{ backgroundColor: "rgba(248,113,113,0.08)", border: `1px solid rgba(248,113,113,0.25)` }}>
+          <AlertTriangle size={16} color={C.red} strokeWidth={1.8} />
+          <div className="flex flex-col gap-0.5">
+            <span style={{ fontSize: 12, color: C.text, fontWeight: 500 }}>No se pudieron cargar los datos</span>
+            <span style={{ fontSize: 11, color: C.muted }}>{error}</span>
+          </div>
+        </div>
+      )}
+
+      {/* MODE TOGGLE */}
+      <SectionLabel>Modo de Análisis</SectionLabel>
+      <div className="grid gap-3 mb-6" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))" }}>
+        {CARRY_MODES.map((m) => (
+          <ModeCard key={m.id} mode={m} active={mode === m.id} onClick={() => setMode(m.id)} />
+        ))}
+      </div>
+
+      {/* CONTENIDO POR MODO */}
+      {mode === "byDollar" && (
+        <ByDollarMode
+          lecaps={lecaps}
+          boncaps={boncaps}
+          fxRates={fxRates}
+          loading={loading}
+          equilibriumFor={equilibriumFor}
+          breakevenAnual={breakevenAnual}
+        />
+      )}
+
+      {mode === "byBands" && (
+        <ByBandsMode
+          bonds={processedBonds}
+          fxRates={fxRates}
+          scenario={scenario}
+          setScenario={setScenario}
+          usdAmount={usdAmount}
+          setUsdAmount={setUsdAmount}
+          loading={loading}
+          exitFxByScenario={exitFxByScenario}
+          roiUsd={roiUsd}
+        />
+      )}
+
+      {mode === "manual" && (
+        <ManualMode
+          bonds={processedBonds}
+          fxRates={fxRates}
+          manualUsd={manualUsd}
+          setManualUsd={setManualUsd}
+          usdAmount={usdAmount}
+          setUsdAmount={setUsdAmount}
+          loading={loading}
+          roiUsd={roiUsd}
+        />
+      )}
+
+      {/* Footer */}
+      <div className="flex flex-wrap items-center gap-2 mt-7" style={{ fontSize: 10, color: C.dim, letterSpacing: "0.10em", textTransform: "uppercase" }}>
+        <span>fuentes:</span>
+        <span style={{ color: C.muted }}>data912.com</span>
+        <span style={{ color: C.faint }}>·</span>
+        <span style={{ color: C.muted }}>API REM (BCRA)</span>
+        <span style={{ color: C.faint }}>·</span>
+        <span style={{ color: C.muted }}>dolarapi.com</span>
+        <span style={{ color: C.faint }}>·</span>
+        <span>auto-refresh:</span>
+        <span style={{ color: C.muted }}>
+          {intervalMode === "active" ? "60s · horario hábil" : "30 min · fuera de horario"}
+        </span>
+        <span style={{ color: C.faint }}>·</span>
+        <span>última act:</span>
+        <span style={{ color: C.muted }}>{timeAgo(lastFetch, now)}</span>
+      </div>
+
+      <p style={{ fontSize: 10, color: C.dim, marginTop: 12, lineHeight: 1.5, maxWidth: 720 }}>
+        Precios de data912.com con delay ~2h respecto a BYMA. Cálculo asume VN=$100 al vencimiento (Lecaps/Boncaps capitalizables).
+        Bandas BCRA: crawling 1%/mes hasta 31/12/2025, luego inflación T-2 del REM. Para operaciones reales consultar tu plataforma de trading.
+      </p>
+    </div>
+  );
+}
+
+/* ─────────── ModeCard (toggle) ─────────── */
+
+function ModeCard({ mode, active, onClick }) {
+  const Icon = mode.icon;
+  return (
+    <button
+      onClick={onClick}
+      className="eco-mode-card"
+      style={{
+        cursor: "pointer",
+        textAlign: "left",
+        padding: "14px 16px",
+        backgroundColor: active ? mode.soft : C.panel,
+        border: `1px solid ${active ? mode.border : C.border}`,
+        borderTop: `2px solid ${active ? mode.color : C.border}`,
+        color: "inherit",
+        fontFamily: "inherit",
+        position: "relative",
+      }}
+    >
+      <div className="flex items-center gap-2.5 mb-2">
+        <span
+          style={{
+            width: 28,
+            height: 28,
+            backgroundColor: active ? mode.color : C.deep,
+            border: `1px solid ${active ? "transparent" : C.border}`,
+            display: "inline-flex",
+            alignItems: "center",
+            justifyContent: "center",
+            flexShrink: 0,
+            transition: "background-color 0.18s ease",
+          }}
+        >
+          <Icon size={14} color={active ? C.bg : mode.color} strokeWidth={2} />
+        </span>
+        <span
+          className="eco-display"
+          style={{
+            fontSize: 14,
+            fontWeight: 700,
+            color: active ? mode.color : C.text,
+            letterSpacing: "-0.005em",
+          }}
+        >
+          {mode.label}
+        </span>
+      </div>
+      <p style={{ fontSize: 11, color: C.muted, margin: 0, letterSpacing: "0.005em", lineHeight: 1.4 }}>
+        {mode.sublabel}
+      </p>
+      {active && (
+        <span
+          style={{
+            position: "absolute",
+            top: 10,
+            right: 10,
+            width: 6,
+            height: 6,
+            borderRadius: "50%",
+            backgroundColor: mode.color,
+            boxShadow: `0 0 8px ${mode.color}`,
+          }}
+        />
+      )}
+    </button>
+  );
+}
+
+/* ─────────── Modo 1: Por Dólar ─────────── */
+
+function ByDollarMode({ lecaps, boncaps, fxRates, loading, equilibriumFor, breakevenAnual }) {
+  return (
+    <>
+      {/* KPIs de cotizaciones */}
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-5">
+        <FxKpi label="Oficial" value={fxRates.oficial} color={C.cat.cyan} />
+        <FxKpi label="MEP" value={fxRates.mep} color={C.cat.emerald} />
+        <FxKpi label="Blue" value={fxRates.blue} color={C.cat.violet} />
+        <FxKpi label="CCL" value={fxRates.ccl} color={C.cat.yellow} />
+      </div>
+
+      {/* Tabla LECAPs */}
+      <SectionLabel>LECAPs · Letras Capitalizables</SectionLabel>
+      <EquilibriumTable
+        bonds={lecaps}
+        fxRates={fxRates}
+        loading={loading}
+        equilibriumFor={equilibriumFor}
+        breakevenAnual={breakevenAnual}
+        accentTop={C.cat.cyan}
+      />
+
+      {/* Tabla BONCAPs */}
+      <div className="mt-6">
+        <SectionLabel>BONCAPs · Bonos Capitalizables</SectionLabel>
+        <EquilibriumTable
+          bonds={boncaps}
+          fxRates={fxRates}
+          loading={loading}
+          equilibriumFor={equilibriumFor}
+          breakevenAnual={breakevenAnual}
+          accentTop={C.cat.lime}
+        />
+      </div>
+    </>
+  );
+}
+
+function FxKpi({ label, value, color }) {
+  return (
+    <div style={{ backgroundColor: C.panel, borderTop: `2px solid ${color}`, padding: "12px 14px" }}>
+      <div style={{ fontSize: 9, color: C.dim, letterSpacing: "0.18em", textTransform: "uppercase", fontWeight: 500 }}>
+        {label}
+      </div>
+      <div className="eco-mono" style={{ fontSize: 19, color: C.text, fontWeight: 600, marginTop: 4, letterSpacing: "-0.005em" }}>
+        {value != null ? `$${fmtARS(value)}` : "—"}
+      </div>
+    </div>
+  );
+}
+
+function EquilibriumTable({ bonds, fxRates, loading, equilibriumFor, breakevenAnual, accentTop }) {
+  if (loading) {
+    return (
+      <div style={{ backgroundColor: C.panel, borderTop: `2px solid ${accentTop}`, padding: "40px 18px" }} className="flex items-center justify-center">
+        <Loader2 size={18} color={C.accent} className="eco-spin" strokeWidth={1.8} />
+      </div>
+    );
+  }
+  if (bonds.length === 0) {
+    return (
+      <div style={{ backgroundColor: C.panel, borderTop: `2px solid ${accentTop}`, padding: "40px 18px", color: C.muted, fontSize: 12 }} className="flex items-center justify-center">
+        Sin bonos disponibles
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ backgroundColor: C.panel, borderTop: `2px solid ${accentTop}`, padding: "10px 14px" }}>
+      <div style={{ overflowX: "auto" }}>
+        <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 820 }}>
+          <thead>
+            <tr style={{ borderBottom: `1px solid ${C.border}` }}>
+              <Th align="left">Ticker</Th>
+              <Th align="right">Precio</Th>
+              <Th align="right">Días</Th>
+              <Th align="right">Eq. Oficial</Th>
+              <Th align="right">Eq. MEP</Th>
+              <Th align="right">Eq. Blue</Th>
+              <Th align="right">Eq. CCL</Th>
+              <Th align="right">Breakeven anual</Th>
+            </tr>
+          </thead>
+          <tbody>
+            {bonds.map((b) => {
+              // Para el breakeven anual usamos MEP como referencia (es el más usado)
+              const bkAnual = breakevenAnual(b, fxRates.mep);
+              const bkColor = bkColorFromValue(bkAnual);
+              return (
+                <tr key={b.ticker} className="eco-table-row" style={{ borderBottom: `1px solid ${C.border}` }}>
+                  <Td align="left">
+                    <span style={{ color: typeColor(b.type), fontWeight: 600, fontSize: 13 }}>{b.ticker}</span>
+                  </Td>
+                  <Td align="right" mono>${fmtARS(b.priceArs)}</Td>
+                  <Td align="right" mono><span style={{ color: C.muted }}>{b.days}</span></Td>
+                  <Td align="right" mono>{eqCell(equilibriumFor(b, fxRates.oficial))}</Td>
+                  <Td align="right" mono>{eqCell(equilibriumFor(b, fxRates.mep))}</Td>
+                  <Td align="right" mono>{eqCell(equilibriumFor(b, fxRates.blue))}</Td>
+                  <Td align="right" mono>{eqCell(equilibriumFor(b, fxRates.ccl))}</Td>
+                  <Td align="right" mono>
+                    <span style={{ color: bkColor, fontWeight: 600 }}>
+                      {bkAnual != null ? fmtPct(bkAnual * 100) : "—"}
+                    </span>
+                  </Td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+function eqCell(v) {
+  if (v == null) return "—";
+  return `$${fmtARS(v)}`;
+}
+
+// Verde = bajo (poca devaluación necesaria, mucho margen). Rojo = alto.
+function bkColorFromValue(bk) {
+  if (bk == null) return C.muted;
+  if (bk < 0.10) return "#4ADE80";    // < 10% verde fuerte
+  if (bk < 0.20) return "#A3E635";    // 10-20% verde claro
+  if (bk < 0.30) return "#FACC15";    // 20-30% amarillo
+  if (bk < 0.40) return "#FB923C";    // 30-40% naranja
+  return "#F87171";                    // > 40% rojo
+}
+
+/* ─────────── Modo 2: Bandas BCRA + REM ─────────── */
+
+function ByBandsMode({ bonds, fxRates, scenario, setScenario, usdAmount, setUsdAmount, loading, exitFxByScenario, roiUsd }) {
+  const mepEntry = fxRates.mep;
+  const activeScenarioObj = SCENARIOS.find((s) => s.id === scenario);
+
+  const enriched = bonds.map((b) => {
+    const fx = exitFxByScenario(b);
+    return {
+      ...b,
+      exitFx: fx,
+      roiUsdScenario: roiUsd(b, fx[scenario], mepEntry),
+    };
+  });
+
+  const leadBond = enriched
+    .filter((b) => b.roiUsdScenario != null)
+    .reduce((a, b) => (a == null || b.roiUsdScenario > a.roiUsdScenario ? b : a), null);
+
+  return (
+    <>
+      {/* Inputs row: MEP de entrada (read only) + Monto USD */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-5">
+        <FxKpi label="MEP de Entrada" value={mepEntry} color={C.accent} />
+        <UsdInputCard usdAmount={usdAmount} setUsdAmount={setUsdAmount} mep={mepEntry} />
+      </div>
+
+      {/* Scenario tabs */}
+      <SectionLabel>Escenario de Salida</SectionLabel>
+      <div className="mb-5">
+        <div className="inline-flex gap-1.5 mb-2">
+          {SCENARIOS.map((s) => (
+            <PillButton
+              key={s.id}
+              active={scenario === s.id}
+              onClick={() => setScenario(s.id)}
+              label={s.label}
+              activeColor={s.color}
+            />
+          ))}
+        </div>
+        <p style={{ fontSize: 11, color: C.muted, marginTop: 4, marginBottom: 0 }}>
+          {activeScenarioObj?.desc}
+        </p>
+      </div>
+
+      {/* Lead bond */}
+      <div className="mb-5">
+        <LeadBondCard bond={leadBond} scenario={scenario} />
+      </div>
+
+      {/* Tabla */}
+      <div style={{ backgroundColor: C.panel, borderTop: `2px solid ${C.accent}`, padding: "16px 18px" }}>
+        <CardHeader icon={BarChart3} iconColor={C.accent} label="Universo de Bonos" />
+        <p style={{ fontSize: 11, color: C.muted, marginTop: -4, marginBottom: 14, fontFamily: "'Roboto', sans-serif" }}>
+          Ordenado por días al vencimiento. ROI USD calculado con escenario activo.
+        </p>
+
+        {loading ? (
+          <div className="flex items-center justify-center py-12">
+            <Loader2 size={18} color={C.accent} className="eco-spin" strokeWidth={1.8} />
+          </div>
+        ) : enriched.length === 0 ? (
+          <div className="flex items-center justify-center py-12" style={{ color: C.muted, fontSize: 12 }}>
+            Sin bonos disponibles
+          </div>
+        ) : (
+          <div style={{ overflowX: "auto" }}>
+            <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 820 }}>
+              <thead>
+                <tr style={{ borderBottom: `1px solid ${C.border}` }}>
+                  <Th align="left">Ticker</Th>
+                  <Th align="left">Tipo</Th>
+                  <Th align="right">Vto</Th>
+                  <Th align="right">Días</Th>
+                  <Th align="right">Precio</Th>
+                  <Th align="right">TIR Anual</Th>
+                  <Th align="right">Dólar Salida</Th>
+                  <Th align="right" emphasized>ROI USD</Th>
+                </tr>
+              </thead>
+              <tbody>
+                {enriched.map((b) => {
+                  const isLead = leadBond && b.ticker === leadBond.ticker;
+                  const roi = b.roiUsdScenario;
+                  const roiColor = roi == null ? C.dim : roi >= 0 ? C.green : C.red;
+                  const exitFx = b.exitFx[scenario];
+                  return (
+                    <tr key={b.ticker} className="eco-table-row" style={{ borderBottom: `1px solid ${C.border}`, backgroundColor: isLead ? "rgba(244,114,182,0.06)" : "transparent" }}>
+                      <Td align="left">
+                        <span style={{ color: typeColor(b.type), fontWeight: 600, fontSize: 13 }}>{b.ticker}</span>
+                        {isLead && (
+                          <span style={{ marginLeft: 8, fontSize: 8, padding: "2px 5px", border: `1px solid ${C.cat.pink}`, color: C.cat.pink, letterSpacing: "0.14em", fontWeight: 600 }}>
+                            LIDER
+                          </span>
+                        )}
+                      </Td>
+                      <Td align="left">
+                        <span style={{ fontSize: 10, color: typeColor(b.type), letterSpacing: "0.10em", textTransform: "uppercase", fontWeight: 600 }}>
+                          {b.type}
+                        </span>
+                      </Td>
+                      <Td align="right" mono>{formatDate(b.maturityDate)}</Td>
+                      <Td align="right" mono><span style={{ color: C.muted }}>{b.days}</span></Td>
+                      <Td align="right" mono>${fmtARS(b.priceArs)}</Td>
+                      <Td align="right" mono><span style={{ color: C.muted }}>{fmtPct(b.tirAnual * 100)}</span></Td>
+                      <Td align="right" mono><span style={{ color: C.muted }}>{exitFx ? `$${fmtARS(exitFx)}` : "—"}</span></Td>
+                      <Td align="right" mono>
+                        <span style={{ color: roiColor, fontWeight: 600 }}>
+                          {roi != null ? fmtPct(roi * 100) : "—"}
+                        </span>
+                      </Td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    </>
+  );
+}
+
+function LeadBondCard({ bond, scenario }) {
+  if (!bond) {
+    return (
+      <div style={{ backgroundColor: C.panel, borderTop: `2px solid ${C.cat.pink}`, padding: "20px 22px", minHeight: 132 }}>
+        <CardHeader icon={Sigma} iconColor={C.cat.pink} label="Bono Líder de Flujo" />
+        <div className="flex items-center justify-center" style={{ minHeight: 80, color: C.dim, fontSize: 12 }}>
+          Esperando datos…
+        </div>
+      </div>
+    );
+  }
+  const roi = bond.roiUsdScenario;
+  const roiColor = roi == null ? C.muted : roi >= 0 ? C.green : C.red;
+  const exitFx = bond.exitFx[scenario];
+
+  return (
+    <div style={{ backgroundColor: C.panel, borderTop: `2px solid ${C.cat.pink}`, padding: "20px 22px" }}>
+      <CardHeader icon={Sigma} iconColor={C.cat.pink} label="Bono Líder de Flujo" />
+      <div className="flex flex-wrap items-end justify-between gap-6 mt-3">
+        <div className="flex flex-col">
+          <span className="eco-display" style={{ fontSize: 32, fontWeight: 700, letterSpacing: "-0.01em", color: C.cat.pink, lineHeight: 1 }}>
+            {bond.ticker}
+          </span>
+          <span style={{ fontSize: 11, color: C.muted, marginTop: 6 }}>
+            {bond.type.toUpperCase()} · Vence {formatDate(bond.maturityDate)} · {bond.days}d
+          </span>
+        </div>
+        <div className="flex flex-wrap gap-5">
+          <Metric label="ROI USD" value={roi != null ? fmtPct(roi * 100) : "—"} color={roiColor} large />
+          <Metric label="ROI ARS" value={fmtPct(bond.roiArs * 100)} color={C.text} large />
+          <Metric label="TIR Anual" value={fmtPct(bond.tirAnual * 100)} color={C.muted} />
+          <Metric label="TEM" value={fmtPct(bond.tem * 100)} color={C.muted} />
+        </div>
+      </div>
+      <div className="flex flex-wrap gap-x-6 gap-y-2 mt-4 pt-3" style={{ borderTop: `1px solid ${C.border}` }}>
+        <KeyVal k="Precio compra" v={`$${fmtARS(bond.priceArs)}`} />
+        <KeyVal k={`Dólar salida (${scenario})`} v={exitFx ? `$${fmtARS(exitFx)}` : "—"} />
+      </div>
+    </div>
+  );
+}
+
+function Metric({ label, value, color, large }) {
+  return (
+    <div className="flex flex-col">
+      <span style={{ fontSize: 9, color: C.dim, letterSpacing: "0.18em", textTransform: "uppercase", fontWeight: 500 }}>
+        {label}
+      </span>
+      <span className="eco-mono" style={{
+        fontSize: large ? 22 : 16,
+        fontWeight: 600,
+        color: color,
+        letterSpacing: "-0.005em",
+        marginTop: 2,
+        lineHeight: 1.05,
+      }}>
+        {value}
+      </span>
+    </div>
+  );
+}
+
+function KeyVal({ k, v }) {
+  return (
+    <div className="flex items-baseline gap-2">
+      <span style={{ fontSize: 10, color: C.dim, letterSpacing: "0.10em", textTransform: "uppercase", fontWeight: 500 }}>{k}:</span>
+      <span className="eco-mono" style={{ fontSize: 12, color: C.text, fontWeight: 500 }}>{v}</span>
+    </div>
+  );
+}
+
+function UsdInputCard({ usdAmount, setUsdAmount, mep }) {
+  return (
+    <div style={{ backgroundColor: C.panel, borderTop: `2px solid ${C.cat.yellow}`, padding: "12px 14px" }}>
+      <div style={{ fontSize: 9, color: C.dim, letterSpacing: "0.18em", textTransform: "uppercase", fontWeight: 500 }}>
+        Monto a Invertir
+      </div>
+      <div className="flex items-baseline gap-2 mt-1">
+        <span style={{ fontSize: 19, color: C.muted, fontWeight: 400 }}>$</span>
+        <input
+          type="number"
+          value={usdAmount}
+          onChange={(e) => setUsdAmount(parseFloat(e.target.value) || 0)}
+          style={{
+            background: "transparent",
+            border: "none",
+            color: C.text,
+            fontSize: 19,
+            fontWeight: 600,
+            fontFamily: "'JetBrains Mono', ui-monospace, monospace",
+            fontVariantNumeric: "tabular-nums",
+            outline: "none",
+            width: "100%",
+            minWidth: 0,
+            padding: 0,
+          }}
+        />
+        <span style={{ fontSize: 10, color: C.dim, letterSpacing: "0.18em", textTransform: "uppercase", fontWeight: 500 }}>
+          USD
+        </span>
+      </div>
+      {mep && (
+        <p style={{ fontSize: 10.5, color: C.dim, marginTop: 6, marginBottom: 0 }}>
+          Equivale a ${fmtARS(usdAmount * mep)} ARS
+        </p>
+      )}
+    </div>
+  );
+}
+
+/* ─────────── Modo 3: Manual ─────────── */
+
+function ManualMode({ bonds, fxRates, manualUsd, setManualUsd, usdAmount, setUsdAmount, loading, roiUsd }) {
+  const mepEntry = fxRates.mep;
+  const customExitFx = parseFloat(manualUsd) || null;
+
+  const enriched = bonds.map((b) => ({
+    ...b,
+    roiUsdManual: roiUsd(b, customExitFx, mepEntry),
+  }));
+
+  const leadBond = customExitFx
+    ? enriched
+        .filter((b) => b.roiUsdManual != null)
+        .reduce((a, b) => (a == null || b.roiUsdManual > a.roiUsdManual ? b : a), null)
+    : null;
+
+  return (
+    <>
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-5">
+        <FxKpi label="MEP Actual" value={mepEntry} color={C.accent} />
+        <UsdInputCard usdAmount={usdAmount} setUsdAmount={setUsdAmount} mep={mepEntry} />
+        <ManualUsdInput value={manualUsd} onChange={setManualUsd} />
+      </div>
+
+      {!customExitFx && (
+        <div style={{ backgroundColor: C.panel, border: `1px dashed ${C.border}`, padding: 24, textAlign: "center", color: C.muted, fontSize: 12 }}>
+          Ingresá un valor de dólar de salida arriba para calcular el ROI USD de los bonos
+        </div>
+      )}
+
+      {customExitFx && (
+        <>
+          {/* Lead bond */}
+          <div className="mb-5">
+            <ManualLeadBond bond={leadBond} customExitFx={customExitFx} />
+          </div>
+
+          {/* Tabla */}
+          <div style={{ backgroundColor: C.panel, borderTop: `2px solid ${C.cat.pink}`, padding: "16px 18px" }}>
+            <CardHeader icon={BarChart3} iconColor={C.cat.pink} label={`ROI con dólar salida = $${fmtARS(customExitFx)}`} />
+            <p style={{ fontSize: 11, color: C.muted, marginTop: -4, marginBottom: 14 }}>
+              Ordenado por días al vencimiento.
+            </p>
+
+            {loading ? (
+              <div className="flex items-center justify-center py-12">
+                <Loader2 size={18} color={C.accent} className="eco-spin" strokeWidth={1.8} />
+              </div>
+            ) : (
+              <div style={{ overflowX: "auto" }}>
+                <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 720 }}>
+                  <thead>
+                    <tr style={{ borderBottom: `1px solid ${C.border}` }}>
+                      <Th align="left">Ticker</Th>
+                      <Th align="left">Tipo</Th>
+                      <Th align="right">Vto</Th>
+                      <Th align="right">Días</Th>
+                      <Th align="right">Precio</Th>
+                      <Th align="right">TIR Anual</Th>
+                      <Th align="right" emphasized>ROI USD</Th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {enriched.map((b) => {
+                      const isLead = leadBond && b.ticker === leadBond.ticker;
+                      const roi = b.roiUsdManual;
+                      const roiColor = roi == null ? C.dim : roi >= 0 ? C.green : C.red;
+                      return (
+                        <tr key={b.ticker} className="eco-table-row" style={{ borderBottom: `1px solid ${C.border}`, backgroundColor: isLead ? "rgba(244,114,182,0.06)" : "transparent" }}>
+                          <Td align="left">
+                            <span style={{ color: typeColor(b.type), fontWeight: 600, fontSize: 13 }}>{b.ticker}</span>
+                            {isLead && (
+                              <span style={{ marginLeft: 8, fontSize: 8, padding: "2px 5px", border: `1px solid ${C.cat.pink}`, color: C.cat.pink, letterSpacing: "0.14em", fontWeight: 600 }}>
+                                LIDER
+                              </span>
+                            )}
+                          </Td>
+                          <Td align="left">
+                            <span style={{ fontSize: 10, color: typeColor(b.type), letterSpacing: "0.10em", textTransform: "uppercase", fontWeight: 600 }}>
+                              {b.type}
+                            </span>
+                          </Td>
+                          <Td align="right" mono>{formatDate(b.maturityDate)}</Td>
+                          <Td align="right" mono><span style={{ color: C.muted }}>{b.days}</span></Td>
+                          <Td align="right" mono>${fmtARS(b.priceArs)}</Td>
+                          <Td align="right" mono><span style={{ color: C.muted }}>{fmtPct(b.tirAnual * 100)}</span></Td>
+                          <Td align="right" mono>
+                            <span style={{ color: roiColor, fontWeight: 600 }}>
+                              {roi != null ? fmtPct(roi * 100) : "—"}
+                            </span>
+                          </Td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        </>
+      )}
+    </>
+  );
+}
+
+function ManualUsdInput({ value, onChange }) {
+  return (
+    <div style={{ backgroundColor: C.panel, borderTop: `2px solid ${C.cat.pink}`, padding: "12px 14px" }}>
+      <div style={{ fontSize: 9, color: C.dim, letterSpacing: "0.18em", textTransform: "uppercase", fontWeight: 500 }}>
+        Dólar de Salida (Manual)
+      </div>
+      <div className="flex items-baseline gap-2 mt-1">
+        <span style={{ fontSize: 19, color: C.muted, fontWeight: 400 }}>$</span>
+        <input
+          type="number"
+          value={value}
+          placeholder="ej. 1850"
+          onChange={(e) => onChange(e.target.value)}
+          style={{
+            background: "transparent",
+            border: "none",
+            color: C.text,
+            fontSize: 19,
+            fontWeight: 600,
+            fontFamily: "'JetBrains Mono', ui-monospace, monospace",
+            fontVariantNumeric: "tabular-nums",
+            outline: "none",
+            width: "100%",
+            minWidth: 0,
+            padding: 0,
+          }}
+        />
+        <span style={{ fontSize: 10, color: C.dim, letterSpacing: "0.18em", textTransform: "uppercase", fontWeight: 500 }}>
+          ARS
+        </span>
+      </div>
+      <p style={{ fontSize: 10.5, color: C.dim, marginTop: 6, marginBottom: 0 }}>
+        Tu escenario al vencimiento
+      </p>
+    </div>
+  );
+}
+
+function ManualLeadBond({ bond, customExitFx }) {
+  if (!bond) return null;
+  const roi = bond.roiUsdManual;
+  const roiColor = roi == null ? C.muted : roi >= 0 ? C.green : C.red;
+
+  return (
+    <div style={{ backgroundColor: C.panel, borderTop: `2px solid ${C.cat.pink}`, padding: "20px 22px" }}>
+      <CardHeader icon={Sigma} iconColor={C.cat.pink} label="Bono Líder con tu Escenario" />
+      <div className="flex flex-wrap items-end justify-between gap-6 mt-3">
+        <div className="flex flex-col">
+          <span className="eco-display" style={{ fontSize: 32, fontWeight: 700, color: C.cat.pink, lineHeight: 1 }}>
+            {bond.ticker}
+          </span>
+          <span style={{ fontSize: 11, color: C.muted, marginTop: 6 }}>
+            {bond.type.toUpperCase()} · Vence {formatDate(bond.maturityDate)} · {bond.days}d
+          </span>
+        </div>
+        <div className="flex flex-wrap gap-5">
+          <Metric label="ROI USD" value={roi != null ? fmtPct(roi * 100) : "—"} color={roiColor} large />
+          <Metric label="ROI ARS" value={fmtPct(bond.roiArs * 100)} color={C.text} large />
+          <Metric label="Dólar salida" value={`$${fmtARS(customExitFx)}`} color={C.muted} />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ─────────── Helpers compartidos ─────────── */
+
+function typeColor(type) {
+  switch (type) {
+    case "lecap": return C.cat.cyan;
+    case "boncap": return C.cat.lime;
+    case "dual": return C.cat.violet;
+    case "cer": return C.cat.pink;
+    default: return C.text;
+  }
+}
+
+function formatDate(iso) {
+  if (!iso) return "—";
+  const d = new Date(iso + "T00:00:00");
+  return d.toLocaleDateString("es-AR", { day: "2-digit", month: "short", year: "2-digit" }).replace(/\./g, "");
 }
