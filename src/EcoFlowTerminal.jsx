@@ -2625,11 +2625,21 @@ function ByDollarMode({ lecaps, boncaps, fxRates, loading, equilibriumFor, carry
 
 function FxKpi({ label, value, color }) {
   return (
-    <div style={{ backgroundColor: C.panel, borderTop: `2px solid ${color}`, padding: "12px 14px" }}>
+    <div
+      style={{
+        backgroundColor: C.panel,
+        borderTop: `2px solid ${color}`,
+        padding: "8px 12px",
+        display: "flex",
+        alignItems: "baseline",
+        justifyContent: "space-between",
+        gap: 10,
+      }}
+    >
       <div style={{ fontSize: 9, color: C.dim, letterSpacing: "0.18em", textTransform: "uppercase", fontWeight: 500 }}>
         {label}
       </div>
-      <div className="eco-mono" style={{ fontSize: 19, color: C.text, fontWeight: 600, marginTop: 4, letterSpacing: "-0.005em" }}>
+      <div className="eco-mono" style={{ fontSize: 14, color: C.text, fontWeight: 600, letterSpacing: "-0.005em" }}>
         {value != null ? `$${fmtARS(value)}` : "—"}
       </div>
     </div>
