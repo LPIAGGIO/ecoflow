@@ -144,7 +144,8 @@ export function daysToMaturity(maturityDate) {
 /**
  * Decide si un ticker debe ser ignorado del universo de carry trade.
  * Excluimos: X tickers (versión MEP duplicada), bonos hard-dollar,
- * Duales (precios de data912 inconsistentes con el resto), y
+ * Duales (precios de data912 inconsistentes con el resto),
+ * Boncaps TT* (no están en rendimientos.co — sin finalPayoff verificado), y
  * cualquier cosa que no matchee los patrones del Tesoro.
  *
  * @returns true si debe IGNORARSE
@@ -156,6 +157,9 @@ export function shouldIgnoreTicker(ticker) {
   if (t.startsWith("X")) return true;
   // CER puros (no en V1)
   if (t.startsWith("BU") || t.startsWith("D30") || t.startsWith("M31") || t.startsWith("DI")) return true;
+  // Boncaps TT*: no aparecen en rendimientos.co, no tenemos finalPayoff verificado.
+  // Sin él, las cuentas dan negativos absurdos. Quedan fuera hasta que aparezcan en una fuente.
+  if (t.startsWith("TT")) return true;
   // Duales (terminan en "D"): precios de data912 vienen en formato distinto.
   // Quedan fuera de V1 hasta calibrar el factor de conversión correcto.
   if (t.endsWith("D")) return true;
