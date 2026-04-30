@@ -2247,19 +2247,26 @@ function CarryTradeModule() {
   const processedBonds = useMemo(() => {
     if (bondsRaw.length === 0) return [];
 
-    return bondsRaw
+    // Diagnóstico para consola del navegador
+    const accepted = [];
+    const rejectedNoMap = [];
+    const rejectedExpired = [];
+    const rejectedNoPrice = [];
+
+    const result = bondsRaw
       .map((row) => {
         const ticker = row.symbol;
         const resolved = resolveBond(ticker);
-        if (!resolved) return null;
+        if (!resolved) { rejectedNoMap.push(ticker); return null; }
 
         const days = daysToMaturity(resolved.maturityDate);
-        if (days <= 0) return null;
+        if (days <= 0) { rejectedExpired.push(ticker); return null; }
 
-        const priceArs = (row.px_ask || row.c) ? ((row.px_ask || row.c) / 100) : null;
-        if (!priceArs || priceArs <= 0) return null;
+        const priceArs = (row.px_ask || row.c) ? (row.px_ask || row.c) : null;
+        if (!priceArs || priceArs <= 0) { rejectedNoPrice.push(ticker); return null; }
 
-        // Asume VN=$100 al vencimiento
+        accepted.push(ticker);
+
         const valorFinal = 100;
         const roiArs = valorFinal / priceArs - 1;
         const tirAnual = Math.pow(1 + roiArs, 365 / days) - 1;
@@ -2267,21 +2274,26 @@ function CarryTradeModule() {
         const tea = Math.pow(1 + tem, 12) - 1;
 
         return {
-          ticker,
-          type: resolved.type,
-          source: resolved.source,
-          maturityDate: resolved.maturityDate,
-          days,
-          priceArs,
-          valorFinal,
-          roiArs,
-          tirAnual,
-          tem,
-          tea,
+          ticker, type: resolved.type, source: resolved.source,
+          maturityDate: resolved.maturityDate, days, priceArs, valorFinal,
+          roiArs, tirAnual, tem, tea,
         };
       })
       .filter(Boolean)
       .sort((a, b) => a.days - b.days);
+
+    // Solo loggear si hay diferencia respecto a la última corrida
+    if (typeof window !== "undefined") {
+      console.log("🔍 [Carry Trade] Diagnóstico de bonos:", {
+        totalRecibidos: bondsRaw.length,
+        aceptados: accepted,
+        rechazadosSinMapa: rejectedNoMap,
+        rechazadosVencidos: rejectedExpired,
+        rechazadosSinPrecio: rejectedNoPrice,
+      });
+    }
+
+    return result;
   }, [bondsRaw]);
 
   // Bonos separados por tipo (para tablas separadas en modo "Por Dólar")
@@ -2796,7 +2808,7 @@ function LeadBondCard({ bond, scenario }) {
 
 function Metric({ label, value, color, large }) {
   return (
-    <div className="flex flex-col">
+    <div className="flex flex-col" style={{ minWidth: 0, maxWidth: 180 }}>
       <span style={{ fontSize: 9, color: C.dim, letterSpacing: "0.18em", textTransform: "uppercase", fontWeight: 500 }}>
         {label}
       </span>
@@ -2807,6 +2819,9 @@ function Metric({ label, value, color, large }) {
         letterSpacing: "-0.005em",
         marginTop: 2,
         lineHeight: 1.05,
+        overflow: "hidden",
+        textOverflow: "ellipsis",
+        whiteSpace: "nowrap",
       }}>
         {value}
       </span>
