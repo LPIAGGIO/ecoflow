@@ -37,6 +37,7 @@ import {
   RefreshCw,
   AlertTriangle,
   Loader2,
+  Info,
   ArrowUp,
   ArrowDown,
   Pencil,
@@ -2545,6 +2546,24 @@ function ByDollarMode({ lecaps, boncaps, fxRates, loading, equilibriumFor, break
         <FxKpi label="MEP" value={fxRates.mep} color={C.cat.emerald} />
         <FxKpi label="Blue" value={fxRates.blue} color={C.cat.violet} />
         <FxKpi label="CCL" value={fxRates.ccl} color={C.cat.yellow} />
+      </div>
+
+      {/* Leyenda — explicación de las columnas EQ. */}
+      <div
+        className="flex items-start gap-2 mb-5 px-4 py-3"
+        style={{
+          backgroundColor: "rgba(56, 189, 248, 0.04)",
+          borderLeft: `2px solid ${C.accent}`,
+        }}
+      >
+        <Info size={13} color={C.accent} strokeWidth={1.8} style={{ flexShrink: 0, marginTop: 2 }} />
+        <p style={{ fontSize: 11.5, color: C.muted, margin: 0, lineHeight: 1.5, letterSpacing: "0.005em" }}>
+          Las columnas <span style={{ color: C.text, fontWeight: 500 }}>EQ.</span> muestran el{" "}
+          <span style={{ color: C.text, fontWeight: 500 }}>dólar de equilibrio</span>: el valor
+          que tendría que tener el dólar al vencimiento del bono para que el carry trade empate
+          con haberse quedado en USD. Si el dólar termina <span style={{ color: C.green, fontWeight: 500 }}>por debajo</span> del valor
+          mostrado, el carry trade gana contra USD; si termina <span style={{ color: C.red, fontWeight: 500 }}>por encima</span>, pierde.
+        </p>
       </div>
 
       {/* Tabla LECAPs */}
