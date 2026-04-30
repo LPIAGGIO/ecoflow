@@ -2578,29 +2578,16 @@ function ByDollarMode({ lecaps, boncaps, fxRates, loading, equilibriumFor, carry
         </p>
       </div>
 
-      {/* Tabla LECAPs */}
-      <SectionLabel>LECAPs · Letras Capitalizables</SectionLabel>
+      {/* Tabla unificada: LECAPs + BONCAPs ordenados por días al vencimiento */}
+      <SectionLabel>Letras y Bonos Capitalizables</SectionLabel>
       <EquilibriumTable
-        bonds={lecaps}
+        bonds={[...lecaps, ...boncaps].sort((a, b) => a.days - b.days)}
         fxRates={fxRates}
         loading={loading}
         equilibriumFor={equilibriumFor}
         carryVsMep={carryVsMep}
         accentTop={C.cat.cyan}
       />
-
-      {/* Tabla BONCAPs */}
-      <div className="mt-6">
-        <SectionLabel>BONCAPs · Bonos Capitalizables</SectionLabel>
-        <EquilibriumTable
-          bonds={boncaps}
-          fxRates={fxRates}
-          loading={loading}
-          equilibriumFor={equilibriumFor}
-          carryVsMep={carryVsMep}
-          accentTop={C.cat.lime}
-        />
-      </div>
     </>
   );
 }
@@ -2662,23 +2649,22 @@ function EquilibriumTable({ bonds, fxRates, loading, equilibriumFor, carryVsMep,
                 <tr key={b.ticker} className="eco-table-row" style={{ borderBottom: `1px solid ${C.border}` }}>
                   <Td align="left">
                     <span style={{ color: typeColor(b.type), fontWeight: 600, fontSize: 13 }}>{b.ticker}</span>
-                    {b.type === "dual" && (
-                      <span
-                        style={{
-                          marginLeft: 8,
-                          fontSize: 8,
-                          padding: "2px 6px",
-                          border: `1px solid ${C.cat.violet}`,
-                          color: C.cat.violet,
-                          letterSpacing: "0.16em",
-                          fontWeight: 600,
-                          textTransform: "uppercase",
-                          fontFamily: "'Roboto', sans-serif",
-                        }}
-                      >
-                        Dual
-                      </span>
-                    )}
+                    <span
+                      style={{
+                        marginLeft: 8,
+                        fontSize: 8,
+                        padding: "2px 6px",
+                        border: `1px solid ${typeColor(b.type)}`,
+                        color: typeColor(b.type),
+                        letterSpacing: "0.16em",
+                        fontWeight: 600,
+                        textTransform: "uppercase",
+                        fontFamily: "'Roboto', sans-serif",
+                        opacity: 0.85,
+                      }}
+                    >
+                      {typeLabel(b.type)}
+                    </span>
                   </Td>
                   <Td align="right" mono>${fmtARS(b.priceArs)}</Td>
                   <Td align="right" mono><span style={{ color: C.muted }}>{b.days}</span></Td>
@@ -3136,6 +3122,16 @@ function typeColor(type) {
     case "dual": return C.cat.violet;
     case "cer": return C.cat.pink;
     default: return C.text;
+  }
+}
+
+function typeLabel(type) {
+  switch (type) {
+    case "lecap": return "Lecap";
+    case "boncap": return "Boncap";
+    case "dual": return "Dual";
+    case "cer": return "CER";
+    default: return type;
   }
 }
 
