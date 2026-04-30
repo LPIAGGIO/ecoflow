@@ -2850,7 +2850,7 @@ function ScenarioMatrix({ bonds, fxRates, remIpc, loading }) {
                         borderRight: `3px solid ${C.cat.cyan}`,
                       }}
                     >
-                      Carry MEP
+                      MEP Actual
                     </th>
                   );
                 }
@@ -2860,7 +2860,22 @@ function ScenarioMatrix({ bonds, fxRates, remIpc, loading }) {
                   </Th>
                 );
               })}
-              <Th align="right" emphasized>Carry Techo</Th>
+              <th
+                align="right"
+                style={{
+                  padding: "10px 10px",
+                  fontSize: 9,
+                  color: C.accent,
+                  letterSpacing: "0.18em",
+                  textTransform: "uppercase",
+                  fontWeight: 600,
+                  fontFamily: "'Roboto', sans-serif",
+                  textAlign: "right",
+                  whiteSpace: "nowrap",
+                }}
+              >
+                Carry Techo
+              </th>
             </tr>
           </thead>
           <tbody>
