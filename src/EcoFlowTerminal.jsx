@@ -2804,11 +2804,14 @@ function ScenarioMatrix({ bonds, fxRates, remIpc, loading }) {
   return (
     <div style={{ backgroundColor: C.panel, borderTop: `2px solid ${C.cat.orange}`, padding: "10px 14px" }}>
       <div style={{ overflowX: "auto" }}>
-        <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 1100, fontSize: 12 }}>
+        <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 1300, fontSize: 12 }}>
           <thead>
             <tr style={{ borderBottom: `1px solid ${C.border}` }}>
               <Th align="left">Ticker</Th>
               <Th align="right">Días</Th>
+              <Th align="right">TEM</Th>
+              <Th align="right">TNA</Th>
+              <Th align="right">TEA</Th>
               {scenarios.map((s) => (
                 <Th key={s.label} align="right">
                   Carry {s.label}
@@ -2828,6 +2831,15 @@ function ScenarioMatrix({ bonds, fxRates, remIpc, loading }) {
                   </Td>
                   <Td align="right" mono>
                     <span style={{ color: C.muted }}>{b.days}</span>
+                  </Td>
+                  <Td align="right" mono>
+                    <span style={{ color: C.muted }}>{fmtPct(b.tem * 100)}</span>
+                  </Td>
+                  <Td align="right" mono>
+                    <span style={{ color: C.muted }}>{fmtPct(b.tirAnual * 100)}</span>
+                  </Td>
+                  <Td align="right" mono>
+                    <span style={{ color: C.muted }}>{fmtPct(b.tea * 100)}</span>
                   </Td>
                   {scenarios.map((s) => {
                     const roi = roiUsdAt(b, s.fx);
