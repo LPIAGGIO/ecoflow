@@ -45,13 +45,12 @@ export const BOND_REGISTRY = {
   T31Y7: { type: "boncap", maturityDate: "2027-05-31", finalPayoff: 151.563, capitalizable: true },
   T30J7: { type: "boncap", maturityDate: "2027-06-30", finalPayoff: 156.037, capitalizable: true },
 
-  // ─── Boncaps TT (capitalizables al vto) ───
-  // ⚠️ finalPayoff PENDIENTE de verificar en rendimientos.co.
-  // Mientras tanto se usa fallback (TIR implícita asumiendo VN=$100) que da
-  // valores aproximados pero subestima el rendimiento real.
-  TTJ26: { type: "boncap", maturityDate: "2026-06-30", capitalizable: true },
-  TTS26: { type: "boncap", maturityDate: "2026-09-15", capitalizable: true },
-  TTD26: { type: "boncap", maturityDate: "2026-12-15", capitalizable: true },
+  // ─── Boncaps TT — capitalizables al vto ───
+  // finalPayoff verificado en colab público de carry trade (logos servicios financieros).
+  TTM26: { type: "boncap", maturityDate: "2026-03-16", finalPayoff: 135.238, capitalizable: true },
+  TTJ26: { type: "boncap", maturityDate: "2026-06-30", finalPayoff: 144.629, capitalizable: true },
+  TTS26: { type: "boncap", maturityDate: "2026-09-15", finalPayoff: 152.096, capitalizable: true },
+  TTD26: { type: "boncap", maturityDate: "2026-12-15", finalPayoff: 161.144, capitalizable: true },
 
   // ─── Duales TAMAR (terminan en D) — deshabilitados en V1 vía shouldIgnoreTicker ───
   // Fechas verificadas con cohen.com.ar. Quedan en el mapa para V2.
@@ -144,8 +143,7 @@ export function daysToMaturity(maturityDate) {
 /**
  * Decide si un ticker debe ser ignorado del universo de carry trade.
  * Excluimos: X tickers (versión MEP duplicada), bonos hard-dollar,
- * Duales (precios de data912 inconsistentes con el resto),
- * Boncaps TT* (no están en rendimientos.co — sin finalPayoff verificado), y
+ * Duales (precios de data912 inconsistentes con el resto), y
  * cualquier cosa que no matchee los patrones del Tesoro.
  *
  * @returns true si debe IGNORARSE
@@ -157,9 +155,6 @@ export function shouldIgnoreTicker(ticker) {
   if (t.startsWith("X")) return true;
   // CER puros (no en V1)
   if (t.startsWith("BU") || t.startsWith("D30") || t.startsWith("M31") || t.startsWith("DI")) return true;
-  // Boncaps TT*: no aparecen en rendimientos.co, no tenemos finalPayoff verificado.
-  // Sin él, las cuentas dan negativos absurdos. Quedan fuera hasta que aparezcan en una fuente.
-  if (t.startsWith("TT")) return true;
   // Duales (terminan en "D"): precios de data912 vienen en formato distinto.
   // Quedan fuera de V1 hasta calibrar el factor de conversión correcto.
   if (t.endsWith("D")) return true;
