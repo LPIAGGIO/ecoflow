@@ -2416,6 +2416,7 @@ function CarryTradeModule() {
           loading={loading}
           equilibriumFor={equilibriumFor}
           carryVsMep={carryVsMep}
+          remIpc={remIpc}
         />
       )}
 
@@ -2543,7 +2544,8 @@ function ModeCard({ mode, active, onClick }) {
 
 /* ─────────── Modo 1: Por Dólar ─────────── */
 
-function ByDollarMode({ lecaps, boncaps, fxRates, loading, equilibriumFor, carryVsMep }) {
+function ByDollarMode({ lecaps, boncaps, fxRates, loading, equilibriumFor, carryVsMep, remIpc }) {
+  const allBonds = [...lecaps, ...boncaps].sort((a, b) => a.days - b.days);
   return (
     <>
       {/* KPIs de cotizaciones */}
@@ -2581,13 +2583,24 @@ function ByDollarMode({ lecaps, boncaps, fxRates, loading, equilibriumFor, carry
       {/* Tabla unificada: LECAPs + BONCAPs ordenados por días al vencimiento */}
       <SectionLabel>Letras y Bonos Capitalizables</SectionLabel>
       <EquilibriumTable
-        bonds={[...lecaps, ...boncaps].sort((a, b) => a.days - b.days)}
+        bonds={allBonds}
         fxRates={fxRates}
         loading={loading}
         equilibriumFor={equilibriumFor}
         carryVsMep={carryVsMep}
         accentTop={C.cat.cyan}
       />
+
+      {/* Matriz de Carry vs Escenarios */}
+      <div className="mt-7">
+        <SectionLabel>Matriz de Carry por Escenario</SectionLabel>
+        <ScenarioMatrix
+          bonds={allBonds}
+          fxRates={fxRates}
+          remIpc={remIpc}
+          loading={loading}
+        />
+      </div>
     </>
   );
 }
@@ -2703,6 +2716,159 @@ function carryColorFromValue(carry) {
   if (carry < 0.05)  return "#FACC15";   // 0-5% amarillo (bajo)
   if (carry < 0.15)  return "#A3E635";   // 5-15% verde claro
   return "#4ADE80";                       // > 15% verde fuerte
+}
+
+/* ─────────── Matriz de Carry por Escenario ─────────── */
+
+/**
+ * Devuelve el color de fondo (heatmap) según ROI USD.
+ * Verde fuerte = mucho carry, blanco = neutral, rojo fuerte = pérdida grande.
+ */
+function matrixCellColor(roi) {
+  if (roi == null || isNaN(roi)) return "transparent";
+  // Saturación máxima a ±25%
+  const clamped = Math.max(-0.25, Math.min(0.25, roi));
+  const intensity = Math.abs(clamped) / 0.25; // 0..1
+  if (clamped >= 0) {
+    // Verde: opacity creciente
+    return `rgba(74, 222, 128, ${(intensity * 0.32).toFixed(3)})`;
+  } else {
+    return `rgba(248, 113, 113, ${(intensity * 0.32).toFixed(3)})`;
+  }
+}
+
+function matrixCellTextColor(roi) {
+  if (roi == null || isNaN(roi)) return C.muted;
+  if (roi >= 0.10) return "#4ADE80";
+  if (roi >= 0)    return "#A3E635";
+  if (roi > -0.05) return "#FACC15";
+  if (roi > -0.15) return "#FB923C";
+  return "#F87171";
+}
+
+function ScenarioMatrix({ bonds, fxRates, remIpc, loading }) {
+  const mepNow = fxRates.mep;
+
+  if (loading) {
+    return (
+      <div style={{ backgroundColor: C.panel, borderTop: `2px solid ${C.cat.orange}`, padding: 24, textAlign: "center" }}>
+        <Loader2 size={20} color={C.muted} className="animate-spin inline-block" />
+        <div style={{ fontSize: 12, color: C.muted, marginTop: 8 }}>Cargando datos...</div>
+      </div>
+    );
+  }
+
+  if (!bonds || bonds.length === 0 || !mepNow) {
+    return (
+      <div style={{ backgroundColor: C.panel, borderTop: `2px solid ${C.cat.orange}`, padding: 24, textAlign: "center" }}>
+        <span style={{ fontSize: 12, color: C.muted }}>Sin datos para construir la matriz.</span>
+      </div>
+    );
+  }
+
+  // Centro: MEP actual redondeado a la centena
+  const center = Math.round(mepNow / 100) * 100;
+  // 6 escenarios: -300, -200, -100, 0, +100, +200 respecto al centro
+  const scenarios = [-300, -200, -100, 0, 100, 200].map((delta) => ({
+    label: String(center + delta),
+    fx: center + delta,
+  }));
+
+  // ROI USD para un bono dado un FX de salida.
+  // Fórmula: invierto $1 USD a MEP_now → recibo finalPayoff/priceArs pesos → vendo a fxOut.
+  // ROI USD = (mepNow * (finalPayoff/priceArs)) / fxOut - 1
+  // Equivale a: (1 + roiArs) * (mepNow / fxOut) - 1
+  const roiUsdAt = (bond, fxOut) => {
+    if (!fxOut || !bond || bond.roiArs == null) return null;
+    return (1 + bond.roiArs) * (mepNow / fxOut) - 1;
+  };
+
+  return (
+    <div style={{ backgroundColor: C.panel, borderTop: `2px solid ${C.cat.orange}`, padding: "10px 14px" }}>
+      <div style={{ overflowX: "auto" }}>
+        <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 1100, fontSize: 12 }}>
+          <thead>
+            <tr style={{ borderBottom: `1px solid ${C.border}` }}>
+              <Th align="left">Ticker</Th>
+              <Th align="right">Días</Th>
+              {scenarios.map((s) => (
+                <Th key={s.label} align="right">
+                  Carry {s.label}
+                </Th>
+              ))}
+              <Th align="right" emphasized>Carry Techo</Th>
+            </tr>
+          </thead>
+          <tbody>
+            {bonds.map((b) => {
+              const ceilingFx = projectBand(b.maturityDate, "ceiling", remIpc);
+              const ceilingRoi = roiUsdAt(b, ceilingFx);
+              return (
+                <tr key={b.ticker} className="eco-table-row" style={{ borderBottom: `1px solid ${C.border}` }}>
+                  <Td align="left">
+                    <span style={{ color: typeColor(b.type), fontWeight: 600, fontSize: 12 }}>{b.ticker}</span>
+                  </Td>
+                  <Td align="right" mono>
+                    <span style={{ color: C.muted }}>{b.days}</span>
+                  </Td>
+                  {scenarios.map((s) => {
+                    const roi = roiUsdAt(b, s.fx);
+                    return (
+                      <td
+                        key={s.label}
+                        style={{
+                          padding: "8px 10px",
+                          textAlign: "right",
+                          backgroundColor: matrixCellColor(roi),
+                          fontFamily: "'JetBrains Mono', monospace",
+                          fontVariantNumeric: "tabular-nums",
+                          fontWeight: 600,
+                          color: matrixCellTextColor(roi),
+                        }}
+                      >
+                        {roi != null ? fmtPct(roi * 100) : "—"}
+                      </td>
+                    );
+                  })}
+                  <td
+                    style={{
+                      padding: "8px 10px",
+                      textAlign: "right",
+                      backgroundColor: matrixCellColor(ceilingRoi),
+                      fontFamily: "'JetBrains Mono', monospace",
+                      fontVariantNumeric: "tabular-nums",
+                      fontWeight: 700,
+                      color: matrixCellTextColor(ceilingRoi),
+                      borderLeft: `1px solid ${C.border}`,
+                    }}
+                  >
+                    {ceilingRoi != null ? fmtPct(ceilingRoi * 100) : "—"}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+
+      {/* Leyenda explicativa */}
+      <div
+        className="flex items-start gap-2 mt-4 px-3 py-2"
+        style={{
+          backgroundColor: "rgba(251, 146, 60, 0.04)",
+          borderLeft: `2px solid ${C.cat.orange}`,
+        }}
+      >
+        <Info size={12} color={C.cat.orange} strokeWidth={1.8} style={{ flexShrink: 0, marginTop: 2 }} />
+        <p style={{ fontSize: 11, color: C.muted, margin: 0, lineHeight: 1.5 }}>
+          Cada celda muestra el <span style={{ color: C.text, fontWeight: 500 }}>retorno en USD</span> si entrás a MEP actual ($
+          {fmtARS(mepNow)}) y vendés al dólar de la columna al vencimiento del bono. La columna{" "}
+          <span style={{ color: C.text, fontWeight: 500 }}>Carry Techo</span> usa el techo de la banda BCRA proyectado a la fecha
+          de vto del bono (crawling 1%/mes hasta dic-2025, luego REM IPC T-2).
+        </p>
+      </div>
+    </div>
+  );
 }
 
 /* ─────────── Modo 2: Bandas BCRA + REM ─────────── */
