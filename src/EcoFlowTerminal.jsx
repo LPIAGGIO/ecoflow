@@ -2333,14 +2333,16 @@ function CarryTradeModule() {
     return fxNow * (bond.valorFinal / bond.priceArs);
   };
 
-  // Breakeven anual: la devaluación anual necesaria para empatar
-  // Si mantenés N días, breakeven_total = (Eq/dolarActual) - 1
-  // Anualizado: (1 + bk_total)^(365/dias) - 1
-  const breakevenAnual = (bond, fxNow) => {
-    if (!fxNow || !bond) return null;
-    const eq = equilibriumFor(bond, fxNow);
-    const bkTotal = eq / fxNow - 1;
-    return Math.pow(1 + bkTotal, 365 / bond.days) - 1;
+  // Carry vs MEP: ROI USD asumiendo que el MEP al vencimiento queda igual al actual
+  // Es el caso "optimista" pero el más legible para evaluar de un vistazo si el bono carrye bien.
+  // Fórmula: ROI USD = (1 + ROI_ARS) × (MEP_actual / MEP_futuro) - 1
+  // Como asumimos MEP_futuro = MEP_actual: ROI USD = ROI_ARS  (con esa cotización fija)
+  // Pero seguimos la fórmula completa por consistencia con los otros modos.
+  const carryVsMep = (bond) => {
+    const mepNow = fxRates.mep;
+    if (!mepNow || !bond) return null;
+    const arsAtMaturity = mepNow * (1 + bond.roiArs); // ARS por cada $1 USD invertido (a MEP actual)
+    return (arsAtMaturity / mepNow) / 1 - 1; // = ROI_ARS, expresado claro
   };
 
   // Para Modo Bandas: dólar de salida según escenario
@@ -2409,7 +2411,7 @@ function CarryTradeModule() {
           fxRates={fxRates}
           loading={loading}
           equilibriumFor={equilibriumFor}
-          breakevenAnual={breakevenAnual}
+          carryVsMep={carryVsMep}
         />
       )}
 
@@ -2537,7 +2539,7 @@ function ModeCard({ mode, active, onClick }) {
 
 /* ─────────── Modo 1: Por Dólar ─────────── */
 
-function ByDollarMode({ lecaps, boncaps, fxRates, loading, equilibriumFor, breakevenAnual }) {
+function ByDollarMode({ lecaps, boncaps, fxRates, loading, equilibriumFor, carryVsMep }) {
   return (
     <>
       {/* KPIs de cotizaciones */}
@@ -2548,7 +2550,7 @@ function ByDollarMode({ lecaps, boncaps, fxRates, loading, equilibriumFor, break
         <FxKpi label="CCL" value={fxRates.ccl} color={C.cat.yellow} />
       </div>
 
-      {/* Leyenda — explicación de las columnas EQ. */}
+      {/* Leyenda — explicación de las columnas EQ. y Carry */}
       <div
         className="flex items-start gap-2 mb-5 px-4 py-3"
         style={{
@@ -2557,12 +2559,18 @@ function ByDollarMode({ lecaps, boncaps, fxRates, loading, equilibriumFor, break
         }}
       >
         <Info size={13} color={C.accent} strokeWidth={1.8} style={{ flexShrink: 0, marginTop: 2 }} />
-        <p style={{ fontSize: 11.5, color: C.muted, margin: 0, lineHeight: 1.5, letterSpacing: "0.005em" }}>
+        <p style={{ fontSize: 11.5, color: C.muted, margin: 0, lineHeight: 1.55, letterSpacing: "0.005em" }}>
           Las columnas <span style={{ color: C.text, fontWeight: 500 }}>EQ.</span> muestran el{" "}
-          <span style={{ color: C.text, fontWeight: 500 }}>dólar de equilibrio</span>: el valor
-          que tendría que tener el dólar al vencimiento del bono para que el carry trade empate
-          con haberse quedado en USD. Si el dólar termina <span style={{ color: C.green, fontWeight: 500 }}>por debajo</span> del valor
-          mostrado, el carry trade gana contra USD; si termina <span style={{ color: C.red, fontWeight: 500 }}>por encima</span>, pierde.
+          <span style={{ color: C.text, fontWeight: 500 }}>dólar de equilibrio</span>: el valor que tendría que
+          tener el dólar al vencimiento para que el carry trade empate con quedarse en USD. Si el dólar termina{" "}
+          <span style={{ color: C.green, fontWeight: 500 }}>por debajo</span>, ganás contra USD; si termina{" "}
+          <span style={{ color: C.red, fontWeight: 500 }}>por encima</span>, perdés.
+          <br />
+          La columna <span style={{ color: C.text, fontWeight: 500 }}>Carry vs MEP</span> muestra el{" "}
+          <span style={{ color: C.text, fontWeight: 500 }}>retorno en USD</span> asumiendo que el MEP al
+          vencimiento queda igual al actual ($
+          {fxRates.mep ? fmtARS(fxRates.mep) : "—"}). Es el escenario base — verde positivo = ganás, rojo
+          negativo = perdés.
         </p>
       </div>
 
@@ -2573,7 +2581,7 @@ function ByDollarMode({ lecaps, boncaps, fxRates, loading, equilibriumFor, break
         fxRates={fxRates}
         loading={loading}
         equilibriumFor={equilibriumFor}
-        breakevenAnual={breakevenAnual}
+        carryVsMep={carryVsMep}
         accentTop={C.cat.cyan}
       />
 
@@ -2585,7 +2593,7 @@ function ByDollarMode({ lecaps, boncaps, fxRates, loading, equilibriumFor, break
           fxRates={fxRates}
           loading={loading}
           equilibriumFor={equilibriumFor}
-          breakevenAnual={breakevenAnual}
+          carryVsMep={carryVsMep}
           accentTop={C.cat.lime}
         />
       </div>
@@ -2606,7 +2614,7 @@ function FxKpi({ label, value, color }) {
   );
 }
 
-function EquilibriumTable({ bonds, fxRates, loading, equilibriumFor, breakevenAnual, accentTop }) {
+function EquilibriumTable({ bonds, fxRates, loading, equilibriumFor, carryVsMep, accentTop }) {
   if (loading) {
     return (
       <div style={{ backgroundColor: C.panel, borderTop: `2px solid ${accentTop}`, padding: "40px 18px" }} className="flex items-center justify-center">
@@ -2625,24 +2633,27 @@ function EquilibriumTable({ bonds, fxRates, loading, equilibriumFor, breakevenAn
   return (
     <div style={{ backgroundColor: C.panel, borderTop: `2px solid ${accentTop}`, padding: "10px 14px" }}>
       <div style={{ overflowX: "auto" }}>
-        <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 820 }}>
+        <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 1080 }}>
           <thead>
             <tr style={{ borderBottom: `1px solid ${C.border}` }}>
               <Th align="left">Ticker</Th>
               <Th align="right">Precio</Th>
               <Th align="right">Días</Th>
+              <Th align="right">TEM</Th>
+              <Th align="right">TNA</Th>
+              <Th align="right">TEA</Th>
               <Th align="right">Eq. Oficial</Th>
               <Th align="right">Eq. MEP</Th>
               <Th align="right">Eq. Blue</Th>
               <Th align="right">Eq. CCL</Th>
-              <Th align="right">Breakeven anual</Th>
+              <Th align="right" emphasized>Carry vs MEP</Th>
             </tr>
           </thead>
           <tbody>
             {bonds.map((b) => {
-              // Para el breakeven anual usamos MEP como referencia (es el más usado)
-              const bkAnual = breakevenAnual(b, fxRates.mep);
-              const bkColor = bkColorFromValue(bkAnual);
+              // Carry vs MEP = ROI USD asumiendo que MEP queda igual al actual al vencimiento
+              const carry = carryVsMep(b);
+              const carryColor = carryColorFromValue(carry);
               return (
                 <tr key={b.ticker} className="eco-table-row" style={{ borderBottom: `1px solid ${C.border}` }}>
                   <Td align="left">
@@ -2667,13 +2678,16 @@ function EquilibriumTable({ bonds, fxRates, loading, equilibriumFor, breakevenAn
                   </Td>
                   <Td align="right" mono>${fmtARS(b.priceArs)}</Td>
                   <Td align="right" mono><span style={{ color: C.muted }}>{b.days}</span></Td>
+                  <Td align="right" mono><span style={{ color: C.muted }}>{fmtPct(b.tem * 100)}</span></Td>
+                  <Td align="right" mono><span style={{ color: C.muted }}>{fmtPct(b.tirAnual * 100)}</span></Td>
+                  <Td align="right" mono><span style={{ color: C.muted }}>{fmtPct(b.tea * 100)}</span></Td>
                   <Td align="right" mono>{eqCell(equilibriumFor(b, fxRates.oficial))}</Td>
                   <Td align="right" mono>{eqCell(equilibriumFor(b, fxRates.mep))}</Td>
                   <Td align="right" mono>{eqCell(equilibriumFor(b, fxRates.blue))}</Td>
                   <Td align="right" mono>{eqCell(equilibriumFor(b, fxRates.ccl))}</Td>
                   <Td align="right" mono>
-                    <span style={{ color: bkColor, fontWeight: 600 }}>
-                      {bkAnual != null ? fmtPct(bkAnual * 100) : "—"}
+                    <span style={{ color: carryColor, fontWeight: 600 }}>
+                      {carry != null ? fmtPct(carry * 100) : "—"}
                     </span>
                   </Td>
                 </tr>
@@ -2691,14 +2705,14 @@ function eqCell(v) {
   return `$${fmtARS(v)}`;
 }
 
-// Verde = bajo (poca devaluación necesaria, mucho margen). Rojo = alto.
-function bkColorFromValue(bk) {
-  if (bk == null) return C.muted;
-  if (bk < 0.10) return "#4ADE80";    // < 10% verde fuerte
-  if (bk < 0.20) return "#A3E635";    // 10-20% verde claro
-  if (bk < 0.30) return "#FACC15";    // 20-30% amarillo
-  if (bk < 0.40) return "#FB923C";    // 30-40% naranja
-  return "#F87171";                    // > 40% rojo
+// Carry vs MEP: positivo = ganás en USD (verde), negativo = perdés (rojo)
+function carryColorFromValue(carry) {
+  if (carry == null) return C.muted;
+  if (carry < -0.05) return "#F87171";   // < -5% rojo fuerte
+  if (carry < 0)     return "#FB923C";   // -5% a 0 naranja
+  if (carry < 0.05)  return "#FACC15";   // 0-5% amarillo (bajo)
+  if (carry < 0.15)  return "#A3E635";   // 5-15% verde claro
+  return "#4ADE80";                       // > 15% verde fuerte
 }
 
 /* ─────────── Modo 2: Bandas BCRA + REM ─────────── */
