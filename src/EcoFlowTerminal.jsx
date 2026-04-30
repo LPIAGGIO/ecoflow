@@ -2593,7 +2593,15 @@ function ByDollarMode({ lecaps, boncaps, fxRates, loading, equilibriumFor, carry
 
       {/* Matriz de Carry vs Escenarios */}
       <div className="mt-7">
-        <SectionLabel>Matriz de Carry por Escenario</SectionLabel>
+        <div className="flex items-baseline justify-between mb-2 px-1">
+          <SectionLabel>Matriz de Carry por Escenario</SectionLabel>
+          <div style={{ fontSize: 10, color: C.dim, letterSpacing: "0.16em", textTransform: "uppercase", fontWeight: 500 }}>
+            MEP Actual{" "}
+            <span className="eco-mono" style={{ color: C.cat.emerald, fontWeight: 600, marginLeft: 6, fontSize: 12, letterSpacing: 0 }}>
+              ${fxRates.mep ? fmtARS(fxRates.mep) : "—"}
+            </span>
+          </div>
+        </div>
         <ScenarioMatrix
           bonds={allBonds}
           fxRates={fxRates}
