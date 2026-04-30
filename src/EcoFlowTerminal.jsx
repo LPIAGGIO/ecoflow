@@ -890,11 +890,12 @@ function getRefreshIntervalMs() {
   const hh = parseInt(parts.find((p) => p.type === "hour")?.value || "0", 10);
   const isWeekday = !["Sat", "Sun"].includes(wd);
   const isMarketHours = hh >= 11 && hh < 18;
-  return isWeekday && isMarketHours ? 60_000 : 30 * 60_000;
+  // Activo (lunes a viernes 11-18 ART): 15 min · Inactivo: 30 min
+  return isWeekday && isMarketHours ? 15 * 60_000 : 30 * 60_000;
 }
 
 function isActiveMarketWindow() {
-  return getRefreshIntervalMs() === 60_000;
+  return getRefreshIntervalMs() === 15 * 60_000;
 }
 
 // Formatters
@@ -1242,7 +1243,7 @@ function ComparaDolarModule() {
     .filter((r) => r.spreadPct != null)
     .reduce((acc, r) => (acc == null || r.spreadPct < acc.spreadPct ? r : acc), null);
 
-  const isStale = lastFetch && (now - lastFetch) / 1000 > (intervalMode === "active" ? 90 : 1900);
+  const isStale = lastFetch && (now - lastFetch) / 1000 > (intervalMode === "active" ? 1080 : 2100);
 
   return (
     <div className="px-6 py-5 eco-fade-in" style={{ minHeight: "100%" }}>
@@ -1413,7 +1414,7 @@ function ComparaDolarModule() {
         <span style={{ color: C.faint }}>·</span>
         <span>auto-refresh:</span>
         <span style={{ color: C.muted }}>
-          {intervalMode === "active" ? "60s · horario hábil" : "30 min · fuera de horario"}
+          {intervalMode === "active" ? "15 min · horario hábil" : "30 min · fuera de horario"}
         </span>
         <span style={{ color: C.faint }}>·</span>
         <span>última act:</span>
@@ -2364,7 +2365,7 @@ function CarryTradeModule() {
     return (arsAtMaturity / exitFx) / usdAmount - 1;
   };
 
-  const isStale = lastFetch && (now - lastFetch) / 1000 > (intervalMode === "active" ? 90 : 1900);
+  const isStale = lastFetch && (now - lastFetch) / 1000 > (intervalMode === "active" ? 1080 : 2100);
   const activeMode = CARRY_MODES.find((m) => m.id === mode);
 
   return (
@@ -2458,7 +2459,7 @@ function CarryTradeModule() {
         <span style={{ color: C.faint }}>·</span>
         <span>auto-refresh:</span>
         <span style={{ color: C.muted }}>
-          {intervalMode === "active" ? "60s · horario hábil" : "30 min · fuera de horario"}
+          {intervalMode === "active" ? "15 min · horario hábil" : "30 min · fuera de horario"}
         </span>
         <span style={{ color: C.faint }}>·</span>
         <span>última act:</span>
