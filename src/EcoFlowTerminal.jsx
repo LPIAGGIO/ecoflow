@@ -2322,7 +2322,8 @@ function CarryTradeModule() {
   }, [bondsRaw]);
 
   // Bonos separados por tipo (para tablas separadas en modo "Por Dólar")
-  const lecaps = processedBonds.filter((b) => b.type === "lecap");
+  // Lecaps + Duales en la misma tabla (los duales se diferencian con badge)
+  const lecaps = processedBonds.filter((b) => b.type === "lecap" || b.type === "dual");
   const boncaps = processedBonds.filter((b) => b.type === "boncap");
 
   // Cálculo del dólar de equilibrio
@@ -2548,7 +2549,7 @@ function ByDollarMode({ lecaps, boncaps, fxRates, loading, equilibriumFor, break
       </div>
 
       {/* Tabla LECAPs */}
-      <SectionLabel>LECAPs · Letras Capitalizables</SectionLabel>
+      <SectionLabel>LECAPs y Duales · Letras Capitalizables</SectionLabel>
       <EquilibriumTable
         bonds={lecaps}
         fxRates={fxRates}
@@ -2628,6 +2629,23 @@ function EquilibriumTable({ bonds, fxRates, loading, equilibriumFor, breakevenAn
                 <tr key={b.ticker} className="eco-table-row" style={{ borderBottom: `1px solid ${C.border}` }}>
                   <Td align="left">
                     <span style={{ color: typeColor(b.type), fontWeight: 600, fontSize: 13 }}>{b.ticker}</span>
+                    {b.type === "dual" && (
+                      <span
+                        style={{
+                          marginLeft: 8,
+                          fontSize: 8,
+                          padding: "2px 6px",
+                          border: `1px solid ${C.cat.violet}`,
+                          color: C.cat.violet,
+                          letterSpacing: "0.16em",
+                          fontWeight: 600,
+                          textTransform: "uppercase",
+                          fontFamily: "'Roboto', sans-serif",
+                        }}
+                      >
+                        Dual
+                      </span>
+                    )}
                   </Td>
                   <Td align="right" mono>${fmtARS(b.priceArs)}</Td>
                   <Td align="right" mono><span style={{ color: C.muted }}>{b.days}</span></Td>
