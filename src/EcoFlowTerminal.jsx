@@ -2293,7 +2293,11 @@ function CarryTradeModule() {
 
         accepted.push(ticker);
 
-        const valorFinal = 100;
+        // Pago final del bono: si está en el registry usamos el dato real (verificado en
+        // rendimientos.co), sino fallback a $100 VN (aproximación que subestima el rendimiento).
+        const valorFinal = resolved.finalPayoff ?? 100;
+        const hasFinalPayoff = resolved.finalPayoff != null;
+
         const roiArs = valorFinal / priceArs - 1;
         const tirAnual = Math.pow(1 + roiArs, 365 / days) - 1;
         const tem = Math.pow(1 + roiArs, 30 / days) - 1;
@@ -2302,7 +2306,7 @@ function CarryTradeModule() {
         return {
           ticker, type: resolved.type, source: resolved.source,
           maturityDate: resolved.maturityDate, days, priceArs, valorFinal,
-          roiArs, tirAnual, tem, tea,
+          hasFinalPayoff, roiArs, tirAnual, tem, tea,
         };
       })
       .filter(Boolean)
