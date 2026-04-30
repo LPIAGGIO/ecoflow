@@ -21,42 +21,45 @@ const MONTH_LETTER = {
   L: 7,  G: 8,  S: 9,  O: 10, N: 11, D: 12,
 };
 
-// Mapa hardcodeado: ticker -> { type, maturityDate (ISO), capitalizable }
+// Mapa hardcodeado: ticker -> { type, maturityDate (ISO), finalPayoff, capitalizable }
 //   type: 'lecap' | 'boncap' | 'dual' | 'cer'
+//   finalPayoff: pesos que paga el bono al vencimiento por cada $100 de VN
+//                (verificado en rendimientos.co — se actualiza con cada licitación nueva)
+//   capitalizable: true para Lecaps/Boncaps a tasa fija
 export const BOND_REGISTRY = {
   // ─── Lecaps (S) — capitalizan al vencimiento ───
-  S14G6: { type: "lecap", maturityDate: "2026-08-14", capitalizable: true },
-  S15Y6: { type: "lecap", maturityDate: "2026-05-15", capitalizable: true },
-  S17L6: { type: "lecap", maturityDate: "2026-07-17", capitalizable: true },
-  S29Y6: { type: "lecap", maturityDate: "2026-05-29", capitalizable: true },
-  S30N6: { type: "lecap", maturityDate: "2026-11-30", capitalizable: true },
-  S30O6: { type: "lecap", maturityDate: "2026-10-30", capitalizable: true },
-  S30S6: { type: "lecap", maturityDate: "2026-09-30", capitalizable: true },
-  S31G6: { type: "lecap", maturityDate: "2026-08-31", capitalizable: true },
-  S31L6: { type: "lecap", maturityDate: "2026-07-31", capitalizable: true },
+  S15Y6: { type: "lecap", maturityDate: "2026-05-15", finalPayoff: 105.178, capitalizable: true },
+  S29Y6: { type: "lecap", maturityDate: "2026-05-29", finalPayoff: 132.044, capitalizable: true },
+  S17L6: { type: "lecap", maturityDate: "2026-07-17", finalPayoff: 107.920, capitalizable: true },
+  S31L6: { type: "lecap", maturityDate: "2026-07-31", finalPayoff: 117.677, capitalizable: true },
+  S14G6: { type: "lecap", maturityDate: "2026-08-14", finalPayoff: 108.030, capitalizable: true },
+  S31G6: { type: "lecap", maturityDate: "2026-08-31", finalPayoff: 127.064, capitalizable: true },
+  S30S6: { type: "lecap", maturityDate: "2026-09-30", finalPayoff: 117.536, capitalizable: true },
+  S30O6: { type: "lecap", maturityDate: "2026-10-30", finalPayoff: 135.278, capitalizable: true },
+  S30N6: { type: "lecap", maturityDate: "2026-11-30", finalPayoff: 129.888, capitalizable: true },
 
   // ─── Boncaps (T) — capitalizan al vencimiento ───
-  T15E7: { type: "boncap", maturityDate: "2027-01-15", capitalizable: true },
-  T30A7: { type: "boncap", maturityDate: "2027-04-30", capitalizable: true },
-  T30J6: { type: "boncap", maturityDate: "2026-06-30", capitalizable: true },
-  T30J7: { type: "boncap", maturityDate: "2027-06-30", capitalizable: true },
-  T31Y7: { type: "boncap", maturityDate: "2027-05-31", capitalizable: true },
+  T30J6: { type: "boncap", maturityDate: "2026-06-30", finalPayoff: 144.896, capitalizable: true },
+  T15E7: { type: "boncap", maturityDate: "2027-01-15", finalPayoff: 161.104, capitalizable: true },
+  T30A7: { type: "boncap", maturityDate: "2027-04-30", finalPayoff: 157.341, capitalizable: true },
+  T31Y7: { type: "boncap", maturityDate: "2027-05-31", finalPayoff: 151.563, capitalizable: true },
+  T30J7: { type: "boncap", maturityDate: "2027-06-30", finalPayoff: 156.037, capitalizable: true },
 
   // ─── Boncaps TT (capitalizables al vto) ───
+  // ⚠️ finalPayoff PENDIENTE de verificar en rendimientos.co.
+  // Mientras tanto se usa fallback (TIR implícita asumiendo VN=$100) que da
+  // valores aproximados pero subestima el rendimiento real.
   TTJ26: { type: "boncap", maturityDate: "2026-06-30", capitalizable: true },
   TTS26: { type: "boncap", maturityDate: "2026-09-15", capitalizable: true },
   TTD26: { type: "boncap", maturityDate: "2026-12-15", capitalizable: true },
 
-  // ─── Duales TAMAR (terminan en D) — pagan el max(fija, TAMAR cap.) al vto ───
-  // Para V1 los tratamos como capitalizables a tasa fija (la rama "fija"
-  // del payoff). En la práctica la rama TAMAR puede pagar más, pero
-  // necesita un proyector de TAMAR que aún no tenemos.
-  // Fechas verificadas con cohen.com.ar.
-  S2G6D: { type: "dual", maturityDate: "2026-08-14", capitalizable: true }, // ✓ cohen
-  S2L6D: { type: "dual", maturityDate: "2026-07-17", capitalizable: true }, // ✓ cohen
-  S2Y6D: { type: "dual", maturityDate: "2026-05-15", capitalizable: true }, // ✓ cohen
-  SL6D:  { type: "dual", maturityDate: "2026-07-31", capitalizable: true }, // ✓ cohen
-  SS6D:  { type: "dual", maturityDate: "2026-09-30", capitalizable: true }, // ✓ cohen
+  // ─── Duales TAMAR (terminan en D) — deshabilitados en V1 vía shouldIgnoreTicker ───
+  // Fechas verificadas con cohen.com.ar. Quedan en el mapa para V2.
+  S2G6D: { type: "dual", maturityDate: "2026-08-14", capitalizable: true },
+  S2L6D: { type: "dual", maturityDate: "2026-07-17", capitalizable: true },
+  S2Y6D: { type: "dual", maturityDate: "2026-05-15", capitalizable: true },
+  SL6D:  { type: "dual", maturityDate: "2026-07-31", capitalizable: true },
+  SS6D:  { type: "dual", maturityDate: "2026-09-30", capitalizable: true },
 };
 
 /**
