@@ -2322,8 +2322,7 @@ function CarryTradeModule() {
   }, [bondsRaw]);
 
   // Bonos separados por tipo (para tablas separadas en modo "Por Dólar")
-  // Lecaps + Duales en la misma tabla (los duales se diferencian con badge)
-  const lecaps = processedBonds.filter((b) => b.type === "lecap" || b.type === "dual");
+  const lecaps = processedBonds.filter((b) => b.type === "lecap");
   const boncaps = processedBonds.filter((b) => b.type === "boncap");
 
   // Cálculo del dólar de equilibrio
@@ -2549,7 +2548,7 @@ function ByDollarMode({ lecaps, boncaps, fxRates, loading, equilibriumFor, break
       </div>
 
       {/* Tabla LECAPs */}
-      <SectionLabel>LECAPs y Duales · Letras Capitalizables</SectionLabel>
+      <SectionLabel>LECAPs · Letras Capitalizables</SectionLabel>
       <EquilibriumTable
         bonds={lecaps}
         fxRates={fxRates}
