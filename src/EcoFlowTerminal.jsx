@@ -2581,19 +2581,8 @@ function ByDollarMode({ lecaps, boncaps, fxRates, loading, equilibriumFor, carry
         </p>
       </div>
 
-      {/* Tabla unificada: LECAPs + BONCAPs ordenados por días al vencimiento */}
-      <SectionLabel>Letras y Bonos Capitalizables</SectionLabel>
-      <EquilibriumTable
-        bonds={allBonds}
-        fxRates={fxRates}
-        loading={loading}
-        equilibriumFor={equilibriumFor}
-        carryVsMep={carryVsMep}
-        accentTop={C.cat.cyan}
-      />
-
       {/* Matriz de Carry vs Escenarios */}
-      <div className="mt-7">
+      <div>
         <div
           className="mb-2 px-1"
           style={{
@@ -2617,6 +2606,19 @@ function ByDollarMode({ lecaps, boncaps, fxRates, loading, equilibriumFor, carry
           fxRates={fxRates}
           remIpc={remIpc}
           loading={loading}
+        />
+      </div>
+
+      {/* Tabla unificada: LECAPs + BONCAPs ordenados por días al vencimiento */}
+      <div className="mt-7">
+        <SectionLabel>Letras y Bonos Capitalizables</SectionLabel>
+        <EquilibriumTable
+          bonds={allBonds}
+          fxRates={fxRates}
+          loading={loading}
+          equilibriumFor={equilibriumFor}
+          carryVsMep={carryVsMep}
+          accentTop={C.cat.cyan}
         />
       </div>
     </>
@@ -2796,11 +2798,19 @@ function ScenarioMatrix({ bonds, fxRates, remIpc, loading }) {
 
   // Centro: MEP actual redondeado a la centena
   const center = Math.round(mepNow / 100) * 100;
-  // 6 escenarios: -300, -200, -100, 0, +100, +200 respecto al centro
-  const scenarios = [-300, -200, -100, 0, 100, 200].map((delta) => ({
+  // 6 escenarios fijos: -300, -200, -100, 0, +100, +200 respecto al centro
+  // + 1 escenario "MEP actual" insertado en el medio. Se ordena por fx ascendente.
+  const fixedScenarios = [-300, -200, -100, 0, 100, 200].map((delta) => ({
     label: String(center + delta),
     fx: center + delta,
+    isCurrent: false,
   }));
+  const currentScenario = {
+    label: "MEP",
+    fx: mepNow,
+    isCurrent: true,
+  };
+  const scenarios = [...fixedScenarios, currentScenario].sort((a, b) => a.fx - b.fx);
 
   // ROI USD para un bono dado un FX de salida.
   // Fórmula: invierto $1 USD a MEP_now → recibo finalPayoff/priceArs pesos → vendo a fxOut.
@@ -2814,7 +2824,7 @@ function ScenarioMatrix({ bonds, fxRates, remIpc, loading }) {
   return (
     <div style={{ backgroundColor: C.panel, borderTop: `2px solid ${C.cat.orange}`, padding: "10px 14px" }}>
       <div style={{ overflowX: "auto" }}>
-        <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 1300, fontSize: 12 }}>
+        <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 1450, fontSize: 12 }}>
           <thead>
             <tr style={{ borderBottom: `1px solid ${C.border}` }}>
               <Th align="left">Ticker</Th>
@@ -2822,11 +2832,34 @@ function ScenarioMatrix({ bonds, fxRates, remIpc, loading }) {
               <Th align="right">TEM</Th>
               <Th align="right">TNA</Th>
               <Th align="right">TEA</Th>
-              {scenarios.map((s) => (
-                <Th key={s.label} align="right">
-                  Carry {s.label}
-                </Th>
-              ))}
+              {scenarios.map((s) => {
+                if (s.isCurrent) {
+                  return (
+                    <th
+                      key="current"
+                      align="right"
+                      style={{
+                        padding: "10px 10px",
+                        fontSize: 9,
+                        color: C.cat.cyan,
+                        letterSpacing: "0.18em",
+                        textTransform: "uppercase",
+                        fontWeight: 700,
+                        textAlign: "right",
+                        borderLeft: `3px solid ${C.cat.cyan}`,
+                        borderRight: `3px solid ${C.cat.cyan}`,
+                      }}
+                    >
+                      Carry MEP
+                    </th>
+                  );
+                }
+                return (
+                  <Th key={s.label} align="right">
+                    Carry {s.label}
+                  </Th>
+                );
+              })}
               <Th align="right" emphasized>Carry Techo</Th>
             </tr>
           </thead>
@@ -2838,6 +2871,22 @@ function ScenarioMatrix({ bonds, fxRates, remIpc, loading }) {
                 <tr key={b.ticker} className="eco-table-row" style={{ borderBottom: `1px solid ${C.border}` }}>
                   <Td align="left">
                     <span style={{ color: typeColor(b.type), fontWeight: 600, fontSize: 12 }}>{b.ticker}</span>
+                    <span
+                      style={{
+                        marginLeft: 8,
+                        fontSize: 8,
+                        padding: "2px 6px",
+                        border: `1px solid ${typeColor(b.type)}`,
+                        color: typeColor(b.type),
+                        letterSpacing: "0.16em",
+                        fontWeight: 600,
+                        textTransform: "uppercase",
+                        fontFamily: "'Roboto', sans-serif",
+                        opacity: 0.85,
+                      }}
+                    >
+                      {typeLabel(b.type)}
+                    </span>
                   </Td>
                   <Td align="right" mono>
                     <span style={{ color: C.muted }}>{b.days}</span>
@@ -2853,6 +2902,26 @@ function ScenarioMatrix({ bonds, fxRates, remIpc, loading }) {
                   </Td>
                   {scenarios.map((s) => {
                     const roi = roiUsdAt(b, s.fx);
+                    if (s.isCurrent) {
+                      return (
+                        <td
+                          key="current"
+                          style={{
+                            padding: "8px 10px",
+                            textAlign: "right",
+                            backgroundColor: matrixCellColor(roi),
+                            fontFamily: "'JetBrains Mono', monospace",
+                            fontVariantNumeric: "tabular-nums",
+                            fontWeight: 700,
+                            color: matrixCellTextColor(roi),
+                            borderLeft: `3px solid ${C.cat.cyan}`,
+                            borderRight: `3px solid ${C.cat.cyan}`,
+                          }}
+                        >
+                          {roi != null ? fmtPct(roi * 100) : "—"}
+                        </td>
+                      );
+                    }
                     return (
                       <td
                         key={s.label}
