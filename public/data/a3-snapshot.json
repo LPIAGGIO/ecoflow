@@ -1,11 +1,11 @@
 {
-  "generatedAt": "2026-05-01T19:53:53.907Z",
+  "generatedAt": "2026-05-01T20:11:42.877Z",
   "source": "A3 Mercados · api.mae.com.ar/MarketData/v1",
   "endpoints": {
     "cauciones": {
       "ok": true,
-      "fetchedAt": "2026-05-01T19:53:54.739Z",
-      "durationMs": 831,
+      "fetchedAt": "2026-05-01T20:11:43.477Z",
+      "durationMs": 599,
       "data": []
     }
   }
