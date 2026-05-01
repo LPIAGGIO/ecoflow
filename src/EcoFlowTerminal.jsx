@@ -51,9 +51,8 @@ import {
   Tooltip as RechartsTooltip,
   ResponsiveContainer,
   ReferenceLine,
-  Area,
+  Line,
   ComposedChart,
-  Label,
 } from "recharts";
 
 const C = {
@@ -3135,7 +3134,9 @@ function BreakevenChart({ bonds, fxRates, remIpc, loading }) {
   }
 
   // MEP a usar para los cálculos: si hay valor custom válido, usar ese
-  const customMepNum = parseFloat(customMep.replace(",", "."));
+  // Parse formato AR: "1.448,50" → 1448.50
+  // Primero saco puntos (separador miles), después coma → punto decimal
+  const customMepNum = parseFloat(customMep.replace(/\./g, "").replace(",", "."));
   const effectiveMep = customMepNum > 0 ? customMepNum : mepNow;
   const usingCustom = customMepNum > 0;
 
@@ -3248,7 +3249,7 @@ function BreakevenChart({ bonds, fxRates, remIpc, loading }) {
       {/* Gráfico */}
       <div style={{ width: "100%", height: 480 }}>
         <ResponsiveContainer width="100%" height="100%">
-          <ComposedChart margin={{ top: 20, right: 30, bottom: 30, left: 50 }}>
+          <ComposedChart margin={{ top: 20, right: 60, bottom: 30, left: 50 }}>
             <CartesianGrid strokeDasharray="3 3" stroke={C.border} opacity={0.4} />
             <XAxis
               dataKey="x"
@@ -3262,6 +3263,7 @@ function BreakevenChart({ bonds, fxRates, remIpc, loading }) {
               stroke={C.muted}
               style={{ fontSize: 10, fontFamily: "'JetBrains Mono', monospace" }}
               tickLine={{ stroke: C.border }}
+              allowDuplicatedCategory={false}
             />
             <YAxis
               type="number"
@@ -3274,43 +3276,15 @@ function BreakevenChart({ bonds, fxRates, remIpc, loading }) {
             />
             <RechartsTooltip content={<ScatterTooltip />} cursor={{ stroke: C.muted, strokeDasharray: "3 3" }} />
 
-            {/* Banda BCRA: techo */}
-            <Area
-              data={bandSeries}
-              type="monotone"
-              dataKey="ceiling"
-              stroke={C.red}
-              strokeWidth={1.5}
-              strokeDasharray="4 3"
-              fill="transparent"
-              dot={false}
-              activeDot={false}
-              isAnimationActive={false}
-              name="Techo BCRA"
-            />
-            {/* Banda BCRA: piso */}
-            <Area
-              data={bandSeries}
-              type="monotone"
-              dataKey="floor"
-              stroke={C.green}
-              strokeWidth={1.5}
-              strokeDasharray="4 3"
-              fill="transparent"
-              dot={false}
-              activeDot={false}
-              isAnimationActive={false}
-              name="Piso BCRA"
-            />
-
-            {/* Línea horizontal del MEP actual */}
+            {/* Línea horizontal del MEP actual o custom */}
             <ReferenceLine
               y={effectiveMep}
               stroke={C.cat.emerald}
               strokeWidth={1.5}
               strokeDasharray="6 4"
+              ifOverflow="extendDomain"
               label={{
-                value: usingCustom ? `MEP custom $${fmtARS(effectiveMep)}` : `MEP actual $${fmtARS(effectiveMep)}`,
+                value: usingCustom ? `MEP custom $${fmtARS(effectiveMep)}` : `MEP $${fmtARS(effectiveMep)}`,
                 position: "right",
                 fill: C.cat.emerald,
                 fontSize: 10,
@@ -3319,8 +3293,49 @@ function BreakevenChart({ bonds, fxRates, remIpc, loading }) {
               }}
             />
 
+            {/* Banda BCRA: techo (línea roja punteada) */}
+            <Line
+              data={bandSeries}
+              type="monotone"
+              dataKey="ceiling"
+              xAxisId={0}
+              yAxisId={0}
+              stroke={C.red}
+              strokeWidth={1.5}
+              strokeDasharray="4 3"
+              dot={false}
+              activeDot={false}
+              isAnimationActive={false}
+              name="Techo BCRA"
+              connectNulls
+            />
+            {/* Banda BCRA: piso (línea verde punteada) */}
+            <Line
+              data={bandSeries}
+              type="monotone"
+              dataKey="floor"
+              xAxisId={0}
+              yAxisId={0}
+              stroke={C.green}
+              strokeWidth={1.5}
+              strokeDasharray="4 3"
+              dot={false}
+              activeDot={false}
+              isAnimationActive={false}
+              name="Piso BCRA"
+              connectNulls
+            />
+
             {/* Scatter de los bonos */}
-            <Scatter data={scatterData} shape={renderDot} isAnimationActive={false} />
+            <Scatter
+              data={scatterData}
+              dataKey="y"
+              xAxisId={0}
+              yAxisId={0}
+              shape={renderDot}
+              isAnimationActive={false}
+              name="Bonos"
+            />
           </ComposedChart>
         </ResponsiveContainer>
       </div>
