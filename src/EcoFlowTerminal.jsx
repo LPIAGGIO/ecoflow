@@ -1,6 +1,15 @@
 import { useState, useEffect, useMemo } from "react";
 import { resolveBond, daysToMaturity, shouldIgnoreTicker } from "./bondMaturities.js";
 import {
+  DLR_REGISTRY,
+  DLR_SPOT_SEED,
+  DLR_SEED_DATE,
+  daysToExpiry,
+  implicitTNA,
+  implicitTEM,
+  implicitTEA,
+} from "./dlrContracts.js";
+import {
   Home,
   TrendingUp,
   Search,
@@ -635,6 +644,8 @@ export default function EcoFlowTerminal() {
               <ComparaDolarModule />
             ) : active === "carry-trade" ? (
               <CarryTradeModule />
+            ) : active === "futuros-caucion" ? (
+              <FuturosVsCaucionModule />
             ) : (
               <EmptyWorkspace key={active} active={active} />
             )}
@@ -3941,6 +3952,996 @@ function ManualLeadBond({ bond, customExitFx }) {
           <Metric label="ROI USD" value={roi != null ? fmtPct(roi * 100) : "—"} color={roiColor} large />
           <Metric label="ROI ARS" value={fmtPct(bond.roiArs * 100)} color={C.text} large />
           <Metric label="Dólar salida" value={`$${fmtARS(customExitFx)}`} color={C.muted} />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ─────────── Futuros vs Caución Module ─────────── */
+
+const DLR_PRICES_LS_KEY = "ecoflow:dlrPrices";
+const DLR_PRICES_TS_LS_KEY = "ecoflow:dlrPricesUpdatedAt";
+const CAUCION_LS_KEY = "ecoflow:caucionRate";
+
+/** Lee precios de DLR desde localStorage. Devuelve {} si no hay nada. */
+function readStoredDlrPrices() {
+  if (typeof window === "undefined") return {};
+  try {
+    const raw = window.localStorage.getItem(DLR_PRICES_LS_KEY);
+    return raw ? JSON.parse(raw) : {};
+  } catch {
+    return {};
+  }
+}
+
+function readStoredDlrTimestamp() {
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = window.localStorage.getItem(DLR_PRICES_TS_LS_KEY);
+    return raw ? new Date(raw) : null;
+  } catch {
+    return null;
+  }
+}
+
+function readStoredCaucion() {
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = window.localStorage.getItem(CAUCION_LS_KEY);
+    return raw ? parseFloat(raw) : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Devuelve el precio efectivo de un contrato: stored si hay, sino el seed. */
+function priceForContract(contract, storedPrices) {
+  const stored = storedPrices[contract.ticker];
+  if (stored != null && stored > 0) return stored;
+  return contract.priceSeed;
+}
+
+/** Color del spread vs caución: positivo (futuro caro) = rojo, negativo (barato) = verde. */
+function spreadColor(spreadPct) {
+  if (spreadPct == null || isNaN(spreadPct)) return C.muted;
+  if (spreadPct < -2) return "#4ADE80";  // barato fuerte
+  if (spreadPct < 0)  return "#A3E635";  // barato leve
+  if (spreadPct < 2)  return "#FACC15";  // neutro
+  if (spreadPct < 5)  return "#FB923C";  // caro leve
+  return "#F87171";                       // caro fuerte
+}
+
+function FuturosVsCaucionModule() {
+  // ─── State ──────────────────────────────────────────────
+  const [spotMayorista, setSpotMayorista] = useState(null);
+  const [remTc, setRemTc] = useState({});
+  const [storedPrices, setStoredPrices] = useState(() => readStoredDlrPrices());
+  const [pricesUpdatedAt, setPricesUpdatedAt] = useState(() => readStoredDlrTimestamp());
+  const [caucionRate, setCaucionRate] = useState(() => readStoredCaucion() ?? 32);
+  const [editorOpen, setEditorOpen] = useState(false);
+  const [editorBuffer, setEditorBuffer] = useState({});
+  const [editorCaucion, setEditorCaucion] = useState(String(readStoredCaucion() ?? 32));
+  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [error, setError] = useState(null);
+  const [lastFetch, setLastFetch] = useState(null);
+  const [now, setNow] = useState(new Date());
+  const [intervalMode, setIntervalMode] = useState(isActiveMarketWindow() ? "active" : "idle");
+
+  // Calculadora manual
+  const [calcSpot, setCalcSpot] = useState("");
+  const [calcFuturo, setCalcFuturo] = useState("");
+  const [calcDays, setCalcDays] = useState("");
+
+  // Tick para "now" en el StatusPill
+  useEffect(() => {
+    const i = setInterval(() => {
+      setNow(new Date());
+      setIntervalMode(isActiveMarketWindow() ? "active" : "idle");
+    }, 1000);
+    return () => clearInterval(i);
+  }, []);
+
+  // ─── Fetch de spot mayorista + REM TC ──────────────────
+  const fetchAll = async (isManual = false) => {
+    if (isManual) setRefreshing(true);
+    else if (spotMayorista == null) setLoading(true);
+
+    try {
+      // 1) FX → buscamos casa "mayorista"
+      const fxRes = await fetch("/api/dolares");
+      if (fxRes.ok) {
+        const fx = await fxRes.json();
+        const may = fx.find((d) => (d.casa || "").toLowerCase() === "mayorista");
+        if (may?.venta) setSpotMayorista(may.venta);
+        else if (spotMayorista == null) setSpotMayorista(DLR_SPOT_SEED);
+      } else if (spotMayorista == null) {
+        setSpotMayorista(DLR_SPOT_SEED);
+      }
+
+      // 2) REM tipo de cambio (para derivar dev. esperada)
+      try {
+        const remRes = await fetch("/api/rem-tipo-cambio");
+        if (remRes.ok) {
+          const remData = await remRes.json();
+          const map = {};
+          (remData.datos || []).forEach((d) => {
+            if (d.periodo && d.mediana != null) map[d.periodo] = d.mediana;
+          });
+          setRemTc(map);
+        }
+      } catch (e) { console.warn("REM tipo_cambio failed", e); }
+
+      setError(null);
+      setLastFetch(new Date());
+    } catch (e) {
+      setError(e.message || "Error al cargar datos");
+      if (spotMayorista == null) setSpotMayorista(DLR_SPOT_SEED);
+    } finally {
+      setLoading(false);
+      setRefreshing(false);
+    }
+  };
+
+  useEffect(() => { fetchAll(); /* eslint-disable-next-line */ }, []);
+  useEffect(() => {
+    let timeoutId;
+    const schedule = () => {
+      const ms = getRefreshIntervalMs();
+      timeoutId = setTimeout(() => { fetchAll(); schedule(); }, ms);
+    };
+    schedule();
+    return () => clearTimeout(timeoutId);
+    // eslint-disable-next-line
+  }, [intervalMode]);
+
+  // ─── Procesamiento de contratos ────────────────────────
+  const spot = spotMayorista ?? DLR_SPOT_SEED;
+
+  const contracts = useMemo(() => {
+    return DLR_REGISTRY
+      .map((c) => {
+        const days = daysToExpiry(c.maturityDate);
+        const price = priceForContract(c, storedPrices);
+        if (days <= 0) return null;
+        return {
+          ...c,
+          price,
+          days,
+          tna: implicitTNA(price, spot, days),
+          tem: implicitTEM(price, spot, days),
+          tea: implicitTEA(price, spot, days),
+        };
+      })
+      .filter(Boolean);
+  }, [storedPrices, spot]);
+
+  // Tasa forward entre contratos consecutivos (devaluación implícita mes a mes)
+  const contractsWithForward = useMemo(() => {
+    return contracts.map((c, i) => {
+      if (i === 0) {
+        // Primer contrato: forward vs spot (= TEM implícita ajustada al spread temporal)
+        const dF = c.days;
+        const fwd = dF > 0 ? Math.pow(c.price / spot, 30 / dF) - 1 : null;
+        return { ...c, forwardTEM: fwd };
+      }
+      const prev = contracts[i - 1];
+      const dGap = c.days - prev.days;
+      if (dGap <= 0) return { ...c, forwardTEM: null };
+      const fwd = Math.pow(c.price / prev.price, 30 / dGap) - 1;
+      return { ...c, forwardTEM: fwd };
+    });
+  }, [contracts, spot]);
+
+  // KPI: Devaluación REM como TNA implícita (proyectada al horizonte del ultimo contrato del REM)
+  const remDevTNA = useMemo(() => {
+    if (!spot || Object.keys(remTc).length === 0) return null;
+    // Tomamos el ultimo periodo del REM disponible
+    const sortedKeys = Object.keys(remTc).sort();
+    if (!sortedKeys.length) return null;
+    const lastKey = sortedKeys[sortedKeys.length - 1];
+    const fxFuturo = remTc[lastKey];
+    if (!fxFuturo) return null;
+    // Calcular días desde hoy hasta el ultimo dia del periodo
+    const [yr, mo] = lastKey.split("-").map(Number);
+    const targetDate = new Date(yr, mo, 0); // último día del mes
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const days = Math.max(1, Math.round((targetDate - today) / 86400000));
+    return implicitTNA(fxFuturo, spot, days);
+  }, [remTc, spot]);
+
+  // TNA implícita promedio de los contratos cortos (los primeros 3)
+  const tnaProm = useMemo(() => {
+    const slice = contractsWithForward.slice(0, 3).filter((c) => c.tna != null);
+    if (!slice.length) return null;
+    return slice.reduce((acc, c) => acc + c.tna, 0) / slice.length;
+  }, [contractsWithForward]);
+
+  const isStale = lastFetch && (now - lastFetch) / 1000 > (intervalMode === "active" ? 1080 : 2100);
+
+  // ─── Editor de precios ─────────────────────────────────
+  const openEditor = () => {
+    // Inicializar buffer con valores actuales
+    const buf = {};
+    contracts.forEach((c) => {
+      buf[c.ticker] = String(c.price);
+    });
+    setEditorBuffer(buf);
+    setEditorCaucion(String(caucionRate));
+    setEditorOpen(true);
+  };
+
+  const closeEditor = () => {
+    setEditorOpen(false);
+    setEditorBuffer({});
+  };
+
+  const saveEditor = () => {
+    // Parse y filtrar valores válidos
+    const newPrices = {};
+    Object.entries(editorBuffer).forEach(([ticker, val]) => {
+      const parsed = parseFloat(String(val).replace(",", "."));
+      if (parsed > 0) newPrices[ticker] = parsed;
+    });
+    setStoredPrices(newPrices);
+    const ts = new Date();
+    setPricesUpdatedAt(ts);
+    if (typeof window !== "undefined") {
+      window.localStorage.setItem(DLR_PRICES_LS_KEY, JSON.stringify(newPrices));
+      window.localStorage.setItem(DLR_PRICES_TS_LS_KEY, ts.toISOString());
+    }
+    // Caución
+    const cau = parseFloat(String(editorCaucion).replace(",", "."));
+    if (cau > 0) {
+      setCaucionRate(cau);
+      if (typeof window !== "undefined") {
+        window.localStorage.setItem(CAUCION_LS_KEY, String(cau));
+      }
+    }
+    setEditorOpen(false);
+  };
+
+  const resetSeed = () => {
+    setStoredPrices({});
+    setPricesUpdatedAt(null);
+    if (typeof window !== "undefined") {
+      window.localStorage.removeItem(DLR_PRICES_LS_KEY);
+      window.localStorage.removeItem(DLR_PRICES_TS_LS_KEY);
+    }
+    closeEditor();
+  };
+
+  // Calculadora manual
+  const calcSpotN = parseFloat(String(calcSpot).replace(/\./g, "").replace(",", "."));
+  const calcFuturoN = parseFloat(String(calcFuturo).replace(/\./g, "").replace(",", "."));
+  const calcDaysN = parseInt(calcDays, 10);
+  const calcTNA = implicitTNA(calcFuturoN, calcSpotN, calcDaysN);
+  const calcTEM = implicitTEM(calcFuturoN, calcSpotN, calcDaysN);
+  const calcTEA = implicitTEA(calcFuturoN, calcSpotN, calcDaysN);
+
+  return (
+    <div className="px-6 py-5 eco-fade-in" style={{ minHeight: "100%" }}>
+      {/* Header */}
+      <div className="flex items-start justify-between gap-6 mb-5 flex-wrap">
+        <div className="flex flex-col gap-1.5">
+          <span style={{ fontSize: 9, color: C.dim, letterSpacing: "0.22em", textTransform: "uppercase", fontWeight: 500 }}>
+            Analizadores · Futuros vs Caución
+          </span>
+          <h1 className="eco-display" style={{ fontSize: 24, fontWeight: 700, letterSpacing: "-0.01em", color: C.text, lineHeight: 1.1, margin: 0 }}>
+            Dólar Futuro · Tasa Implícita
+          </h1>
+          <p style={{ fontSize: 11.5, color: C.muted, letterSpacing: "0.005em", maxWidth: 720, margin: "4px 0 0 0", lineHeight: 1.5 }}>
+            Curva de contratos DLR (Matba-Rofex) y devaluación que están descontando. Compará contra caución pesos y proyección REM para detectar arbitrajes.
+          </p>
+        </div>
+        <div className="flex items-center gap-2.5 flex-shrink-0">
+          <StatusPill error={error} loading={loading || refreshing} isStale={isStale} lastFetch={lastFetch} now={now} />
+          <RefreshButton onClick={() => fetchAll(true)} spinning={refreshing} />
+        </div>
+      </div>
+
+      {/* Error inline */}
+      {error && (
+        <div className="flex items-start gap-3 p-4 mb-5" style={{ backgroundColor: "rgba(248,113,113,0.08)", border: `1px solid rgba(248,113,113,0.25)` }}>
+          <AlertTriangle size={16} color={C.red} strokeWidth={1.8} />
+          <div className="flex flex-col gap-0.5">
+            <span style={{ fontSize: 12, color: C.text, fontWeight: 500 }}>No se pudieron cargar los datos</span>
+            <span style={{ fontSize: 11, color: C.muted }}>{error}</span>
+          </div>
+        </div>
+      )}
+
+      {/* KPIs comparativos */}
+      <SectionLabel>Indicadores de Referencia</SectionLabel>
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-5">
+        <KpiCard
+          label="Spot Mayorista"
+          value={spotMayorista ? `$${fmtARS(spotMayorista)}` : "—"}
+          sub="BCRA A 3500"
+          color={C.cat.cyan}
+        />
+        <KpiCard
+          label="Caución 1d"
+          value={caucionRate ? `${fmtPct(caucionRate)}` : "—"}
+          sub="TNA pesos · editable"
+          color={C.cat.yellow}
+        />
+        <KpiCard
+          label="Dev. REM Implícita"
+          value={remDevTNA != null ? fmtPct(remDevTNA * 100) : "—"}
+          sub="TNA proyección REM"
+          color={C.cat.emerald}
+        />
+        <KpiCard
+          label="Tasa Implícita Prom."
+          value={tnaProm != null ? fmtPct(tnaProm * 100) : "—"}
+          sub="TNA · 3 contratos cortos"
+          color={C.cat.violet}
+        />
+      </div>
+
+      {/* Editor de precios — barra superior */}
+      <div
+        className="flex flex-wrap items-center justify-between gap-3 mb-3 px-4 py-2.5"
+        style={{
+          backgroundColor: C.panel,
+          borderLeft: `2px solid ${C.cat.violet}`,
+        }}
+      >
+        <div className="flex items-center gap-3 flex-wrap">
+          <span style={{ fontSize: 10, color: C.dim, letterSpacing: "0.18em", textTransform: "uppercase", fontWeight: 500 }}>
+            Precios
+          </span>
+          {pricesUpdatedAt ? (
+            <span style={{ fontSize: 11, color: C.muted }}>
+              Editados {timeAgo(pricesUpdatedAt, now)} · {pricesUpdatedAt.toLocaleString("es-AR", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" })}
+            </span>
+          ) : (
+            <span style={{ fontSize: 11, color: C.muted }}>
+              Datos seed · {DLR_SEED_DATE}
+            </span>
+          )}
+        </div>
+        <div className="flex items-center gap-2">
+          {pricesUpdatedAt && (
+            <button
+              onClick={resetSeed}
+              style={{
+                fontSize: 10,
+                color: C.muted,
+                backgroundColor: "transparent",
+                border: `1px solid ${C.border}`,
+                padding: "5px 10px",
+                cursor: "pointer",
+                letterSpacing: "0.10em",
+                textTransform: "uppercase",
+                fontWeight: 500,
+              }}
+            >
+              Reset seed
+            </button>
+          )}
+          <button
+            onClick={editorOpen ? closeEditor : openEditor}
+            style={{
+              fontSize: 10,
+              color: editorOpen ? C.cat.violet : C.text,
+              backgroundColor: editorOpen ? "rgba(167,139,250,0.10)" : C.cat.violet,
+              border: `1px solid ${C.cat.violet}`,
+              padding: "5px 12px",
+              cursor: "pointer",
+              letterSpacing: "0.10em",
+              textTransform: "uppercase",
+              fontWeight: 600,
+            }}
+          >
+            <Pencil size={10} strokeWidth={2} style={{ display: "inline-block", marginRight: 6, verticalAlign: -1 }} />
+            {editorOpen ? "Cancelar" : "Editar precios"}
+          </button>
+        </div>
+      </div>
+
+      {/* Editor expandido */}
+      {editorOpen && (
+        <PriceEditor
+          contracts={contracts}
+          buffer={editorBuffer}
+          setBuffer={setEditorBuffer}
+          caucion={editorCaucion}
+          setCaucion={setEditorCaucion}
+          onSave={saveEditor}
+          onCancel={closeEditor}
+        />
+      )}
+
+      {/* Callout — explicación de la tabla */}
+      <div
+        className="flex items-start gap-2 mb-3 px-4 py-3"
+        style={{
+          backgroundColor: "rgba(56, 189, 248, 0.04)",
+          borderLeft: `2px solid ${C.accent}`,
+        }}
+      >
+        <Info size={13} color={C.accent} strokeWidth={1.8} style={{ flexShrink: 0, marginTop: 2 }} />
+        <p style={{ fontSize: 11.5, color: C.muted, margin: 0, lineHeight: 1.55, letterSpacing: "0.005em" }}>
+          La <span style={{ color: C.text, fontWeight: 500 }}>TNA implícita</span> es la devaluación anualizada que descuenta cada contrato vs el mayorista actual ($
+          {spotMayorista ? fmtARS(spotMayorista) : "—"}). La <span style={{ color: C.text, fontWeight: 500 }}>Forward TEM</span> es la devaluación esperada mes a mes entre dos contratos consecutivos.{" "}
+          <span style={{ color: C.green, fontWeight: 500 }}>vs Caución negativo</span> = futuro barato (vender futuro + colocar pesos en caución captura el spread).{" "}
+          <span style={{ color: C.red, fontWeight: 500 }}>vs Caución positivo</span> = futuro caro (mercado descuenta más devaluación que la tasa pesos).
+        </p>
+      </div>
+
+      {/* Tabla de contratos */}
+      <SectionLabel>Curva de Futuros DLR</SectionLabel>
+      <div style={{ backgroundColor: C.panel, borderTop: `2px solid ${C.cat.cyan}`, padding: "10px 14px" }}>
+        {loading && contracts.length === 0 ? (
+          <div className="flex items-center justify-center py-12">
+            <Loader2 size={18} color={C.accent} className="eco-spin" strokeWidth={1.8} />
+          </div>
+        ) : (
+          <div style={{ overflowX: "auto" }}>
+            <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 980 }}>
+              <thead>
+                <tr style={{ borderBottom: `1px solid ${C.border}` }}>
+                  <Th align="left">Contrato</Th>
+                  <Th align="right">Vto</Th>
+                  <Th align="right">Días</Th>
+                  <Th align="right">Precio</Th>
+                  <Th align="right">TNA</Th>
+                  <Th align="right">TEM</Th>
+                  <Th align="right">TEA</Th>
+                  <Th align="right">Forward TEM</Th>
+                  <Th align="right" emphasized>vs Caución</Th>
+                </tr>
+              </thead>
+              <tbody>
+                {contractsWithForward.map((c) => {
+                  const tnaPct = c.tna != null ? c.tna * 100 : null;
+                  const spreadVsCaucion = (tnaPct != null && caucionRate) ? (tnaPct - caucionRate) : null;
+                  const sColor = spreadColor(spreadVsCaucion);
+                  return (
+                    <tr key={c.ticker} className="eco-table-row" style={{ borderBottom: `1px solid ${C.border}` }}>
+                      <Td align="left">
+                        <span style={{ color: C.cat.cyan, fontWeight: 600, fontSize: 13 }}>{c.displayTicker}</span>
+                      </Td>
+                      <Td align="right" mono>{formatDate(c.maturityDate)}</Td>
+                      <Td align="right" mono><span style={{ color: C.muted }}>{c.days}</span></Td>
+                      <Td align="right" mono>${fmtARS(c.price)}</Td>
+                      <Td align="right" mono>
+                        <span style={{ color: C.text, fontWeight: 500 }}>
+                          {tnaPct != null ? fmtPct(tnaPct) : "—"}
+                        </span>
+                      </Td>
+                      <Td align="right" mono>
+                        <span style={{ color: C.muted }}>
+                          {c.tem != null ? fmtPct(c.tem * 100) : "—"}
+                        </span>
+                      </Td>
+                      <Td align="right" mono>
+                        <span style={{ color: C.muted }}>
+                          {c.tea != null ? fmtPct(c.tea * 100) : "—"}
+                        </span>
+                      </Td>
+                      <Td align="right" mono>
+                        <span style={{ color: C.cat.emerald }}>
+                          {c.forwardTEM != null ? fmtPct(c.forwardTEM * 100) : "—"}
+                        </span>
+                      </Td>
+                      <Td align="right" mono>
+                        <span style={{ color: sColor, fontWeight: 600 }}>
+                          {spreadVsCaucion != null ? `${spreadVsCaucion >= 0 ? "+" : ""}${fmtPct(spreadVsCaucion)}` : "—"}
+                        </span>
+                      </Td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
+      {/* Curva de tasas implícitas */}
+      <div className="mt-7">
+        <div
+          className="flex items-start gap-2 mb-3 px-4 py-3"
+          style={{
+            backgroundColor: "rgba(167, 139, 250, 0.04)",
+            borderLeft: `2px solid ${C.cat.violet}`,
+          }}
+        >
+          <Info size={13} color={C.cat.violet} strokeWidth={1.8} style={{ flexShrink: 0, marginTop: 2 }} />
+          <p style={{ fontSize: 11.5, color: C.muted, margin: 0, lineHeight: 1.55, letterSpacing: "0.005em" }}>
+            Cada punto es la <span style={{ color: C.text, fontWeight: 500 }}>TNA implícita</span> de un contrato. Si la curva está{" "}
+            <span style={{ color: C.green, fontWeight: 500 }}>por debajo</span> de la línea de caución, el futuro está descontando menos devaluación que la tasa pesos —
+            arbitraje clásico: vender futuro y colocar caución. Si está <span style={{ color: C.red, fontWeight: 500 }}>por encima</span>, el mercado descuenta salto cambiario o crisis de pesos.
+          </p>
+        </div>
+        <SectionLabel>Curva de Tasas Implícitas</SectionLabel>
+        <ImplicitRatesChart
+          contracts={contractsWithForward}
+          caucion={caucionRate}
+          remDevTNA={remDevTNA}
+        />
+      </div>
+
+      {/* Calculadora manual */}
+      <div className="mt-7">
+        <SectionLabel>Calculadora de Tasa Implícita</SectionLabel>
+        <div style={{ backgroundColor: C.panel, borderTop: `2px solid ${C.cat.pink}`, padding: "16px 18px" }}>
+          <CardHeader icon={Calculator} iconColor={C.cat.pink} label="Probá tu propio escenario" />
+          <p style={{ fontSize: 11, color: C.muted, marginTop: -4, marginBottom: 14 }}>
+            Ingresá Spot, Futuro y días al vencimiento. Útil para evaluar contratos no listados o escenarios hipotéticos.
+          </p>
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mb-4">
+            <CalcInput label="Spot (ARS)" value={calcSpot} onChange={setCalcSpot} placeholder={fmtARS(spot)} />
+            <CalcInput label="Futuro (ARS)" value={calcFuturo} onChange={setCalcFuturo} placeholder="ej. 1500" />
+            <CalcInput label="Días al Vto" value={calcDays} onChange={setCalcDays} placeholder="ej. 90" type="number" />
+          </div>
+          <div className="grid grid-cols-3 gap-3" style={{ paddingTop: 14, borderTop: `1px solid ${C.border}` }}>
+            <CalcOutput label="TNA implícita" value={calcTNA != null ? fmtPct(calcTNA * 100) : "—"} color={C.cat.cyan} />
+            <CalcOutput label="TEM implícita" value={calcTEM != null ? fmtPct(calcTEM * 100) : "—"} color={C.cat.emerald} />
+            <CalcOutput label="TEA implícita" value={calcTEA != null ? fmtPct(calcTEA * 100) : "—"} color={C.cat.violet} />
+          </div>
+        </div>
+      </div>
+
+      {/* Footer */}
+      <div className="flex flex-wrap items-center gap-2 mt-7" style={{ fontSize: 10, color: C.dim, letterSpacing: "0.10em", textTransform: "uppercase" }}>
+        <span>fuentes:</span>
+        <span style={{ color: C.muted }}>matbarofex.primary.ventures (manual)</span>
+        <span style={{ color: C.faint }}>·</span>
+        <span style={{ color: C.muted }}>dolarapi.com (mayorista)</span>
+        <span style={{ color: C.faint }}>·</span>
+        <span style={{ color: C.muted }}>API REM (BCRA)</span>
+        <span style={{ color: C.faint }}>·</span>
+        <span>auto-refresh:</span>
+        <span style={{ color: C.muted }}>
+          {intervalMode === "active" ? "15 min · horario hábil" : "30 min · fuera de horario"}
+        </span>
+      </div>
+
+      <p style={{ fontSize: 10, color: C.dim, marginTop: 12, lineHeight: 1.5, maxWidth: 760 }}>
+        Los precios DLR no tienen API pública gratuita conocida. Se cargan manualmente desde Matba-Rofex (visor mtbarofex.primary.ventures/fyo/futurosfinancieros).
+        Caución también es manual — actualizá ambos desde "Editar precios". Cálculos: TNA = (F/S − 1) × 365/días · TEM = (F/S)^(30/días) − 1.
+      </p>
+    </div>
+  );
+}
+
+/* ─────────── Subcomponentes Futuros vs Caución ─────────── */
+
+function KpiCard({ label, value, sub, color }) {
+  return (
+    <div
+      style={{
+        backgroundColor: C.panel,
+        borderTop: `2px solid ${color}`,
+        padding: "10px 14px",
+        display: "flex",
+        flexDirection: "column",
+        gap: 2,
+      }}
+    >
+      <div style={{ fontSize: 9, color: C.dim, letterSpacing: "0.18em", textTransform: "uppercase", fontWeight: 500 }}>
+        {label}
+      </div>
+      <div className="eco-mono" style={{ fontSize: 18, color: C.text, fontWeight: 600, letterSpacing: "-0.005em", lineHeight: 1.1 }}>
+        {value}
+      </div>
+      {sub && (
+        <div style={{ fontSize: 10, color: C.muted, marginTop: 2 }}>
+          {sub}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function PriceEditor({ contracts, buffer, setBuffer, caucion, setCaucion, onSave, onCancel }) {
+  const updateField = (ticker, val) => {
+    setBuffer((prev) => ({ ...prev, [ticker]: val }));
+  };
+
+  return (
+    <div
+      style={{
+        backgroundColor: C.deep,
+        border: `1px solid ${C.cat.violet}`,
+        padding: "16px 18px",
+        marginBottom: 14,
+      }}
+    >
+      <div style={{ fontSize: 10, color: C.cat.violet, letterSpacing: "0.18em", textTransform: "uppercase", fontWeight: 600, marginBottom: 4 }}>
+        Editor de precios manual
+      </div>
+      <p style={{ fontSize: 11, color: C.muted, margin: "0 0 14px 0", lineHeight: 1.5 }}>
+        Copiá los precios del visor MtR (columna "Ajuste Ant." o "Últ.") y pegá acá. Se guardan en tu navegador.
+      </p>
+
+      {/* Grilla de precios DLR */}
+      <div
+        className="grid gap-3 mb-4"
+        style={{ gridTemplateColumns: "repeat(auto-fill, minmax(160px, 1fr))" }}
+      >
+        {contracts.map((c) => (
+          <div key={c.ticker} className="flex flex-col gap-1">
+            <label style={{ fontSize: 10, color: C.dim, letterSpacing: "0.10em", textTransform: "uppercase", fontWeight: 500 }}>
+              {c.displayTicker}
+            </label>
+            <input
+              type="text"
+              value={buffer[c.ticker] ?? ""}
+              onChange={(e) => updateField(c.ticker, e.target.value)}
+              placeholder={String(c.priceSeed)}
+              style={{
+                backgroundColor: C.bg,
+                border: `1px solid ${C.border}`,
+                color: C.text,
+                fontFamily: "'JetBrains Mono', monospace",
+                fontSize: 13,
+                padding: "6px 10px",
+                outline: "none",
+                width: "100%",
+              }}
+            />
+          </div>
+        ))}
+      </div>
+
+      {/* Caución */}
+      <div
+        className="grid gap-3 mb-4"
+        style={{
+          gridTemplateColumns: "minmax(160px, 1fr) 1fr",
+          paddingTop: 14,
+          borderTop: `1px solid ${C.border}`,
+        }}
+      >
+        <div className="flex flex-col gap-1">
+          <label style={{ fontSize: 10, color: C.dim, letterSpacing: "0.10em", textTransform: "uppercase", fontWeight: 500 }}>
+            Caución 1d (TNA %)
+          </label>
+          <input
+            type="text"
+            value={caucion}
+            onChange={(e) => setCaucion(e.target.value)}
+            placeholder="32"
+            style={{
+              backgroundColor: C.bg,
+              border: `1px solid ${C.border}`,
+              color: C.text,
+              fontFamily: "'JetBrains Mono', monospace",
+              fontSize: 13,
+              padding: "6px 10px",
+              outline: "none",
+              width: "100%",
+            }}
+          />
+        </div>
+      </div>
+
+      {/* Botones */}
+      <div className="flex justify-end gap-2">
+        <button
+          onClick={onCancel}
+          style={{
+            fontSize: 11,
+            color: C.muted,
+            backgroundColor: "transparent",
+            border: `1px solid ${C.border}`,
+            padding: "7px 14px",
+            cursor: "pointer",
+            letterSpacing: "0.10em",
+            textTransform: "uppercase",
+            fontWeight: 500,
+          }}
+        >
+          Cancelar
+        </button>
+        <button
+          onClick={onSave}
+          style={{
+            fontSize: 11,
+            color: "#0B1220",
+            backgroundColor: C.cat.violet,
+            border: `1px solid ${C.cat.violet}`,
+            padding: "7px 16px",
+            cursor: "pointer",
+            letterSpacing: "0.10em",
+            textTransform: "uppercase",
+            fontWeight: 700,
+          }}
+        >
+          Guardar
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function CalcInput({ label, value, onChange, placeholder, type = "text" }) {
+  return (
+    <div className="flex flex-col gap-1">
+      <label style={{ fontSize: 10, color: C.dim, letterSpacing: "0.18em", textTransform: "uppercase", fontWeight: 500 }}>
+        {label}
+      </label>
+      <input
+        type={type}
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder={placeholder}
+        style={{
+          backgroundColor: C.deep,
+          border: `1px solid ${C.border}`,
+          color: C.text,
+          fontFamily: "'JetBrains Mono', monospace",
+          fontSize: 14,
+          padding: "8px 12px",
+          outline: "none",
+          width: "100%",
+        }}
+      />
+    </div>
+  );
+}
+
+function CalcOutput({ label, value, color }) {
+  return (
+    <div className="flex flex-col gap-1">
+      <span style={{ fontSize: 9, color: C.dim, letterSpacing: "0.18em", textTransform: "uppercase", fontWeight: 500 }}>
+        {label}
+      </span>
+      <span className="eco-mono" style={{ fontSize: 20, color, fontWeight: 600, letterSpacing: "-0.005em", lineHeight: 1.1 }}>
+        {value}
+      </span>
+    </div>
+  );
+}
+
+/* ─────────── Curva de Tasas Implícitas (gráfico) ─────────── */
+
+function ImplicitRatesChart({ contracts, caucion, remDevTNA }) {
+  if (!contracts || contracts.length === 0) {
+    return (
+      <div style={{ backgroundColor: C.panel, borderTop: `2px solid ${C.cat.violet}`, padding: 24, textAlign: "center" }}>
+        <span style={{ fontSize: 12, color: C.muted }}>Sin datos para construir el gráfico.</span>
+      </div>
+    );
+  }
+
+  // Datos del scatter: x = días, y = TNA implícita (%)
+  const scatterData = contracts
+    .filter((c) => c.tna != null)
+    .map((c) => ({
+      x: c.days,
+      y: c.tna * 100,
+      ticker: c.displayTicker,
+      maturityDate: c.maturityDate,
+    }));
+
+  if (scatterData.length === 0) {
+    return (
+      <div style={{ backgroundColor: C.panel, borderTop: `2px solid ${C.cat.violet}`, padding: 24, textAlign: "center" }}>
+        <span style={{ fontSize: 12, color: C.muted }}>Sin tasas calculables — verificar spot y precios.</span>
+      </div>
+    );
+  }
+
+  const minX = 0;
+  const maxX = Math.max(...scatterData.map((d) => d.x)) + 30;
+  const allY = [
+    ...scatterData.map((d) => d.y),
+    caucion,
+    remDevTNA != null ? remDevTNA * 100 : null,
+  ].filter((v) => v != null && !isNaN(v));
+  const minY = Math.min(...allY) - 3;
+  const maxY = Math.max(...allY) + 3;
+  const yDomain = [Math.floor(minY / 2) * 2, Math.ceil(maxY / 2) * 2];
+
+  // Línea de la curva (los mismos puntos del scatter, conectados)
+  const curveLine = [...scatterData].sort((a, b) => a.x - b.x);
+
+  const renderDot = (props) => {
+    const { cx, cy, payload } = props;
+    if (cx == null || cy == null) return null;
+    return (
+      <g>
+        <circle cx={cx} cy={cy} r={4.5} fill={C.cat.cyan} stroke={C.bg} strokeWidth={1.5} />
+        <text
+          x={cx}
+          y={cy - 10}
+          textAnchor="middle"
+          fill={C.cat.cyan}
+          fontSize={9}
+          fontFamily="'JetBrains Mono', monospace"
+          fontWeight={600}
+          style={{ pointerEvents: "none", userSelect: "none" }}
+        >
+          {payload.ticker.replace("DLR/", "")}
+        </text>
+      </g>
+    );
+  };
+
+  const tooltipContent = ({ active, payload }) => {
+    if (!active || !payload || !payload.length) return null;
+    const pt = payload.find((p) => p.payload && p.payload.ticker);
+    if (!pt) return null;
+    const data = pt.payload;
+    return (
+      <div
+        style={{
+          backgroundColor: C.deep,
+          border: `1px solid ${C.borderStrong}`,
+          padding: "9px 12px",
+          fontSize: 11,
+          fontFamily: "'JetBrains Mono', monospace",
+          boxShadow: "0 4px 12px rgba(0, 0, 0, 0.5)",
+          minWidth: 180,
+        }}
+      >
+        <div style={{ color: C.cat.cyan, fontWeight: 700, marginBottom: 6 }}>
+          {data.ticker}
+        </div>
+        <div style={{ color: C.muted, fontSize: 10, marginBottom: 6 }}>
+          Vto: {data.maturityDate} · {data.x}d
+        </div>
+        <div style={{ color: C.text, display: "flex", justifyContent: "space-between", gap: 16 }}>
+          <span style={{ color: C.muted }}>TNA implícita</span>
+          <span style={{ color: C.text, fontWeight: 600 }}>{fmtPct(data.y)}</span>
+        </div>
+        {caucion != null && (
+          <div
+            style={{
+              fontSize: 10,
+              marginTop: 6,
+              paddingTop: 6,
+              borderTop: `1px solid ${C.border}`,
+              display: "flex",
+              justifyContent: "space-between",
+              gap: 16,
+              color: C.muted,
+            }}
+          >
+            <span>vs Caución</span>
+            <span style={{ color: spreadColor(data.y - caucion), fontWeight: 600 }}>
+              {data.y - caucion >= 0 ? "+" : ""}{fmtPct(data.y - caucion)}
+            </span>
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  return (
+    <div style={{ backgroundColor: C.panel, borderTop: `2px solid ${C.cat.violet}`, padding: "14px 14px 18px" }}>
+      <div style={{ width: "100%", height: 420 }}>
+        <ResponsiveContainer width="100%" height="100%">
+          <ComposedChart margin={{ top: 24, right: 70, bottom: 50, left: 60 }}>
+            <CartesianGrid strokeDasharray="3 3" stroke={C.border} opacity={0.4} />
+            <XAxis
+              dataKey="x"
+              type="number"
+              domain={[minX, maxX]}
+              tickFormatter={(v) => `${v}d`}
+              stroke={C.muted}
+              style={{ fontSize: 10, fontFamily: "'JetBrains Mono', monospace" }}
+              tickLine={{ stroke: C.border }}
+              height={40}
+            >
+              <Label
+                value="Días al vencimiento"
+                position="insideBottom"
+                offset={-30}
+                style={{ fill: C.dim, fontSize: 11, fontFamily: "'Roboto', sans-serif", letterSpacing: "0.04em" }}
+              />
+            </XAxis>
+            <YAxis
+              type="number"
+              domain={yDomain}
+              tickFormatter={(v) => `${fmtPct(v)}`}
+              stroke={C.muted}
+              style={{ fontSize: 10, fontFamily: "'JetBrains Mono', monospace" }}
+              tickLine={{ stroke: C.border }}
+              width={60}
+            >
+              <Label
+                value="TNA implícita"
+                angle={-90}
+                position="insideLeft"
+                offset={5}
+                style={{ textAnchor: "middle", fill: C.dim, fontSize: 11, fontFamily: "'Roboto', sans-serif", letterSpacing: "0.04em" }}
+              />
+            </YAxis>
+            <RechartsTooltip
+              content={tooltipContent}
+              cursor={{ stroke: C.borderStrong, strokeDasharray: "3 3", strokeWidth: 1 }}
+              isAnimationActive={false}
+              wrapperStyle={{ outline: "none" }}
+            />
+
+            {/* Línea horizontal: caución actual */}
+            {caucion != null && (
+              <ReferenceLine
+                y={caucion}
+                stroke={C.cat.yellow}
+                strokeWidth={1.5}
+                strokeDasharray="6 4"
+                label={{
+                  value: `Caución ${fmtPct(caucion)}`,
+                  position: "right",
+                  fill: C.cat.yellow,
+                  fontSize: 10,
+                  fontFamily: "'JetBrains Mono', monospace",
+                  fontWeight: 600,
+                }}
+              />
+            )}
+
+            {/* Línea horizontal: dev. REM */}
+            {remDevTNA != null && (
+              <ReferenceLine
+                y={remDevTNA * 100}
+                stroke={C.cat.emerald}
+                strokeWidth={1.5}
+                strokeDasharray="6 4"
+                label={{
+                  value: `REM ${fmtPct(remDevTNA * 100)}`,
+                  position: "right",
+                  fill: C.cat.emerald,
+                  fontSize: 10,
+                  fontFamily: "'JetBrains Mono', monospace",
+                  fontWeight: 600,
+                }}
+              />
+            )}
+
+            {/* Curva uniendo los puntos */}
+            <Line
+              data={curveLine}
+              type="monotone"
+              dataKey="y"
+              xAxisId={0}
+              yAxisId={0}
+              stroke={C.cat.cyan}
+              strokeWidth={1.5}
+              strokeOpacity={0.4}
+              dot={false}
+              activeDot={false}
+              isAnimationActive={false}
+              connectNulls
+            />
+
+            {/* Scatter de los contratos */}
+            <Scatter
+              data={scatterData}
+              dataKey="y"
+              xAxisId={0}
+              yAxisId={0}
+              shape={renderDot}
+              isAnimationActive={false}
+              name="DLR"
+            />
+          </ComposedChart>
+        </ResponsiveContainer>
+      </div>
+
+      {/* Leyenda inferior */}
+      <div className="flex items-center justify-center gap-5 mt-3 px-1" style={{ flexWrap: "wrap", fontSize: 10, color: C.muted, fontFamily: "'Roboto', sans-serif", letterSpacing: "0.04em" }}>
+        <div className="flex items-center gap-2">
+          <div style={{ width: 8, height: 8, borderRadius: "50%", backgroundColor: C.cat.cyan }} />
+          <span>Contratos DLR</span>
+        </div>
+        <div className="flex items-center gap-2">
+          <div style={{ width: 14, height: 1, borderTop: `2px dashed ${C.cat.yellow}` }} />
+          <span>Caución 1d</span>
+        </div>
+        <div className="flex items-center gap-2">
+          <div style={{ width: 14, height: 1, borderTop: `2px dashed ${C.cat.emerald}` }} />
+          <span>REM proyectado</span>
         </div>
       </div>
     </div>
