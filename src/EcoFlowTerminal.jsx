@@ -3190,14 +3190,24 @@ function BreakevenChart({ bonds, fxRates, remIpc, loading }) {
   const usingCustom = customMepNum > 0;
 
   // Puntos del scatter: cada bono → { x: timestamp_vto, y: dolar_breakeven, ticker, ... }
-  const scatterData = bonds.map((b) => ({
-    x: isoToTimestamp(b.maturityDate),
-    y: effectiveMep * (b.valorFinal / b.priceArs),
-    ticker: b.ticker,
-    type: b.type,
-    days: b.days,
-    maturityDate: b.maturityDate,
-  }));
+  const scatterData = bonds.map((b) => {
+    const beY = effectiveMep * (b.valorFinal / b.priceArs);
+    const ceilingAtMat = projectBand(b.maturityDate, "ceiling", remIpc);
+    const floorAtMat = projectBand(b.maturityDate, "floor", remIpc);
+    return {
+      x: isoToTimestamp(b.maturityDate),
+      y: beY,
+      ticker: b.ticker,
+      type: b.type,
+      days: b.days,
+      maturityDate: b.maturityDate,
+      // Bandas proyectadas a la fecha de vencimiento (para tooltip)
+      ceilingAtMat,
+      floorAtMat,
+      // Distancia % del Dólar BE al techo. Positivo = BE > techo (carry robusto al peor escenario).
+      distToCeiling: ceilingAtMat ? (beY / ceilingAtMat - 1) * 100 : null,
+    };
+  });
 
   // Series de bandas BCRA (piso y techo proyectados)
   const ceilingSeries = generateBandSeries(bonds, "ceiling", remIpc);
@@ -3424,26 +3434,74 @@ function BreakevenChart({ bonds, fxRates, remIpc, loading }) {
               left: hoveredPoint.cx + 14,
               top: hoveredPoint.cy - 8,
               backgroundColor: C.deep,
-              border: `1px solid ${C.border}`,
-              padding: "8px 12px",
+              border: `1px solid ${C.borderStrong}`,
+              padding: "9px 12px",
               fontSize: 11,
               fontFamily: "'JetBrains Mono', monospace",
               pointerEvents: "none",
               zIndex: 10,
-              minWidth: 160,
+              minWidth: 200,
               boxShadow: "0 4px 12px rgba(0, 0, 0, 0.5)",
             }}
           >
-            <div style={{ color: typeColor(hoveredPoint.type), fontWeight: 700, marginBottom: 4 }}>
+            {/* Header: ticker + tipo */}
+            <div style={{ color: typeColor(hoveredPoint.type), fontWeight: 700, marginBottom: 6 }}>
               {hoveredPoint.ticker}
               <span style={{ color: C.muted, marginLeft: 8, fontWeight: 400, fontSize: 10 }}>
                 {typeLabel(hoveredPoint.type)}
               </span>
             </div>
-            <div style={{ color: C.text }}>Dólar BE: ${fmtARS(hoveredPoint.y)}</div>
-            <div style={{ color: C.muted, fontSize: 10 }}>
+
+            {/* Vto + días */}
+            <div style={{ color: C.muted, fontSize: 10, marginBottom: 6, letterSpacing: "0.04em" }}>
               Vto: {hoveredPoint.maturityDate} · {hoveredPoint.days}d
             </div>
+
+            {/* Dólar BE — métrica principal */}
+            <div style={{ color: typeColor(hoveredPoint.type), display: "flex", justifyContent: "space-between", gap: 16 }}>
+              <span>Dólar BE</span>
+              <span style={{ color: C.text, fontWeight: 600 }}>${fmtARS(hoveredPoint.y)}</span>
+            </div>
+
+            {/* Bandas BCRA proyectadas a la fecha de vto */}
+            {hoveredPoint.ceilingAtMat != null && (
+              <div style={{ color: C.red, display: "flex", justifyContent: "space-between", gap: 16, marginTop: 2 }}>
+                <span>Techo BCRA</span>
+                <span style={{ color: C.text, fontWeight: 600 }}>${fmtARS(hoveredPoint.ceilingAtMat)}</span>
+              </div>
+            )}
+            {hoveredPoint.floorAtMat != null && (
+              <div style={{ color: C.green, display: "flex", justifyContent: "space-between", gap: 16, marginTop: 2 }}>
+                <span>Piso BCRA</span>
+                <span style={{ color: C.text, fontWeight: 600 }}>${fmtARS(hoveredPoint.floorAtMat)}</span>
+              </div>
+            )}
+
+            {/* BE vs Techo: indica si el carry resiste al peor escenario */}
+            {hoveredPoint.distToCeiling != null && (
+              <div
+                style={{
+                  fontSize: 10,
+                  marginTop: 6,
+                  paddingTop: 6,
+                  borderTop: `1px solid ${C.border}`,
+                  display: "flex",
+                  justifyContent: "space-between",
+                  gap: 16,
+                  color: C.muted,
+                }}
+              >
+                <span>BE vs Techo</span>
+                <span
+                  style={{
+                    color: hoveredPoint.distToCeiling >= 0 ? C.green : C.red,
+                    fontWeight: 600,
+                  }}
+                >
+                  {hoveredPoint.distToCeiling >= 0 ? "+" : ""}{fmtPct(hoveredPoint.distToCeiling)}
+                </span>
+              </div>
+            )}
           </div>
         )}
       </div>
