@@ -53,6 +53,7 @@ import {
   ReferenceLine,
   Line,
   ComposedChart,
+  Label,
 } from "recharts";
 
 const C = {
@@ -3247,9 +3248,9 @@ function BreakevenChart({ bonds, fxRates, remIpc, loading }) {
       </div>
 
       {/* Gráfico */}
-      <div style={{ width: "100%", height: 480 }}>
+      <div style={{ width: "100%", height: 520 }}>
         <ResponsiveContainer width="100%" height="100%">
-          <ComposedChart margin={{ top: 20, right: 60, bottom: 30, left: 50 }}>
+          <ComposedChart margin={{ top: 20, right: 70, bottom: 60, left: 70 }}>
             <CartesianGrid strokeDasharray="3 3" stroke={C.border} opacity={0.4} />
             <XAxis
               dataKey="x"
@@ -3257,14 +3258,29 @@ function BreakevenChart({ bonds, fxRates, remIpc, loading }) {
               scale="time"
               domain={[today, maxX]}
               tickFormatter={(t) => {
+                // Capitaliza primera letra del mes para que se vea como en bonistas
                 const d = new Date(t);
-                return d.toLocaleDateString("es-AR", { month: "short", year: "2-digit" });
+                const month = d.toLocaleDateString("es-AR", { month: "short" }).replace(".", "");
+                const monthCap = month.charAt(0).toUpperCase() + month.slice(1);
+                return `${monthCap} ${d.getFullYear()}`;
               }}
               stroke={C.muted}
               style={{ fontSize: 10, fontFamily: "'JetBrains Mono', monospace" }}
               tickLine={{ stroke: C.border }}
               allowDuplicatedCategory={false}
-            />
+              angle={-45}
+              textAnchor="end"
+              height={60}
+              interval="preserveStartEnd"
+              minTickGap={40}
+            >
+              <Label
+                value="Fecha de Vencimiento"
+                position="insideBottom"
+                offset={-50}
+                style={{ fill: C.dim, fontSize: 11, fontFamily: "'Roboto', sans-serif", letterSpacing: "0.04em" }}
+              />
+            </XAxis>
             <YAxis
               type="number"
               domain={yDomain}
@@ -3272,8 +3288,16 @@ function BreakevenChart({ bonds, fxRates, remIpc, loading }) {
               stroke={C.muted}
               style={{ fontSize: 10, fontFamily: "'JetBrains Mono', monospace" }}
               tickLine={{ stroke: C.border }}
-              width={60}
-            />
+              width={70}
+            >
+              <Label
+                value="Valor en ARS"
+                angle={-90}
+                position="insideLeft"
+                offset={-5}
+                style={{ textAnchor: "middle", fill: C.dim, fontSize: 11, fontFamily: "'Roboto', sans-serif", letterSpacing: "0.04em" }}
+              />
+            </YAxis>
             <RechartsTooltip content={<ScatterTooltip />} cursor={{ stroke: C.muted, strokeDasharray: "3 3" }} />
 
             {/* Línea horizontal del MEP actual o custom */}
