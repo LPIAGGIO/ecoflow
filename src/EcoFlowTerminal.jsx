@@ -4143,8 +4143,38 @@ function FuturosVsCaucionModule() {
     return () => clearInterval(i);
   }, []);
 
-  // ─── Fetch de spot mayorista + REM TC + Caución A3 ─────
-  const fetchAll = async (isManual = false) => {
+  // ─── Estrategia de fetching ─────────────────────────────
+  //
+  // Hay 3 fuentes con cadencias muy distintas:
+  //   - Spot mayorista (dolarapi):  cambia intra-día → refrescar periódico
+  //   - REM tipo de cambio (BCRA):  publicación mensual → fetch único al cargar
+  //   - Caución A3 (snapshot):      cambia solo con redeploy → fetch único al cargar
+  //
+  // Por eso separamos:
+  //   * fetchInitial()  → trae todo. Se usa al montar el módulo y en refresh manual.
+  //   * fetchSpotOnly() → solo dólar mayorista. Se dispara por el timer cada 15 min.
+  //
+  // Esto evita gastar tiempo y bandwidth llamando endpoints que nunca cambian
+  // entre fetches, y respeta los límites de las fuentes externas.
+
+  /** Trae solamente el spot mayorista. Para uso del timer periódico. */
+  const fetchSpotOnly = async () => {
+    try {
+      const fxRes = await fetch("/api/dolares");
+      if (fxRes.ok) {
+        const fx = await fxRes.json();
+        const may = fx.find((d) => (d.casa || "").toLowerCase() === "mayorista");
+        if (may?.venta) setSpotMayorista(may.venta);
+      }
+      setError(null);
+      setLastFetch(new Date());
+    } catch (e) {
+      console.warn("spot refresh failed", e);
+    }
+  };
+
+  /** Fetch inicial / refresh manual: trae todas las fuentes. */
+  const fetchInitial = async (isManual = false) => {
     if (isManual) setRefreshing(true);
     else if (spotMayorista == null) setLoading(true);
 
@@ -4160,7 +4190,7 @@ function FuturosVsCaucionModule() {
         setSpotMayorista(DLR_SPOT_SEED);
       }
 
-      // 2) REM tipo de cambio (para derivar dev. esperada)
+      // 2) REM tipo de cambio (publicación mensual — fetch único)
       try {
         const remRes = await fetch("/api/rem-tipo-cambio");
         if (remRes.ok) {
@@ -4173,7 +4203,7 @@ function FuturosVsCaucionModule() {
         }
       } catch (e) { console.warn("REM tipo_cambio failed", e); }
 
-      // 3) Caución desde snapshot estático A3 (refrescado vía npm run refresh-a3)
+      // 3) Caución desde snapshot estático A3 (cambia solo con redeploy)
       try {
         const cauRes = await fetch("/api/a3-cauciones");
         if (cauRes.ok) {
@@ -4205,12 +4235,18 @@ function FuturosVsCaucionModule() {
     }
   };
 
-  useEffect(() => { fetchAll(); /* eslint-disable-next-line */ }, []);
+  // Alias para el botón Refresh manual del header (mantiene API esperada)
+  const fetchAll = fetchInitial;
+
+  // Mount: traer todo
+  useEffect(() => { fetchInitial(); /* eslint-disable-next-line */ }, []);
+
+  // Timer periódico: solo refrescar el spot mayorista
   useEffect(() => {
     let timeoutId;
     const schedule = () => {
       const ms = getRefreshIntervalMs();
-      timeoutId = setTimeout(() => { fetchAll(); schedule(); }, ms);
+      timeoutId = setTimeout(() => { fetchSpotOnly(); schedule(); }, ms);
     };
     schedule();
     return () => clearTimeout(timeoutId);
@@ -4429,7 +4465,7 @@ function FuturosVsCaucionModule() {
           <span style={{ color: C.dim, fontSize: 10, letterSpacing: "0.10em", textTransform: "uppercase", fontWeight: 500 }}>Caución 1d:</span>{" "}
           <ChipInline color={C.green} bg="rgba(74, 222, 128, 0.10)" border="rgba(74, 222, 128, 0.30)">Auto</ChipInline> tasa de A3 Mercados (snapshot reciente).{" "}
           <ChipInline color={C.cat.violet} bg="rgba(167, 139, 250, 0.10)" border="rgba(167, 139, 250, 0.30)">Manual</ChipInline> override del usuario o sin datos disponibles (feriado, fuera de horario, snapshot no actualizado).{" "}
-          <ChipInline color={C.yellow} bg="rgba(250, 204, 21, 0.10)" border="rgba(250, 204, 21, 0.30)">Viejo</ChipInline> snapshot con más de 24 horas — ejecutar <code style={{ fontFamily: "'JetBrains Mono', monospace", color: C.text, fontSize: 10.5 }}>npm run refresh-a3</code>.
+          <ChipInline color={C.yellow} bg="rgba(250, 204, 21, 0.10)" border="rgba(250, 204, 21, 0.30)">Viejo</ChipInline> snapshot con más de 24 horas — pendiente de actualización.
         </p>
       </div>
 
@@ -4642,23 +4678,16 @@ function FuturosVsCaucionModule() {
       {/* Footer */}
       <div className="flex flex-wrap items-center gap-2 mt-7" style={{ fontSize: 10, color: C.dim, letterSpacing: "0.10em", textTransform: "uppercase" }}>
         <span>fuentes:</span>
-        <span style={{ color: C.muted }}>matbarofex.primary.ventures (manual)</span>
+        <span style={{ color: C.muted }}>Matba-Rofex</span>
         <span style={{ color: C.faint }}>·</span>
-        <span style={{ color: C.muted }}>A3 Mercados (cauciones)</span>
+        <span style={{ color: C.muted }}>A3 Mercados</span>
         <span style={{ color: C.faint }}>·</span>
-        <span style={{ color: C.muted }}>dolarapi.com (mayorista)</span>
+        <span style={{ color: C.muted }}>dolarapi.com</span>
         <span style={{ color: C.faint }}>·</span>
         <span style={{ color: C.muted }}>API REM (BCRA)</span>
-        <span style={{ color: C.faint }}>·</span>
-        <span>auto-refresh:</span>
-        <span style={{ color: C.muted }}>
-          {intervalMode === "active" ? "15 min · horario hábil" : "30 min · fuera de horario"}
-        </span>
       </div>
 
       <p style={{ fontSize: 10, color: C.dim, marginTop: 12, lineHeight: 1.5, maxWidth: 760 }}>
-        Los precios DLR se cargan manualmente desde Matba-Rofex (visor matbarofex.primary.ventures/fyo/futurosfinancieros) — no hay API pública conocida.
-        La tasa de caución se trae automática desde A3 Mercados; podés overridear con el editor.
         Cálculos: TNA = (F/S − 1) × 365/días · TEM = (F/S)^(30/días) − 1.
       </p>
     </div>
@@ -4765,7 +4794,7 @@ function CaucionKpi({ rate, mode, auto, onSwitchToAuto, now }) {
         {isAuto ? (
           <span
             title={snapshotStale
-              ? "Snapshot con más de 24hs · ejecutar npm run refresh-a3"
+              ? "Snapshot con más de 24hs · pendiente de actualización"
               : "Tasa desde snapshot A3 Mercados"}
             style={{
               fontSize: 8,
