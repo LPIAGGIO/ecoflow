@@ -4173,13 +4173,21 @@ function FuturosVsCaucionModule() {
         }
       } catch (e) { console.warn("REM tipo_cambio failed", e); }
 
-      // 3) Caución desde A3 Mercados (api.mae.com.ar)
+      // 3) Caución desde snapshot estático A3 (refrescado vía npm run refresh-a3)
       try {
         const cauRes = await fetch("/api/a3-cauciones");
         if (cauRes.ok) {
           const cauData = await cauRes.json();
           const parsed = extractCaucion1d(cauData);
-          if (parsed) setCaucionAuto(parsed);
+          if (parsed) {
+            // Capturamos el timestamp del snapshot para mostrar "actualizado hace X"
+            const snapshotAt = cauRes.headers.get("X-Snapshot-Generated-At")
+              || cauRes.headers.get("x-snapshot-generated-at");
+            setCaucionAuto({
+              ...parsed,
+              snapshotAt: snapshotAt ? new Date(snapshotAt) : null,
+            });
+          }
         } else {
           // 404/500 → no rompemos, dejamos caer al manual
           console.warn("A3 cauciones devolvió", cauRes.status);
@@ -4390,6 +4398,7 @@ function FuturosVsCaucionModule() {
           mode={caucionMode}
           auto={caucionAuto}
           onSwitchToAuto={switchToAutoCaucion}
+          now={now}
         />
         <KpiCard
           label="Dev. REM Implícita"
@@ -4671,10 +4680,23 @@ function KpiCard({ label, value, sub, color }) {
  * subtítulo y un mini-botón "auto" cuando el usuario está en override manual
  * pero hay un valor de A3 disponible al cual volver.
  */
-function CaucionKpi({ rate, mode, auto, onSwitchToAuto }) {
+function CaucionKpi({ rate, mode, auto, onSwitchToAuto, now }) {
   const isAuto = mode === "auto" && auto?.rate != null;
+
+  // Calcular antigüedad del snapshot. Si tiene >24h, marca como "viejo".
+  const snapshotAt = auto?.snapshotAt;
+  let snapshotAge = null;     // string "hace X" o null
+  let snapshotStale = false;  // true si > 24h
+  if (snapshotAt && now) {
+    const diffMs = now - snapshotAt;
+    snapshotAge = timeAgo(snapshotAt, now);
+    snapshotStale = diffMs > 24 * 60 * 60 * 1000;
+  }
+
   const subText = isAuto
-    ? `A3 Mercados · plazo ${auto.plazo || "1d"}`
+    ? (snapshotAge
+        ? `A3 · plazo ${auto.plazo || "1d"} · ${snapshotAge}`
+        : `A3 Mercados · plazo ${auto.plazo || "1d"}`)
     : (auto?.rate != null ? "Manual · override activo" : "Manual · sin datos A3");
 
   return (
@@ -4693,22 +4715,24 @@ function CaucionKpi({ rate, mode, auto, onSwitchToAuto }) {
         <div style={{ fontSize: 9, color: C.dim, letterSpacing: "0.18em", textTransform: "uppercase", fontWeight: 500 }}>
           Caución 1d
         </div>
-        {/* Indicador del origen (chip mini) */}
+        {/* Indicador del origen (chip mini) — verde auto, amarillo si snapshot viejo, violeta manual */}
         {isAuto ? (
           <span
-            title="Tasa automática desde A3 Mercados"
+            title={snapshotStale
+              ? "Snapshot con más de 24hs · ejecutar npm run refresh-a3"
+              : "Tasa desde snapshot A3 Mercados"}
             style={{
               fontSize: 8,
-              color: C.green,
-              backgroundColor: "rgba(74, 222, 128, 0.10)",
-              border: `1px solid rgba(74, 222, 128, 0.30)`,
+              color: snapshotStale ? C.yellow : C.green,
+              backgroundColor: snapshotStale ? "rgba(250, 204, 21, 0.10)" : "rgba(74, 222, 128, 0.10)",
+              border: `1px solid ${snapshotStale ? "rgba(250, 204, 21, 0.30)" : "rgba(74, 222, 128, 0.30)"}`,
               padding: "1px 5px",
               letterSpacing: "0.10em",
               fontWeight: 600,
               textTransform: "uppercase",
             }}
           >
-            Auto
+            {snapshotStale ? "Viejo" : "Auto"}
           </span>
         ) : (
           <span
