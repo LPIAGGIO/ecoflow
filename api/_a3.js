@@ -48,7 +48,9 @@ export async function fetchA3(path) {
       headers: {
         "x-api-key": apiKey,
         "Accept": "application/json",
-        "User-Agent": "EcoFlow/0.1",
+        // User-Agent de browser real. Algunos WAFs (incluido el de A3) bloquean
+        // User-Agents identificados como "bot" o de cloud providers.
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
       },
       signal: controller.signal,
     });
