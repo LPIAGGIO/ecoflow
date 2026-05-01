@@ -2557,27 +2557,23 @@ function ByDollarMode({ lecaps, boncaps, fxRates, loading, equilibriumFor, carry
         <FxKpi label="CCL" value={fxRates.ccl} color={C.cat.yellow} />
       </div>
 
-      {/* Leyenda — explicación de las columnas EQ. y Carry */}
+      {/* Callout — explicación de la matriz */}
       <div
-        className="flex items-start gap-2 mb-5 px-4 py-3"
+        className="flex items-start gap-2 mb-3 px-4 py-3"
         style={{
-          backgroundColor: "rgba(56, 189, 248, 0.04)",
-          borderLeft: `2px solid ${C.accent}`,
+          backgroundColor: "rgba(251, 146, 60, 0.04)",
+          borderLeft: `2px solid ${C.cat.orange}`,
         }}
       >
-        <Info size={13} color={C.accent} strokeWidth={1.8} style={{ flexShrink: 0, marginTop: 2 }} />
+        <Info size={13} color={C.cat.orange} strokeWidth={1.8} style={{ flexShrink: 0, marginTop: 2 }} />
         <p style={{ fontSize: 11.5, color: C.muted, margin: 0, lineHeight: 1.55, letterSpacing: "0.005em" }}>
-          Las columnas <span style={{ color: C.text, fontWeight: 500 }}>EQ.</span> muestran el{" "}
-          <span style={{ color: C.text, fontWeight: 500 }}>dólar de equilibrio</span>: el valor que tendría que
-          tener el dólar al vencimiento para que el carry trade empate con quedarse en USD. Si el dólar termina{" "}
-          <span style={{ color: C.green, fontWeight: 500 }}>por debajo</span>, ganás contra USD; si termina{" "}
-          <span style={{ color: C.red, fontWeight: 500 }}>por encima</span>, perdés.
-          <br />
-          La columna <span style={{ color: C.text, fontWeight: 500 }}>Carry vs MEP</span> muestra el{" "}
-          <span style={{ color: C.text, fontWeight: 500 }}>retorno en USD</span> asumiendo que el MEP al
-          vencimiento queda igual al actual ($
-          {fxRates.mep ? fmtARS(fxRates.mep) : "—"}). Es el escenario base — verde positivo = ganás, rojo
-          negativo = perdés.
+          Cada celda muestra el <span style={{ color: C.text, fontWeight: 500 }}>retorno en USD</span> si entrás
+          a MEP actual ($
+          {fxRates.mep ? fmtARS(fxRates.mep) : "—"}) y vendés al dólar de la columna al vencimiento del bono. La columna{" "}
+          <span style={{ color: C.cat.cyan, fontWeight: 500 }}>MEP Actual</span> usa el MEP de hoy como salida (escenario
+          base — el peso no se mueve). La columna <span style={{ color: C.cat.cyan, fontWeight: 500 }}>Carry Techo</span>{" "}
+          usa el techo de la banda BCRA proyectado a la fecha de vto del bono (crawling 1%/mes hasta dic-2025, luego
+          REM IPC T-2).
         </p>
       </div>
 
@@ -2609,8 +2605,32 @@ function ByDollarMode({ lecaps, boncaps, fxRates, loading, equilibriumFor, carry
         />
       </div>
 
+      {/* Callout — explicación de la tabla EQ. */}
+      <div
+        className="flex items-start gap-2 mt-7 mb-3 px-4 py-3"
+        style={{
+          backgroundColor: "rgba(56, 189, 248, 0.04)",
+          borderLeft: `2px solid ${C.accent}`,
+        }}
+      >
+        <Info size={13} color={C.accent} strokeWidth={1.8} style={{ flexShrink: 0, marginTop: 2 }} />
+        <p style={{ fontSize: 11.5, color: C.muted, margin: 0, lineHeight: 1.55, letterSpacing: "0.005em" }}>
+          Las columnas <span style={{ color: C.text, fontWeight: 500 }}>EQ.</span> muestran el{" "}
+          <span style={{ color: C.text, fontWeight: 500 }}>dólar de equilibrio</span>: el valor que tendría que
+          tener el dólar al vencimiento para que el carry trade empate con quedarse en USD. Si el dólar termina{" "}
+          <span style={{ color: C.green, fontWeight: 500 }}>por debajo</span>, ganás contra USD; si termina{" "}
+          <span style={{ color: C.red, fontWeight: 500 }}>por encima</span>, perdés.
+          <br />
+          La columna <span style={{ color: C.text, fontWeight: 500 }}>Carry vs MEP</span> muestra el{" "}
+          <span style={{ color: C.text, fontWeight: 500 }}>retorno en USD</span> asumiendo que el MEP al
+          vencimiento queda igual al actual ($
+          {fxRates.mep ? fmtARS(fxRates.mep) : "—"}). Es el escenario base — verde positivo = ganás, rojo
+          negativo = perdés.
+        </p>
+      </div>
+
       {/* Tabla unificada: LECAPs + BONCAPs ordenados por días al vencimiento */}
-      <div className="mt-7">
+      <div>
         <SectionLabel>Letras y Bonos Capitalizables</SectionLabel>
         <EquilibriumTable
           bonds={allBonds}
@@ -2975,22 +2995,6 @@ function ScenarioMatrix({ bonds, fxRates, remIpc, loading }) {
         </table>
       </div>
 
-      {/* Leyenda explicativa */}
-      <div
-        className="flex items-start gap-2 mt-4 px-3 py-2"
-        style={{
-          backgroundColor: "rgba(251, 146, 60, 0.04)",
-          borderLeft: `2px solid ${C.cat.orange}`,
-        }}
-      >
-        <Info size={12} color={C.cat.orange} strokeWidth={1.8} style={{ flexShrink: 0, marginTop: 2 }} />
-        <p style={{ fontSize: 11, color: C.muted, margin: 0, lineHeight: 1.5 }}>
-          Cada celda muestra el <span style={{ color: C.text, fontWeight: 500 }}>retorno en USD</span> si entrás a MEP actual ($
-          {fmtARS(mepNow)}) y vendés al dólar de la columna al vencimiento del bono. La columna{" "}
-          <span style={{ color: C.text, fontWeight: 500 }}>Carry Techo</span> usa el techo de la banda BCRA proyectado a la fecha
-          de vto del bono (crawling 1%/mes hasta dic-2025, luego REM IPC T-2).
-        </p>
-      </div>
     </div>
   );
 }
