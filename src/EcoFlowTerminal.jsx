@@ -4414,6 +4414,25 @@ function FuturosVsCaucionModule() {
         />
       </div>
 
+      {/* Leyenda de los chips de estado del KPI Caución 1d.
+          Aparece como un callout sutil para que el usuario entienda qué
+          significa cada estado sin tener que pasar el mouse por el chip. */}
+      <div
+        className="flex items-start gap-2 mb-5 px-4 py-2.5"
+        style={{
+          backgroundColor: "rgba(246, 247, 246, 0.025)",
+          borderLeft: `2px solid ${C.faint}`,
+        }}
+      >
+        <Info size={12} color={C.dim} strokeWidth={1.8} style={{ flexShrink: 0, marginTop: 3 }} />
+        <p style={{ fontSize: 11, color: C.muted, margin: 0, lineHeight: 1.6, letterSpacing: "0.005em" }}>
+          <span style={{ color: C.dim, fontSize: 10, letterSpacing: "0.10em", textTransform: "uppercase", fontWeight: 500 }}>Caución 1d:</span>{" "}
+          <ChipInline color={C.green} bg="rgba(74, 222, 128, 0.10)" border="rgba(74, 222, 128, 0.30)">Auto</ChipInline> tasa de A3 Mercados (snapshot reciente).{" "}
+          <ChipInline color={C.cat.violet} bg="rgba(167, 139, 250, 0.10)" border="rgba(167, 139, 250, 0.30)">Manual</ChipInline> override del usuario o sin datos disponibles (feriado, fuera de horario, snapshot no actualizado).{" "}
+          <ChipInline color={C.yellow} bg="rgba(250, 204, 21, 0.10)" border="rgba(250, 204, 21, 0.30)">Viejo</ChipInline> snapshot con más de 24 horas — ejecutar <code style={{ fontFamily: "'JetBrains Mono', monospace", color: C.text, fontSize: 10.5 }}>npm run refresh-a3</code>.
+        </p>
+      </div>
+
       {/* Editor de precios — barra superior */}
       <div
         className="flex flex-wrap items-center justify-between gap-3 mb-3 px-4 py-2.5"
@@ -4680,6 +4699,33 @@ function KpiCard({ label, value, sub, color }) {
  * subtítulo y un mini-botón "auto" cuando el usuario está en override manual
  * pero hay un valor de A3 disponible al cual volver.
  */
+/**
+ * Chip pequeño usado en leyendas inline (ej. la guía de estados del
+ * KPI Caución 1d). Mantiene el mismo estilo visual que los chips
+ * reales del CaucionKpi para que el usuario pueda asociar cada uno
+ * con su estado correspondiente.
+ */
+function ChipInline({ color, bg, border, children }) {
+  return (
+    <span
+      style={{
+        fontSize: 8,
+        color,
+        backgroundColor: bg,
+        border: `1px solid ${border}`,
+        padding: "1px 5px",
+        letterSpacing: "0.10em",
+        fontWeight: 600,
+        textTransform: "uppercase",
+        verticalAlign: "1px",
+        whiteSpace: "nowrap",
+      }}
+    >
+      {children}
+    </span>
+  );
+}
+
 function CaucionKpi({ rate, mode, auto, onSwitchToAuto, now }) {
   const isAuto = mode === "auto" && auto?.rate != null;
 
