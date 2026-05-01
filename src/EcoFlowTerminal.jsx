@@ -3081,10 +3081,57 @@ function generateBandSeries(bonds, boundary, remIpc) {
 /**
  * Custom tooltip para el scatter
  */
+/**
+ * Tooltip del gráfico Dólar Breakeven.
+ * Distingue 3 casos según cuál serie está bajo el cursor:
+ *   - Bono (scatter): muestra ticker + tipo + dólar BE + vto + días
+ *   - Banda techo: muestra "Techo BCRA $X.XXX · DD/MM/YYYY"
+ *   - Banda piso: muestra "Piso BCRA $X.XXX · DD/MM/YYYY"
+ *   - Si hover sobre zona vacía → no muestra nada
+ */
 function ScatterTooltip({ active, payload }) {
   if (!active || !payload || !payload.length) return null;
-  const data = payload[0].payload;
-  if (!data.ticker) return null;
+
+  // Buscar primero un bono (tiene ticker en payload)
+  const bondEntry = payload.find((p) => p.payload && p.payload.ticker);
+  if (bondEntry) {
+    const data = bondEntry.payload;
+    return (
+      <div
+        style={{
+          backgroundColor: C.deep,
+          border: `1px solid ${C.border}`,
+          padding: "8px 12px",
+          fontSize: 11,
+          fontFamily: "'JetBrains Mono', monospace",
+        }}
+      >
+        <div style={{ color: typeColor(data.type), fontWeight: 700, marginBottom: 4 }}>
+          {data.ticker}
+          <span style={{ color: C.muted, marginLeft: 8, fontWeight: 400, fontSize: 10 }}>
+            {typeLabel(data.type)}
+          </span>
+        </div>
+        <div style={{ color: C.text }}>Dólar BE: ${fmtARS(data.y)}</div>
+        <div style={{ color: C.muted, fontSize: 10 }}>
+          Vto: {data.maturityDate} · {data.days}d
+        </div>
+      </div>
+    );
+  }
+
+  // Si no hay bono cerca, mostrar valores de las bandas
+  const ceilingEntry = payload.find((p) => p.dataKey === "ceiling");
+  const floorEntry = payload.find((p) => p.dataKey === "floor");
+
+  if (!ceilingEntry && !floorEntry) return null;
+
+  // Fecha (timestamp) — todas las series comparten el mismo eje X
+  const xValue = ceilingEntry?.payload?.x ?? floorEntry?.payload?.x;
+  const dateStr = xValue
+    ? new Date(xValue).toLocaleDateString("es-AR", { day: "2-digit", month: "short", year: "numeric" })
+    : "";
+
   return (
     <div
       style={{
@@ -3095,16 +3142,17 @@ function ScatterTooltip({ active, payload }) {
         fontFamily: "'JetBrains Mono', monospace",
       }}
     >
-      <div style={{ color: typeColor(data.type), fontWeight: 700, marginBottom: 4 }}>
-        {data.ticker}
-        <span style={{ color: C.muted, marginLeft: 8, fontWeight: 400, fontSize: 10 }}>
-          {typeLabel(data.type)}
-        </span>
-      </div>
-      <div style={{ color: C.text }}>Dólar BE: ${fmtARS(data.y)}</div>
-      <div style={{ color: C.muted, fontSize: 10 }}>
-        Vto: {data.maturityDate} · {data.days}d
-      </div>
+      <div style={{ color: C.muted, fontSize: 10, marginBottom: 4 }}>{dateStr}</div>
+      {ceilingEntry && (
+        <div style={{ color: C.red }}>
+          Techo BCRA: <span style={{ color: C.text, fontWeight: 600 }}>${fmtARS(ceilingEntry.value)}</span>
+        </div>
+      )}
+      {floorEntry && (
+        <div style={{ color: C.green }}>
+          Piso BCRA: <span style={{ color: C.text, fontWeight: 600 }}>${fmtARS(floorEntry.value)}</span>
+        </div>
+      )}
     </div>
   );
 }
