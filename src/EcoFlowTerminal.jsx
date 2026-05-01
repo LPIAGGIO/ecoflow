@@ -65,44 +65,69 @@ import {
   Label,
 } from "recharts";
 
+/* ─────────── Sistema de tokens visuales ───────────
+ *
+ * Adaptación de Axon Capital al contexto de terminal financiera.
+ * El manual define la marca para fondos claros + impresos. Acá se
+ * traduce a un dashboard oscuro estilo trading desk:
+ *
+ *   - Fondo principal:  Gris Axon profundizado (#0F1B2B)
+ *   - Paneles/sidebar:  Azul Axon (#1A283E) — color principal de la marca
+ *   - Hundidos:         Negro Axon (#0D1A29)
+ *   - Texto:            Blanco Axon (#F6F7F6)
+ *
+ * El acento principal se sube a un derivado del Azul Axon
+ * (#5B8DD6) que mantiene la familia tonal de la marca pero
+ * tiene la luminancia necesaria para operar como color de
+ * estado activo, links y refresh sobre fondo oscuro.
+ *
+ * La paleta categórica para charts se conserva (es la identidad
+ * visual del sistema de viz) pero se nombra explícitamente como
+ * "categórica de datos" — separada del branding institucional.
+ */
 const C = {
-  // Base oscura (matching v2 screenshots)
-  bg: "#0B1220",            // Workspace + navbar — dark navy base
-  panel: "#131B2C",         // Sidebar + cards
-  deep: "#080F1B",          // Inputs, elementos hundidos
-  text: "#F1F5F9",          // Texto principal
+  // Base oscura — adaptación Axon
+  bg: "#0F1B2B",            // Gris Axon profundo · workspace + navbar
+  panel: "#1A283E",         // Azul Axon · sidebar + cards (color principal de marca)
+  deep: "#0D1A29",          // Negro Axon · inputs, elementos hundidos
+  text: "#F6F7F6",          // Blanco Axon · texto principal
 
-  // Texto y bordes
-  muted: "rgba(241, 245, 249, 0.58)",
-  dim: "rgba(241, 245, 249, 0.34)",
-  faint: "rgba(241, 245, 249, 0.10)",
-  border: "rgba(241, 245, 249, 0.06)",
-  borderStrong: "rgba(241, 245, 249, 0.13)",
+  // Texto y bordes (basados en Blanco Axon con alpha)
+  muted: "rgba(246, 247, 246, 0.62)",
+  dim: "rgba(246, 247, 246, 0.38)",
+  faint: "rgba(246, 247, 246, 0.10)",
+  border: "rgba(246, 247, 246, 0.07)",
+  borderStrong: "rgba(246, 247, 246, 0.14)",
 
-  // Acento principal (cian — marca, estados activos, refresh)
-  accent: "#38BDF8",
-  accentSoft: "rgba(56, 189, 248, 0.10)",
-  accentBorder: "rgba(56, 189, 248, 0.32)",
-  accentGlow: "rgba(56, 189, 248, 0.18)",
+  // Acento principal — derivado claro del Azul Axon para trabajar
+  // como color de estado activo, links, focus rings, refresh.
+  accent: "#5B8DD6",
+  accentSoft: "rgba(91, 141, 214, 0.10)",
+  accentBorder: "rgba(91, 141, 214, 0.32)",
+  accentGlow: "rgba(91, 141, 214, 0.20)",
 
-  // Status (vibrantes, v2-style)
+  // Status semánticos — armonizados con el azul Axon de fondo
   red: "#F87171",
   green: "#4ADE80",
   yellow: "#FACC15",
 
-  // Paleta categórica para bonos / tickers (lista para Módulos 2+)
+  // Paleta categórica para charts, KPIs, tickers.
+  // Se conserva una paleta amplia y diferenciable porque los charts
+  // financieros priorizan contraste entre series por sobre coherencia
+  // de marca. Los colores están afinados para legibilidad sobre el
+  // fondo Azul Axon (#1A283E) y Gris Axon (#0F1B2B).
   cat: {
-    cyan: "#38BDF8",       // TX26
-    emerald: "#34D399",    // TX28
-    yellow: "#FACC15",     // T3X5
-    pink: "#F472B6",       // DICP
-    violet: "#A78BFA",     // S30J6
-    orange: "#FB923C",     // S30S6
-    teal: "#22D3EE",       // S31D6
-    lime: "#A3E635",       // T15E7
-    rose: "#FB7185",       // T30J7
-    amber: "#FBBF24",      // reserva
-    indigo: "#818CF8",     // reserva
+    cyan: "#5B8DD6",       // azul-axon-light (acento de marca)
+    emerald: "#34D399",
+    yellow: "#FACC15",
+    pink: "#F472B6",
+    violet: "#A78BFA",
+    orange: "#FB923C",
+    teal: "#22D3EE",
+    lime: "#A3E635",
+    rose: "#FB7185",
+    amber: "#FBBF24",
+    indigo: "#818CF8",
   },
 };
 
@@ -222,7 +247,7 @@ export default function EcoFlowTerminal() {
       className="w-full flex flex-col overflow-hidden"
     >
       <style>{`
-        @import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&family=Raleway:wght@500;600;700;800&family=Roboto:wght@300;400;500;700&family=JetBrains+Mono:wght@400;500&display=swap');
+        @import url('https://fonts.googleapis.com/css2?family=Raleway:wght@500;600;700;800&family=Roboto:wght@300;400;500;700&family=JetBrains+Mono:wght@400;500&display=swap');
 
         * { box-sizing: border-box; }
         html, body { background: ${C.bg}; }
@@ -324,7 +349,7 @@ export default function EcoFlowTerminal() {
           border-color: rgba(56, 189, 248, 0.45);
         }
 
-        .eco-table-row:hover { background-color: rgba(241, 245, 249, 0.025); }
+        .eco-table-row:hover { background-color: rgba(246, 247, 246, 0.025); }
 
         .eco-th-sortable:hover { color: ${C.text} !important; }
       `}</style>
@@ -355,7 +380,7 @@ export default function EcoFlowTerminal() {
               style={{
                 display: "flex",
                 alignItems: "baseline",
-                fontFamily: "'Poppins', sans-serif",
+                fontFamily: "'Raleway', sans-serif",
                 fontSize: 20,
                 letterSpacing: "-0.015em",
                 lineHeight: 1,
@@ -377,7 +402,7 @@ export default function EcoFlowTerminal() {
               style={{
                 display: "flex",
                 alignItems: "baseline",
-                fontFamily: "'Poppins', sans-serif",
+                fontFamily: "'Raleway', sans-serif",
                 fontSize: 18,
                 letterSpacing: "-0.015em",
                 lineHeight: 1,
@@ -669,7 +694,7 @@ export default function EcoFlowTerminal() {
               <span
                 style={{
                   color: C.muted,
-                  fontFamily: "'Poppins', sans-serif",
+                  fontFamily: "'Raleway', sans-serif",
                   letterSpacing: "-0.005em",
                   textTransform: "lowercase",
                   fontWeight: 500,
@@ -2092,9 +2117,9 @@ const CARRY_MODES = [
     label: "Por Dólar",
     sublabel: "Equilibrio vs Oficial · MEP · Blue · CCL",
     icon: Coins,
-    color: "#38BDF8",       // accent (cyan)
-    soft: "rgba(56, 189, 248, 0.12)",
-    border: "rgba(56, 189, 248, 0.45)",
+    color: "#5B8DD6",       // accent (azul-axon-light)
+    soft: "rgba(91, 141, 214, 0.12)",
+    border: "rgba(91, 141, 214, 0.45)",
   },
   {
     id: "byBands",
@@ -3963,6 +3988,7 @@ function ManualLeadBond({ bond, customExitFx }) {
 const DLR_PRICES_LS_KEY = "ecoflow:dlrPrices";
 const DLR_PRICES_TS_LS_KEY = "ecoflow:dlrPricesUpdatedAt";
 const CAUCION_LS_KEY = "ecoflow:caucionRate";
+const CAUCION_MODE_LS_KEY = "ecoflow:caucionMode";  // "auto" | "manual"
 
 /** Lee precios de DLR desde localStorage. Devuelve {} si no hay nada. */
 function readStoredDlrPrices() {
@@ -3995,6 +4021,66 @@ function readStoredCaucion() {
   }
 }
 
+/** Lee el modo de caución persistido. Default: "auto" si nunca se eligió. */
+function readStoredCaucionMode() {
+  if (typeof window === "undefined") return "auto";
+  try {
+    const raw = window.localStorage.getItem(CAUCION_MODE_LS_KEY);
+    return raw === "manual" ? "manual" : "auto";
+  } catch {
+    return "auto";
+  }
+}
+
+/**
+ * Extrae la tasa de caución de "1 día" de la respuesta de A3 Mercados.
+ *
+ * La API devuelve un array de operaciones de cauciones agrupadas por plazo.
+ * Cada entrada tiene `codigoPlazo` (string), `ultimatasa` (decimal),
+ * `volumenAcumulado`, `moneda`, etc. Para el carry trade nos interesa el
+ * plazo más corto disponible (idealmente "001" = 1 día) en pesos ($).
+ *
+ * Estrategia:
+ *   1. Filtrar solo cauciones en pesos.
+ *   2. Buscar plazo "001" (1d) — fuente preferida.
+ *   3. Si no hay 1d, tomar el plazo más corto disponible.
+ *   4. Devolver la `ultimatasa` (TNA) de esa entrada.
+ *
+ * Devuelve { rate, plazo, volumen } o null si no hay datos parseables.
+ */
+function extractCaucion1d(a3Data) {
+  if (!Array.isArray(a3Data) || a3Data.length === 0) return null;
+
+  // Filtrar pesos. La API puede usar "$" o "ARS" según el campo.
+  const pesos = a3Data.filter((c) => {
+    const m = (c.moneda || "").trim();
+    return m === "$" || m.toUpperCase() === "ARS";
+  });
+  if (pesos.length === 0) return null;
+
+  // Preferir plazo "001"
+  let target = pesos.find((c) => (c.codigoPlazo || c.plazo || "").trim() === "001");
+
+  // Si no, tomar el plazo más corto (parseInt del codigoPlazo)
+  if (!target) {
+    const sorted = [...pesos].sort((a, b) => {
+      const pa = parseInt((a.codigoPlazo || a.plazo || "999"), 10) || 999;
+      const pb = parseInt((b.codigoPlazo || b.plazo || "999"), 10) || 999;
+      return pa - pb;
+    });
+    target = sorted[0];
+  }
+
+  const rate = target?.ultimatasa ?? target?.tasaPP ?? null;
+  if (rate == null || isNaN(rate) || rate <= 0) return null;
+
+  return {
+    rate: parseFloat(rate),
+    plazo: (target.plazo || target.codigoPlazo || "").trim(),
+    volumen: target.volumenAcumulado ?? null,
+  };
+}
+
 /** Devuelve el precio efectivo de un contrato: stored si hay, sino el seed. */
 function priceForContract(contract, storedPrices) {
   const stored = storedPrices[contract.ticker];
@@ -4018,7 +4104,15 @@ function FuturosVsCaucionModule() {
   const [remTc, setRemTc] = useState({});
   const [storedPrices, setStoredPrices] = useState(() => readStoredDlrPrices());
   const [pricesUpdatedAt, setPricesUpdatedAt] = useState(() => readStoredDlrTimestamp());
-  const [caucionRate, setCaucionRate] = useState(() => readStoredCaucion() ?? 32);
+
+  // Caución: doble fuente. `caucionAuto` viene de A3 Mercados (preferido).
+  // `caucionManual` es el override que persiste en localStorage. El modo
+  // dicta cuál se muestra. Si A3 falla, caemos automáticamente a manual
+  // (o a 32 default si nunca se editó).
+  const [caucionAuto, setCaucionAuto] = useState(null);          // { rate, plazo, volumen } | null
+  const [caucionManual, setCaucionManual] = useState(() => readStoredCaucion() ?? 32);
+  const [caucionMode, setCaucionMode] = useState(() => readStoredCaucionMode());
+
   const [editorOpen, setEditorOpen] = useState(false);
   const [editorBuffer, setEditorBuffer] = useState({});
   const [editorCaucion, setEditorCaucion] = useState(String(readStoredCaucion() ?? 32));
@@ -4034,6 +4128,12 @@ function FuturosVsCaucionModule() {
   const [calcFuturo, setCalcFuturo] = useState("");
   const [calcDays, setCalcDays] = useState("");
 
+  // Tasa de caución efectiva: la que se usa en cálculos y se muestra como KPI.
+  // Si el modo es auto y A3 respondió, usamos auto. Sino caemos a manual.
+  const caucionRate = (caucionMode === "auto" && caucionAuto?.rate != null)
+    ? caucionAuto.rate
+    : caucionManual;
+
   // Tick para "now" en el StatusPill
   useEffect(() => {
     const i = setInterval(() => {
@@ -4043,7 +4143,7 @@ function FuturosVsCaucionModule() {
     return () => clearInterval(i);
   }, []);
 
-  // ─── Fetch de spot mayorista + REM TC ──────────────────
+  // ─── Fetch de spot mayorista + REM TC + Caución A3 ─────
   const fetchAll = async (isManual = false) => {
     if (isManual) setRefreshing(true);
     else if (spotMayorista == null) setLoading(true);
@@ -4072,6 +4172,19 @@ function FuturosVsCaucionModule() {
           setRemTc(map);
         }
       } catch (e) { console.warn("REM tipo_cambio failed", e); }
+
+      // 3) Caución desde A3 Mercados (api.mae.com.ar)
+      try {
+        const cauRes = await fetch("/api/a3-cauciones");
+        if (cauRes.ok) {
+          const cauData = await cauRes.json();
+          const parsed = extractCaucion1d(cauData);
+          if (parsed) setCaucionAuto(parsed);
+        } else {
+          // 404/500 → no rompemos, dejamos caer al manual
+          console.warn("A3 cauciones devolvió", cauRes.status);
+        }
+      } catch (e) { console.warn("A3 cauciones failed", e); }
 
       setError(null);
       setLastFetch(new Date());
@@ -4192,15 +4305,25 @@ function FuturosVsCaucionModule() {
       window.localStorage.setItem(DLR_PRICES_LS_KEY, JSON.stringify(newPrices));
       window.localStorage.setItem(DLR_PRICES_TS_LS_KEY, ts.toISOString());
     }
-    // Caución
+    // Caución → guardar como manual y cambiar modo
     const cau = parseFloat(String(editorCaucion).replace(",", "."));
     if (cau > 0) {
-      setCaucionRate(cau);
+      setCaucionManual(cau);
+      setCaucionMode("manual");
       if (typeof window !== "undefined") {
         window.localStorage.setItem(CAUCION_LS_KEY, String(cau));
+        window.localStorage.setItem(CAUCION_MODE_LS_KEY, "manual");
       }
     }
     setEditorOpen(false);
+  };
+
+  /** Vuelve al modo auto (usar el valor de A3). */
+  const switchToAutoCaucion = () => {
+    setCaucionMode("auto");
+    if (typeof window !== "undefined") {
+      window.localStorage.setItem(CAUCION_MODE_LS_KEY, "auto");
+    }
   };
 
   const resetSeed = () => {
@@ -4262,11 +4385,11 @@ function FuturosVsCaucionModule() {
           sub="BCRA A 3500"
           color={C.cat.cyan}
         />
-        <KpiCard
-          label="Caución 1d"
-          value={caucionRate ? `${fmtPct(caucionRate)}` : "—"}
-          sub="TNA pesos · editable"
-          color={C.cat.yellow}
+        <CaucionKpi
+          rate={caucionRate}
+          mode={caucionMode}
+          auto={caucionAuto}
+          onSwitchToAuto={switchToAutoCaucion}
         />
         <KpiCard
           label="Dev. REM Implícita"
@@ -4493,6 +4616,8 @@ function FuturosVsCaucionModule() {
         <span>fuentes:</span>
         <span style={{ color: C.muted }}>matbarofex.primary.ventures (manual)</span>
         <span style={{ color: C.faint }}>·</span>
+        <span style={{ color: C.muted }}>A3 Mercados (cauciones)</span>
+        <span style={{ color: C.faint }}>·</span>
         <span style={{ color: C.muted }}>dolarapi.com (mayorista)</span>
         <span style={{ color: C.faint }}>·</span>
         <span style={{ color: C.muted }}>API REM (BCRA)</span>
@@ -4504,8 +4629,9 @@ function FuturosVsCaucionModule() {
       </div>
 
       <p style={{ fontSize: 10, color: C.dim, marginTop: 12, lineHeight: 1.5, maxWidth: 760 }}>
-        Los precios DLR no tienen API pública gratuita conocida. Se cargan manualmente desde Matba-Rofex (visor mtbarofex.primary.ventures/fyo/futurosfinancieros).
-        Caución también es manual — actualizá ambos desde "Editar precios". Cálculos: TNA = (F/S − 1) × 365/días · TEM = (F/S)^(30/días) − 1.
+        Los precios DLR se cargan manualmente desde Matba-Rofex (visor matbarofex.primary.ventures/fyo/futurosfinancieros) — no hay API pública conocida.
+        La tasa de caución se trae automática desde A3 Mercados; podés overridear con el editor.
+        Cálculos: TNA = (F/S − 1) × 365/días · TEM = (F/S)^(30/días) − 1.
       </p>
     </div>
   );
@@ -4536,6 +4662,97 @@ function KpiCard({ label, value, sub, color }) {
           {sub}
         </div>
       )}
+    </div>
+  );
+}
+
+/**
+ * KPI especializado de Caución 1d. Muestra el origen (A3 vs manual) en el
+ * subtítulo y un mini-botón "auto" cuando el usuario está en override manual
+ * pero hay un valor de A3 disponible al cual volver.
+ */
+function CaucionKpi({ rate, mode, auto, onSwitchToAuto }) {
+  const isAuto = mode === "auto" && auto?.rate != null;
+  const subText = isAuto
+    ? `A3 Mercados · plazo ${auto.plazo || "1d"}`
+    : (auto?.rate != null ? "Manual · override activo" : "Manual · sin datos A3");
+
+  return (
+    <div
+      style={{
+        backgroundColor: C.panel,
+        borderTop: `2px solid ${C.cat.yellow}`,
+        padding: "10px 14px",
+        display: "flex",
+        flexDirection: "column",
+        gap: 2,
+        position: "relative",
+      }}
+    >
+      <div className="flex items-center justify-between gap-2">
+        <div style={{ fontSize: 9, color: C.dim, letterSpacing: "0.18em", textTransform: "uppercase", fontWeight: 500 }}>
+          Caución 1d
+        </div>
+        {/* Indicador del origen (chip mini) */}
+        {isAuto ? (
+          <span
+            title="Tasa automática desde A3 Mercados"
+            style={{
+              fontSize: 8,
+              color: C.green,
+              backgroundColor: "rgba(74, 222, 128, 0.10)",
+              border: `1px solid rgba(74, 222, 128, 0.30)`,
+              padding: "1px 5px",
+              letterSpacing: "0.10em",
+              fontWeight: 600,
+              textTransform: "uppercase",
+            }}
+          >
+            Auto
+          </span>
+        ) : (
+          <span
+            title="Override manual activo"
+            style={{
+              fontSize: 8,
+              color: C.cat.violet,
+              backgroundColor: "rgba(167, 139, 250, 0.10)",
+              border: `1px solid rgba(167, 139, 250, 0.30)`,
+              padding: "1px 5px",
+              letterSpacing: "0.10em",
+              fontWeight: 600,
+              textTransform: "uppercase",
+            }}
+          >
+            Manual
+          </span>
+        )}
+      </div>
+      <div className="eco-mono" style={{ fontSize: 18, color: C.text, fontWeight: 600, letterSpacing: "-0.005em", lineHeight: 1.1 }}>
+        {rate != null ? fmtPct(rate) : "—"}
+      </div>
+      <div className="flex items-center justify-between gap-2" style={{ marginTop: 2 }}>
+        <span style={{ fontSize: 10, color: C.muted }}>{subText}</span>
+        {/* Botón "Volver a auto" — solo visible si hay override y existe valor de A3 */}
+        {!isAuto && auto?.rate != null && (
+          <button
+            onClick={onSwitchToAuto}
+            style={{
+              fontSize: 9,
+              color: C.green,
+              backgroundColor: "transparent",
+              border: `1px solid rgba(74, 222, 128, 0.30)`,
+              padding: "2px 7px",
+              cursor: "pointer",
+              letterSpacing: "0.08em",
+              textTransform: "uppercase",
+              fontWeight: 600,
+            }}
+          >
+            ← Auto ({fmtPct(auto.rate)})
+          </button>
+        )}
+      </div>
     </div>
   );
 }
@@ -4645,7 +4862,7 @@ function PriceEditor({ contracts, buffer, setBuffer, caucion, setCaucion, onSave
           onClick={onSave}
           style={{
             fontSize: 11,
-            color: "#0B1220",
+            color: C.bg,
             backgroundColor: C.cat.violet,
             border: `1px solid ${C.cat.violet}`,
             padding: "7px 16px",
