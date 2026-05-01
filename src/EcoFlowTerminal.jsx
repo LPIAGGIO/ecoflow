@@ -42,6 +42,19 @@ import {
   ArrowDown,
   Pencil,
 } from "lucide-react";
+import {
+  ScatterChart,
+  Scatter,
+  XAxis,
+  YAxis,
+  CartesianGrid,
+  Tooltip as RechartsTooltip,
+  ResponsiveContainer,
+  ReferenceLine,
+  Area,
+  ComposedChart,
+  Label,
+} from "recharts";
 
 const C = {
   // Base oscura (matching v2 screenshots)
@@ -2641,6 +2654,32 @@ function ByDollarMode({ lecaps, boncaps, fxRates, loading, equilibriumFor, carry
           accentTop={C.cat.cyan}
         />
       </div>
+
+      {/* Gráfico Dólar Breakeven */}
+      <div className="mt-7">
+        <div
+          className="flex items-start gap-2 mb-3 px-4 py-3"
+          style={{
+            backgroundColor: "rgba(167, 139, 250, 0.04)",
+            borderLeft: `2px solid ${C.cat.violet}`,
+          }}
+        >
+          <Info size={13} color={C.cat.violet} strokeWidth={1.8} style={{ flexShrink: 0, marginTop: 2 }} />
+          <p style={{ fontSize: 11.5, color: C.muted, margin: 0, lineHeight: 1.55, letterSpacing: "0.005em" }}>
+            Cada punto es un bono ubicado en su <span style={{ color: C.text, fontWeight: 500 }}>dólar de equilibrio</span> (eje Y) vs su{" "}
+            <span style={{ color: C.text, fontWeight: 500 }}>fecha de vencimiento</span> (eje X). Los bonos{" "}
+            <span style={{ color: C.green, fontWeight: 500 }}>por encima del techo BCRA</span> son los más atractivos: incluso si el peso se devalúa
+            hasta el techo de la banda, el carry sigue ganando contra USD. Podés probar otros MEP de cálculo en el input de arriba.
+          </p>
+        </div>
+        <SectionLabel>Dólar Breakeven · Bonos vs Banda BCRA</SectionLabel>
+        <BreakevenChart
+          bonds={allBonds}
+          fxRates={fxRates}
+          remIpc={remIpc}
+          loading={loading}
+        />
+      </div>
     </>
   );
 }
@@ -2999,6 +3038,316 @@ function ScenarioMatrix({ bonds, fxRates, remIpc, loading }) {
         </table>
       </div>
 
+    </div>
+  );
+}
+
+/* ─────────── Gráfico Dólar Breakeven ─────────── */
+
+/**
+ * Convierte fecha ISO (YYYY-MM-DD) a timestamp para el eje X
+ */
+function isoToTimestamp(iso) {
+  return new Date(iso + "T12:00:00Z").getTime();
+}
+
+/**
+ * Genera una serie de puntos para la banda BCRA (piso o techo)
+ * desde "hoy" hasta la fecha del bono más lejano + 1 mes.
+ */
+function generateBandSeries(bonds, boundary, remIpc) {
+  if (!bonds || bonds.length === 0) return [];
+  const today = new Date();
+  // Fecha más lejana entre los bonos + 30 días de padding
+  const maxDate = bonds.reduce((acc, b) => {
+    const d = new Date(b.maturityDate);
+    return d > acc ? d : acc;
+  }, today);
+  const endDate = new Date(maxDate);
+  endDate.setDate(endDate.getDate() + 30);
+
+  // Generar puntos cada ~15 días
+  const points = [];
+  const cursor = new Date(today);
+  while (cursor <= endDate) {
+    const iso = cursor.toISOString().slice(0, 10);
+    const fx = projectBand(iso, boundary, remIpc);
+    if (fx) points.push({ x: cursor.getTime(), y: fx });
+    cursor.setDate(cursor.getDate() + 15);
+  }
+  return points;
+}
+
+/**
+ * Custom tooltip para el scatter
+ */
+function ScatterTooltip({ active, payload }) {
+  if (!active || !payload || !payload.length) return null;
+  const data = payload[0].payload;
+  if (!data.ticker) return null;
+  return (
+    <div
+      style={{
+        backgroundColor: C.deep,
+        border: `1px solid ${C.border}`,
+        padding: "8px 12px",
+        fontSize: 11,
+        fontFamily: "'JetBrains Mono', monospace",
+      }}
+    >
+      <div style={{ color: typeColor(data.type), fontWeight: 700, marginBottom: 4 }}>
+        {data.ticker}
+        <span style={{ color: C.muted, marginLeft: 8, fontWeight: 400, fontSize: 10 }}>
+          {typeLabel(data.type)}
+        </span>
+      </div>
+      <div style={{ color: C.text }}>Dólar BE: ${fmtARS(data.y)}</div>
+      <div style={{ color: C.muted, fontSize: 10 }}>
+        Vto: {data.maturityDate} · {data.days}d
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Componente principal del gráfico Dólar Breakeven
+ */
+function BreakevenChart({ bonds, fxRates, remIpc, loading }) {
+  const mepNow = fxRates.mep;
+  const [customMep, setCustomMep] = useState("");
+  const [hoveredTicker, setHoveredTicker] = useState(null);
+
+  if (loading) {
+    return (
+      <div style={{ backgroundColor: C.panel, borderTop: `2px solid ${C.cat.violet}`, padding: 24, textAlign: "center" }}>
+        <Loader2 size={20} color={C.muted} className="animate-spin inline-block" />
+        <div style={{ fontSize: 12, color: C.muted, marginTop: 8 }}>Cargando datos...</div>
+      </div>
+    );
+  }
+
+  if (!bonds || bonds.length === 0 || !mepNow) {
+    return (
+      <div style={{ backgroundColor: C.panel, borderTop: `2px solid ${C.cat.violet}`, padding: 24, textAlign: "center" }}>
+        <span style={{ fontSize: 12, color: C.muted }}>Sin datos para construir el gráfico.</span>
+      </div>
+    );
+  }
+
+  // MEP a usar para los cálculos: si hay valor custom válido, usar ese
+  const customMepNum = parseFloat(customMep.replace(",", "."));
+  const effectiveMep = customMepNum > 0 ? customMepNum : mepNow;
+  const usingCustom = customMepNum > 0;
+
+  // Puntos del scatter: cada bono → { x: timestamp_vto, y: dolar_breakeven, ticker, ... }
+  const scatterData = bonds.map((b) => ({
+    x: isoToTimestamp(b.maturityDate),
+    y: effectiveMep * (b.valorFinal / b.priceArs),
+    ticker: b.ticker,
+    type: b.type,
+    days: b.days,
+    maturityDate: b.maturityDate,
+  }));
+
+  // Series de bandas BCRA (piso y techo proyectados)
+  const ceilingSeries = generateBandSeries(bonds, "ceiling", remIpc);
+  const floorSeries = generateBandSeries(bonds, "floor", remIpc);
+
+  // Combinar bandas en una serie con campos floor/ceiling para Area
+  const bandSeries = ceilingSeries.map((c, i) => ({
+    x: c.x,
+    ceiling: c.y,
+    floor: floorSeries[i]?.y ?? c.y,
+  }));
+
+  // Eje Y dinámico con padding 10%
+  const allYValues = [
+    ...scatterData.map((d) => d.y),
+    ...ceilingSeries.map((d) => d.y),
+    ...floorSeries.map((d) => d.y),
+    effectiveMep,
+  ].filter((v) => v != null && !isNaN(v));
+  const minY = Math.min(...allYValues);
+  const maxY = Math.max(...allYValues);
+  const padY = (maxY - minY) * 0.1;
+  const yDomain = [Math.floor((minY - padY) / 50) * 50, Math.ceil((maxY + padY) / 50) * 50];
+
+  // Eje X: desde hoy hasta el bono más lejano + 30d
+  const today = Date.now();
+  const maxX = Math.max(...scatterData.map((d) => d.x)) + 30 * 24 * 60 * 60 * 1000;
+
+  // Custom dot que muestra el ticker arriba
+  const renderDot = (props) => {
+    const { cx, cy, payload } = props;
+    if (cx == null || cy == null) return null;
+    const isHovered = hoveredTicker === payload.ticker;
+    const color = typeColor(payload.type);
+    return (
+      <g>
+        <circle
+          cx={cx}
+          cy={cy}
+          r={isHovered ? 6 : 4}
+          fill={color}
+          stroke={C.bg}
+          strokeWidth={1.5}
+          style={{ cursor: "pointer", transition: "r 0.15s ease" }}
+          onMouseEnter={() => setHoveredTicker(payload.ticker)}
+          onMouseLeave={() => setHoveredTicker(null)}
+        />
+        <text
+          x={cx}
+          y={cy - 9}
+          textAnchor="middle"
+          fill={color}
+          fontSize={9}
+          fontFamily="'JetBrains Mono', monospace"
+          fontWeight={600}
+          style={{ pointerEvents: "none", userSelect: "none" }}
+        >
+          {payload.ticker}
+        </text>
+      </g>
+    );
+  };
+
+  return (
+    <div style={{ backgroundColor: C.panel, borderTop: `2px solid ${C.cat.violet}`, padding: "14px 14px 18px" }}>
+      {/* Input dólar personalizado */}
+      <div className="flex items-center gap-3 mb-4 px-1" style={{ flexWrap: "wrap" }}>
+        <label style={{ fontSize: 10, color: C.dim, letterSpacing: "0.16em", textTransform: "uppercase", fontWeight: 500 }}>
+          MEP de cálculo
+        </label>
+        <input
+          type="text"
+          value={customMep}
+          onChange={(e) => setCustomMep(e.target.value)}
+          placeholder={fmtARS(mepNow)}
+          style={{
+            backgroundColor: C.deep,
+            border: `1px solid ${usingCustom ? C.cat.violet : C.border}`,
+            color: C.text,
+            fontFamily: "'JetBrains Mono', monospace",
+            fontSize: 13,
+            padding: "6px 12px",
+            width: 130,
+            outline: "none",
+          }}
+        />
+        {usingCustom ? (
+          <span style={{ fontSize: 11, color: C.cat.violet, fontFamily: "'JetBrains Mono', monospace" }}>
+            usando ${fmtARS(effectiveMep)} (custom)
+          </span>
+        ) : (
+          <span style={{ fontSize: 11, color: C.muted }}>
+            usando MEP actual · vacío para reset
+          </span>
+        )}
+      </div>
+
+      {/* Gráfico */}
+      <div style={{ width: "100%", height: 480 }}>
+        <ResponsiveContainer width="100%" height="100%">
+          <ComposedChart margin={{ top: 20, right: 30, bottom: 30, left: 50 }}>
+            <CartesianGrid strokeDasharray="3 3" stroke={C.border} opacity={0.4} />
+            <XAxis
+              dataKey="x"
+              type="number"
+              scale="time"
+              domain={[today, maxX]}
+              tickFormatter={(t) => {
+                const d = new Date(t);
+                return d.toLocaleDateString("es-AR", { month: "short", year: "2-digit" });
+              }}
+              stroke={C.muted}
+              style={{ fontSize: 10, fontFamily: "'JetBrains Mono', monospace" }}
+              tickLine={{ stroke: C.border }}
+            />
+            <YAxis
+              type="number"
+              domain={yDomain}
+              tickFormatter={(v) => `$${fmtARS(v)}`}
+              stroke={C.muted}
+              style={{ fontSize: 10, fontFamily: "'JetBrains Mono', monospace" }}
+              tickLine={{ stroke: C.border }}
+              width={60}
+            />
+            <RechartsTooltip content={<ScatterTooltip />} cursor={{ stroke: C.muted, strokeDasharray: "3 3" }} />
+
+            {/* Banda BCRA: techo */}
+            <Area
+              data={bandSeries}
+              type="monotone"
+              dataKey="ceiling"
+              stroke={C.red}
+              strokeWidth={1.5}
+              strokeDasharray="4 3"
+              fill="transparent"
+              dot={false}
+              activeDot={false}
+              isAnimationActive={false}
+              name="Techo BCRA"
+            />
+            {/* Banda BCRA: piso */}
+            <Area
+              data={bandSeries}
+              type="monotone"
+              dataKey="floor"
+              stroke={C.green}
+              strokeWidth={1.5}
+              strokeDasharray="4 3"
+              fill="transparent"
+              dot={false}
+              activeDot={false}
+              isAnimationActive={false}
+              name="Piso BCRA"
+            />
+
+            {/* Línea horizontal del MEP actual */}
+            <ReferenceLine
+              y={effectiveMep}
+              stroke={C.cat.emerald}
+              strokeWidth={1.5}
+              strokeDasharray="6 4"
+              label={{
+                value: usingCustom ? `MEP custom $${fmtARS(effectiveMep)}` : `MEP actual $${fmtARS(effectiveMep)}`,
+                position: "right",
+                fill: C.cat.emerald,
+                fontSize: 10,
+                fontFamily: "'JetBrains Mono', monospace",
+                fontWeight: 600,
+              }}
+            />
+
+            {/* Scatter de los bonos */}
+            <Scatter data={scatterData} shape={renderDot} isAnimationActive={false} />
+          </ComposedChart>
+        </ResponsiveContainer>
+      </div>
+
+      {/* Leyenda inferior */}
+      <div className="flex items-center justify-center gap-5 mt-3 px-1" style={{ flexWrap: "wrap", fontSize: 10, color: C.muted, fontFamily: "'Roboto', sans-serif", letterSpacing: "0.04em" }}>
+        <div className="flex items-center gap-2">
+          <div style={{ width: 8, height: 8, borderRadius: "50%", backgroundColor: C.cat.cyan }} />
+          <span>Lecap</span>
+        </div>
+        <div className="flex items-center gap-2">
+          <div style={{ width: 8, height: 8, borderRadius: "50%", backgroundColor: C.cat.lime }} />
+          <span>Boncap</span>
+        </div>
+        <div className="flex items-center gap-2">
+          <div style={{ width: 14, height: 1, borderTop: `2px dashed ${C.red}` }} />
+          <span>Techo BCRA proyectado</span>
+        </div>
+        <div className="flex items-center gap-2">
+          <div style={{ width: 14, height: 1, borderTop: `2px dashed ${C.green}` }} />
+          <span>Piso BCRA proyectado</span>
+        </div>
+        <div className="flex items-center gap-2">
+          <div style={{ width: 14, height: 1, borderTop: `2px dashed ${C.cat.emerald}` }} />
+          <span>MEP {usingCustom ? "custom" : "actual"}</span>
+        </div>
+      </div>
     </div>
   );
 }
