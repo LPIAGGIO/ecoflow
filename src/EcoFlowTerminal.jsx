@@ -2618,7 +2618,7 @@ function ByDollarMode({ lecaps, boncaps, fxRates, loading, equilibriumFor, carry
         />
       </div>
 
-      {/* Callout — explicación de la tabla EQ. */}
+      {/* Callout — explicación de la tabla BE. */}
       <div
         className="flex items-start gap-2 mt-7 mb-3 px-4 py-3"
         style={{
@@ -2628,8 +2628,8 @@ function ByDollarMode({ lecaps, boncaps, fxRates, loading, equilibriumFor, carry
       >
         <Info size={13} color={C.accent} strokeWidth={1.8} style={{ flexShrink: 0, marginTop: 2 }} />
         <p style={{ fontSize: 11.5, color: C.muted, margin: 0, lineHeight: 1.55, letterSpacing: "0.005em" }}>
-          Las columnas <span style={{ color: C.text, fontWeight: 500 }}>EQ.</span> muestran el{" "}
-          <span style={{ color: C.text, fontWeight: 500 }}>dólar de equilibrio</span>: el valor que tendría que
+          Las columnas <span style={{ color: C.text, fontWeight: 500 }}>BE.</span> muestran el{" "}
+          <span style={{ color: C.text, fontWeight: 500 }}>dólar de breakeven</span>: el valor que tendría que
           tener el dólar al vencimiento para que el carry trade empate con quedarse en USD. Si el dólar termina{" "}
           <span style={{ color: C.green, fontWeight: 500 }}>por debajo</span>, ganás contra USD; si termina{" "}
           <span style={{ color: C.red, fontWeight: 500 }}>por encima</span>, perdés.
@@ -2735,10 +2735,10 @@ function EquilibriumTable({ bonds, fxRates, loading, equilibriumFor, carryVsMep,
               <Th align="right">TEM</Th>
               <Th align="right">TNA</Th>
               <Th align="right">TEA</Th>
-              <Th align="right">Eq. Oficial</Th>
-              <Th align="right">Eq. MEP</Th>
-              <Th align="right">Eq. Blue</Th>
-              <Th align="right">Eq. CCL</Th>
+              <Th align="right">BE. Oficial</Th>
+              <Th align="right">BE. MEP</Th>
+              <Th align="right">BE. Blue</Th>
+              <Th align="right">BE. CCL</Th>
               <Th align="right" emphasized>Carry vs MEP</Th>
             </tr>
           </thead>
@@ -3457,25 +3457,31 @@ function BreakevenChart({ bonds, fxRates, remIpc, loading }) {
               Vto: {hoveredPoint.maturityDate} · {hoveredPoint.days}d
             </div>
 
-            {/* Dólar BE — métrica principal */}
-            <div style={{ color: typeColor(hoveredPoint.type), display: "flex", justifyContent: "space-between", gap: 16 }}>
-              <span>Dólar BE</span>
-              <span style={{ color: C.text, fontWeight: 600 }}>${fmtARS(hoveredPoint.y)}</span>
-            </div>
-
-            {/* Bandas BCRA proyectadas a la fecha de vto */}
-            {hoveredPoint.ceilingAtMat != null && (
-              <div style={{ color: C.red, display: "flex", justifyContent: "space-between", gap: 16, marginTop: 2 }}>
-                <span>Techo BCRA</span>
-                <span style={{ color: C.text, fontWeight: 600 }}>${fmtARS(hoveredPoint.ceilingAtMat)}</span>
-              </div>
-            )}
-            {hoveredPoint.floorAtMat != null && (
-              <div style={{ color: C.green, display: "flex", justifyContent: "space-between", gap: 16, marginTop: 2 }}>
-                <span>Piso BCRA</span>
-                <span style={{ color: C.text, fontWeight: 600 }}>${fmtARS(hoveredPoint.floorAtMat)}</span>
-              </div>
-            )}
+            {/* Dólar BE + bandas, ordenado de mayor a menor por valor.
+                Así el BE queda visualmente entre las bandas si está en el medio,
+                arriba si supera el techo, o abajo si está bajo el piso. */}
+            {[
+              { key: "be",      label: "Dólar BE",   value: hoveredPoint.y,             color: typeColor(hoveredPoint.type) },
+              { key: "ceiling", label: "Techo BCRA", value: hoveredPoint.ceilingAtMat,  color: C.red },
+              { key: "floor",   label: "Piso BCRA",  value: hoveredPoint.floorAtMat,    color: C.green },
+            ]
+              .filter((r) => r.value != null)
+              .sort((a, b) => b.value - a.value)
+              .map((r, idx) => (
+                <div
+                  key={r.key}
+                  style={{
+                    color: r.color,
+                    display: "flex",
+                    justifyContent: "space-between",
+                    gap: 16,
+                    marginTop: idx === 0 ? 0 : 2,
+                  }}
+                >
+                  <span>{r.label}</span>
+                  <span style={{ color: C.text, fontWeight: 600 }}>${fmtARS(r.value)}</span>
+                </div>
+              ))}
 
             {/* BE vs Techo: indica si el carry resiste al peor escenario */}
             {hoveredPoint.distToCeiling != null && (
