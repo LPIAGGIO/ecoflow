@@ -1,0 +1,13 @@
+{
+  "generatedAt": "2026-05-01T16:30:00.000Z",
+  "source": "A3 Mercados · api.mae.com.ar/MarketData/v1",
+  "endpoints": {
+    "cauciones": {
+      "ok": true,
+      "fetchedAt": "2026-05-01T16:30:00.000Z",
+      "durationMs": 0,
+      "data": [],
+      "_note": "Snapshot inicial — feriado nacional 1° de mayo. Refrescar con `npm run refresh-a3` el primer día hábil."
+    }
+  }
+}
