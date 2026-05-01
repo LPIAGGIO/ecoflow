@@ -3079,78 +3079,77 @@ function generateBandSeries(bonds, boundary, remIpc) {
 }
 
 /**
- * Custom tooltip para el scatter
+ * Tooltip de las bandas BCRA en el gráfico Dólar Breakeven.
+ * Se muestra al hover sobre las líneas (techo/piso). Recharts lo dispara
+ * cuando el cursor está cerca del eje X de cualquier serie de Line.
+ *
+ * NOTA: Los bonos del scatter NO usan este tooltip — tienen su propio
+ * tooltip manual (`hoveredPoint`) gestionado en el `renderDot` para
+ * tener mejor posicionamiento. Cuando hay un bono hover, este tooltip
+ * se oculta vía `suppress` para evitar duplicación.
  */
-/**
- * Tooltip del gráfico Dólar Breakeven.
- * Distingue 3 casos según cuál serie está bajo el cursor:
- *   - Bono (scatter): muestra ticker + tipo + dólar BE + vto + días
- *   - Banda techo: muestra "Techo BCRA $X.XXX · DD/MM/YYYY"
- *   - Banda piso: muestra "Piso BCRA $X.XXX · DD/MM/YYYY"
- *   - Si hover sobre zona vacía → no muestra nada
- */
-function ScatterTooltip({ active, payload }) {
+function BandsTooltip({ active, payload, suppress }) {
+  if (suppress) return null;
   if (!active || !payload || !payload.length) return null;
 
-  // Buscar primero un bono (tiene ticker en payload)
-  const bondEntry = payload.find((p) => p.payload && p.payload.ticker);
-  if (bondEntry) {
-    const data = bondEntry.payload;
-    return (
-      <div
-        style={{
-          backgroundColor: C.deep,
-          border: `1px solid ${C.border}`,
-          padding: "8px 12px",
-          fontSize: 11,
-          fontFamily: "'JetBrains Mono', monospace",
-        }}
-      >
-        <div style={{ color: typeColor(data.type), fontWeight: 700, marginBottom: 4 }}>
-          {data.ticker}
-          <span style={{ color: C.muted, marginLeft: 8, fontWeight: 400, fontSize: 10 }}>
-            {typeLabel(data.type)}
-          </span>
-        </div>
-        <div style={{ color: C.text }}>Dólar BE: ${fmtARS(data.y)}</div>
-        <div style={{ color: C.muted, fontSize: 10 }}>
-          Vto: {data.maturityDate} · {data.days}d
-        </div>
-      </div>
-    );
-  }
-
-  // Si no hay bono cerca, mostrar valores de las bandas
   const ceilingEntry = payload.find((p) => p.dataKey === "ceiling");
   const floorEntry = payload.find((p) => p.dataKey === "floor");
 
   if (!ceilingEntry && !floorEntry) return null;
 
-  // Fecha (timestamp) — todas las series comparten el mismo eje X
+  // Fecha (timestamp) — bandSeries comparte el eje X entre las dos líneas
   const xValue = ceilingEntry?.payload?.x ?? floorEntry?.payload?.x;
   const dateStr = xValue
     ? new Date(xValue).toLocaleDateString("es-AR", { day: "2-digit", month: "short", year: "numeric" })
     : "";
 
+  // Brecha entre piso y techo (informativo)
+  const ceiling = ceilingEntry?.value;
+  const floor = floorEntry?.value;
+  const brecha = (ceiling != null && floor != null) ? ((ceiling / floor - 1) * 100) : null;
+
   return (
     <div
       style={{
         backgroundColor: C.deep,
-        border: `1px solid ${C.border}`,
-        padding: "8px 12px",
+        border: `1px solid ${C.borderStrong}`,
+        padding: "9px 12px",
         fontSize: 11,
         fontFamily: "'JetBrains Mono', monospace",
+        boxShadow: "0 4px 12px rgba(0, 0, 0, 0.5)",
+        minWidth: 190,
       }}
     >
-      <div style={{ color: C.muted, fontSize: 10, marginBottom: 4 }}>{dateStr}</div>
+      <div style={{ color: C.muted, fontSize: 10, marginBottom: 6, letterSpacing: "0.04em" }}>
+        {dateStr}
+      </div>
       {ceilingEntry && (
-        <div style={{ color: C.red }}>
-          Techo BCRA: <span style={{ color: C.text, fontWeight: 600 }}>${fmtARS(ceilingEntry.value)}</span>
+        <div style={{ color: C.red, display: "flex", justifyContent: "space-between", gap: 16 }}>
+          <span>Techo BCRA</span>
+          <span style={{ color: C.text, fontWeight: 600 }}>${fmtARS(ceiling)}</span>
         </div>
       )}
       {floorEntry && (
-        <div style={{ color: C.green }}>
-          Piso BCRA: <span style={{ color: C.text, fontWeight: 600 }}>${fmtARS(floorEntry.value)}</span>
+        <div style={{ color: C.green, display: "flex", justifyContent: "space-between", gap: 16, marginTop: 2 }}>
+          <span>Piso BCRA</span>
+          <span style={{ color: C.text, fontWeight: 600 }}>${fmtARS(floor)}</span>
+        </div>
+      )}
+      {brecha != null && (
+        <div
+          style={{
+            color: C.muted,
+            fontSize: 10,
+            marginTop: 6,
+            paddingTop: 6,
+            borderTop: `1px solid ${C.border}`,
+            display: "flex",
+            justifyContent: "space-between",
+            gap: 16,
+          }}
+        >
+          <span>Brecha banda</span>
+          <span style={{ color: C.text }}>{fmtPct(brecha)}</span>
         </div>
       )}
     </div>
@@ -3348,9 +3347,10 @@ function BreakevenChart({ bonds, fxRates, remIpc, loading }) {
               />
             </YAxis>
             <RechartsTooltip
-              content={() => null}
-              cursor={false}
+              content={(props) => <BandsTooltip {...props} suppress={!!hoveredPoint} />}
+              cursor={hoveredPoint ? false : { stroke: C.borderStrong, strokeDasharray: "3 3", strokeWidth: 1 }}
               isAnimationActive={false}
+              wrapperStyle={{ outline: "none" }}
             />
 
             {/* Línea horizontal del MEP actual o custom */}
