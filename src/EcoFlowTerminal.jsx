@@ -2820,7 +2820,7 @@ function ScenarioMatrix({ bonds, fxRates, remIpc, loading }) {
   const center = Math.round(mepNow / 100) * 100;
   // 6 escenarios fijos: -300, -200, -100, 0, +100, +200 respecto al centro
   // + 1 escenario "MEP actual" insertado en el medio. Se ordena por fx ascendente.
-  const fixedScenarios = [-200, -100, 0, 100].map((delta) => ({
+  const fixedScenarios = [-100, 0, 100].map((delta) => ({
     label: String(center + delta),
     fx: center + delta,
     isCurrent: false,
@@ -2848,6 +2848,7 @@ function ScenarioMatrix({ bonds, fxRates, remIpc, loading }) {
           <thead>
             <tr style={{ borderBottom: `1px solid ${C.border}` }}>
               <Th align="left">Ticker</Th>
+              <Th align="right">Precio</Th>
               <Th align="right">Días</Th>
               <Th align="right">TEM</Th>
               <Th align="right">TNA</Th>
@@ -2922,6 +2923,9 @@ function ScenarioMatrix({ bonds, fxRates, remIpc, loading }) {
                     >
                       {typeLabel(b.type)}
                     </span>
+                  </Td>
+                  <Td align="right" mono>
+                    ${fmtARS(b.priceArs)}
                   </Td>
                   <Td align="right" mono>
                     <span style={{ color: C.muted }}>{b.days}</span>
