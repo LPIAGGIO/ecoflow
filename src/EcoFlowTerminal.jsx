@@ -3163,7 +3163,8 @@ function ScatterTooltip({ active, payload }) {
 function BreakevenChart({ bonds, fxRates, remIpc, loading }) {
   const mepNow = fxRates.mep;
   const [customMep, setCustomMep] = useState("");
-  const [hoveredTicker, setHoveredTicker] = useState(null);
+  // hoveredPoint: { ticker, type, days, maturityDate, y, cx, cy } | null
+  const [hoveredPoint, setHoveredPoint] = useState(null);
 
   if (loading) {
     return (
@@ -3230,7 +3231,7 @@ function BreakevenChart({ bonds, fxRates, remIpc, loading }) {
   const renderDot = (props) => {
     const { cx, cy, payload } = props;
     if (cx == null || cy == null) return null;
-    const isHovered = hoveredTicker === payload.ticker;
+    const isHovered = hoveredPoint?.ticker === payload.ticker;
     const color = typeColor(payload.type);
     return (
       <g>
@@ -3242,8 +3243,8 @@ function BreakevenChart({ bonds, fxRates, remIpc, loading }) {
           stroke={C.bg}
           strokeWidth={1.5}
           style={{ cursor: "pointer", transition: "r 0.15s ease" }}
-          onMouseEnter={() => setHoveredTicker(payload.ticker)}
-          onMouseLeave={() => setHoveredTicker(null)}
+          onMouseEnter={() => setHoveredPoint({ ...payload, cx, cy })}
+          onMouseLeave={() => setHoveredPoint(null)}
         />
         <text
           x={cx}
@@ -3296,7 +3297,7 @@ function BreakevenChart({ bonds, fxRates, remIpc, loading }) {
       </div>
 
       {/* Gráfico */}
-      <div style={{ width: "100%", height: 520 }}>
+      <div style={{ width: "100%", height: 520, position: "relative" }}>
         <ResponsiveContainer width="100%" height="100%">
           <ComposedChart margin={{ top: 20, right: 70, bottom: 60, left: 70 }}>
             <CartesianGrid strokeDasharray="3 3" stroke={C.border} opacity={0.4} />
@@ -3346,7 +3347,11 @@ function BreakevenChart({ bonds, fxRates, remIpc, loading }) {
                 style={{ textAnchor: "middle", fill: C.dim, fontSize: 11, fontFamily: "'Roboto', sans-serif", letterSpacing: "0.04em" }}
               />
             </YAxis>
-            <RechartsTooltip content={<ScatterTooltip />} cursor={{ stroke: C.muted, strokeDasharray: "3 3" }} />
+            <RechartsTooltip
+              content={() => null}
+              cursor={false}
+              isAnimationActive={false}
+            />
 
             {/* Línea horizontal del MEP actual o custom */}
             <ReferenceLine
@@ -3410,6 +3415,37 @@ function BreakevenChart({ bonds, fxRates, remIpc, loading }) {
             />
           </ComposedChart>
         </ResponsiveContainer>
+
+        {/* Tooltip manual: solo aparece al hacer hover sobre un punto del scatter */}
+        {hoveredPoint && (
+          <div
+            style={{
+              position: "absolute",
+              left: hoveredPoint.cx + 14,
+              top: hoveredPoint.cy - 8,
+              backgroundColor: C.deep,
+              border: `1px solid ${C.border}`,
+              padding: "8px 12px",
+              fontSize: 11,
+              fontFamily: "'JetBrains Mono', monospace",
+              pointerEvents: "none",
+              zIndex: 10,
+              minWidth: 160,
+              boxShadow: "0 4px 12px rgba(0, 0, 0, 0.5)",
+            }}
+          >
+            <div style={{ color: typeColor(hoveredPoint.type), fontWeight: 700, marginBottom: 4 }}>
+              {hoveredPoint.ticker}
+              <span style={{ color: C.muted, marginLeft: 8, fontWeight: 400, fontSize: 10 }}>
+                {typeLabel(hoveredPoint.type)}
+              </span>
+            </div>
+            <div style={{ color: C.text }}>Dólar BE: ${fmtARS(hoveredPoint.y)}</div>
+            <div style={{ color: C.muted, fontSize: 10 }}>
+              Vto: {hoveredPoint.maturityDate} · {hoveredPoint.days}d
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Leyenda inferior */}
