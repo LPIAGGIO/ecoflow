@@ -4128,6 +4128,9 @@ function FuturosVsCaucionModule() {
   const [calcFuturo, setCalcFuturo] = useState("");
   const [calcDays, setCalcDays] = useState("");
 
+  // Explicación didáctica (cerrada por default, los users que ya saben no la abren)
+  const [explainerOpen, setExplainerOpen] = useState(false);
+
   // Tasa de caución efectiva: la que se usa en cálculos y se muestra como KPI.
   // Si el modo es auto y A3 respondió, usamos auto. Sino caemos a manual.
   const caucionRate = (caucionMode === "auto" && caucionAuto?.rate != null)
@@ -4675,6 +4678,52 @@ function FuturosVsCaucionModule() {
         </div>
       </div>
 
+      {/* Bloque didáctico expandible — explica las fórmulas usadas */}
+      <div className="mt-7" style={{ backgroundColor: C.panel, borderTop: `2px solid ${C.cat.cyan}` }}>
+        <button
+          onClick={() => setExplainerOpen((v) => !v)}
+          style={{
+            width: "100%",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            padding: "12px 16px",
+            backgroundColor: "transparent",
+            border: "none",
+            cursor: "pointer",
+            color: C.text,
+            textAlign: "left",
+          }}
+        >
+          <div className="flex items-center gap-2.5">
+            <BookOpenCheckIcon />
+            <div className="flex flex-col">
+              <span style={{ fontSize: 9, color: C.dim, letterSpacing: "0.18em", textTransform: "uppercase", fontWeight: 500 }}>
+                Cómo se calcula
+              </span>
+              <span style={{ fontSize: 13, color: C.text, fontWeight: 500, marginTop: 2 }}>
+                Tasas implícitas: TNA, TEM y TEA explicadas paso a paso
+              </span>
+            </div>
+          </div>
+          <ChevronDown
+            size={16}
+            color={C.muted}
+            strokeWidth={1.6}
+            style={{
+              transform: explainerOpen ? "rotate(180deg)" : "rotate(0deg)",
+              transition: "transform 0.2s ease",
+            }}
+          />
+        </button>
+
+        {explainerOpen && (
+          <div style={{ padding: "4px 18px 18px", borderTop: `1px solid ${C.border}` }}>
+            <CalcExplainer />
+          </div>
+        )}
+      </div>
+
       {/* Footer */}
       <div className="flex flex-wrap items-center gap-2 mt-7" style={{ fontSize: 10, color: C.dim, letterSpacing: "0.10em", textTransform: "uppercase" }}>
         <span>fuentes:</span>
@@ -4686,10 +4735,6 @@ function FuturosVsCaucionModule() {
         <span style={{ color: C.faint }}>·</span>
         <span style={{ color: C.muted }}>API REM (BCRA)</span>
       </div>
-
-      <p style={{ fontSize: 10, color: C.dim, marginTop: 12, lineHeight: 1.5, maxWidth: 760 }}>
-        Cálculos: TNA = (F/S − 1) × 365/días · TEM = (F/S)^(30/días) − 1.
-      </p>
     </div>
   );
 }
@@ -4734,6 +4779,217 @@ function KpiCard({ label, value, sub, color }) {
  * reales del CaucionKpi para que el usuario pueda asociar cada uno
  * con su estado correspondiente.
  */
+/**
+ * Icono "BookOpenCheck" — un ícono SVG inline (no usamos lucide-react acá
+ * porque lucide no exporta este icono específico en versiones viejas).
+ * Mantiene el mismo grosor de stroke que el resto del set.
+ */
+function BookOpenCheckIcon({ size = 14, color = "currentColor" }) {
+  return (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke={color}
+      strokeWidth="1.8"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      style={{ flexShrink: 0, color: C.cat.cyan }}
+    >
+      <path d="M12 21V7" />
+      <path d="m16 12 2 2 4-4" />
+      <path d="M22 6V4a1 1 0 0 0-1-1h-5a4 4 0 0 0-4 4 4 4 0 0 0-4-4H3a1 1 0 0 0-1 1v13a1 1 0 0 0 1 1h6a3 3 0 0 1 3 3 3 3 0 0 1 3-3h6a1 1 0 0 0 1-1v-1.3" />
+    </svg>
+  );
+}
+
+/**
+ * Bloque didáctico que explica paso a paso cómo se calculan las tasas
+ * implícitas. Se renderiza dentro de un panel colapsable. Está pensado
+ * para que un usuario sin background financiero entienda qué significa
+ * cada columna de la tabla y la diferencia conceptual entre TNA, TEM y
+ * TEA. Usa un ejemplo concreto con valores realistas para que se pueda
+ * seguir paso a paso con calculadora en mano.
+ */
+function CalcExplainer() {
+  return (
+    <div style={{ fontSize: 12, color: C.muted, lineHeight: 1.65, letterSpacing: "0.005em" }}>
+      <p style={{ margin: "10px 0 4px" }}>
+        Toda <strong style={{ color: C.text, fontWeight: 600 }}>tasa implícita</strong> de un futuro de dólar
+        parte de tres datos: el precio del contrato (<ExplainerVar>F</ExplainerVar>), el dólar spot de hoy
+        (<ExplainerVar>S</ExplainerVar>) y los días que faltan hasta el vencimiento.
+      </p>
+
+      <ExplainerSection title="TNA — Tasa Nominal Anual" color={C.cat.cyan}>
+        <ExplainerFormula>
+          TNA = ( F / S − 1 ) × ( 365 / días )
+        </ExplainerFormula>
+        <p style={{ margin: "6px 0" }}>
+          Mide cuánto subió el dólar entre hoy y el vencimiento, anualizado de forma <em>lineal</em>.
+          Es la métrica más usada en mercado porque la <strong style={{ color: C.text }}>caución también
+          se cotiza en TNA</strong>, y permite comparar directamente.
+        </p>
+        <ExplainerExample
+          rows={[
+            ["Datos", "F = 1.474 · S = 1.391 · días = 91"],
+            ["Subió el dólar", "1.474 / 1.391 − 1 = 5,97%"],
+            ["Anualizado", "5,97% × (365 / 91) = 23,93%"],
+          ]}
+        />
+        <p style={{ margin: "8px 0 0", color: C.dim, fontSize: 11 }}>
+          Lectura: <em>"si el dólar siguiera subiendo a este ritmo todo el año, cerraría 23,93% más arriba"</em>.
+        </p>
+      </ExplainerSection>
+
+      <ExplainerSection title="TEM — Tasa Efectiva Mensual" color={C.cat.emerald}>
+        <ExplainerFormula>
+          TEM = ( F / S )<sup>30 / días</sup> − 1
+        </ExplainerFormula>
+        <p style={{ margin: "6px 0" }}>
+          Mide cuánto sube el dólar <em>cada mes</em>, asumiendo capitalización compuesta. Sirve para
+          comparar contra <strong style={{ color: C.text }}>inflación mensual</strong> y contra el
+          crawling-peg del BCRA (~2% mensual).
+        </p>
+        <ExplainerExample
+          rows={[
+            ["Ratio futuro/spot", "1.474 / 1.391 = 1,0597"],
+            ["Elevado a 30/días", "1,0597 ^ (30 / 91) = 1,0193"],
+            ["Resta 1", "1,0193 − 1 = 1,93%"],
+          ]}
+        />
+        <p style={{ margin: "8px 0 0", color: C.dim, fontSize: 11 }}>
+          Lectura: <em>"al ritmo de subir 1,93% mes a mes, el dólar llega al precio del futuro en 91 días"</em>.
+        </p>
+      </ExplainerSection>
+
+      <ExplainerSection title="TEA — Tasa Efectiva Anual" color={C.cat.violet}>
+        <ExplainerFormula>
+          TEA = ( F / S )<sup>365 / días</sup> − 1
+        </ExplainerFormula>
+        <p style={{ margin: "6px 0" }}>
+          Igual que la TEM pero anualizada. Es la TNA "compuesta". Siempre va a ser un poco más alta que la
+          TNA porque incluye el efecto de capitalización. Para el mismo ejemplo: TEA ≈ 26,17% vs TNA = 23,93%.
+        </p>
+      </ExplainerSection>
+
+      <div
+        style={{
+          marginTop: 16,
+          padding: "10px 14px",
+          backgroundColor: "rgba(56, 189, 248, 0.04)",
+          borderLeft: `2px solid ${C.accent}`,
+        }}
+      >
+        <span style={{ fontSize: 10, color: C.dim, letterSpacing: "0.18em", textTransform: "uppercase", fontWeight: 600 }}>
+          Forward TEM
+        </span>
+        <p style={{ margin: "6px 0 0", fontSize: 11.5, lineHeight: 1.6 }}>
+          La columna <strong style={{ color: C.text }}>Forward TEM</strong> de la tabla aplica la fórmula
+          de TEM pero entre <em>dos contratos consecutivos</em> (en vez de spot vs futuro). Te dice qué
+          devaluación implícita está descontando el mercado <strong style={{ color: C.text }}>mes a mes</strong>:
+          ej. cuánto sube de mayo a junio, de junio a julio, etc. Útil para detectar saltos cambiarios
+          esperados en alguna ventana específica.
+        </p>
+      </div>
+    </div>
+  );
+}
+
+/** Variable inline en el explicador (F, S, días). */
+function ExplainerVar({ children }) {
+  return (
+    <span
+      style={{
+        fontFamily: "'JetBrains Mono', monospace",
+        color: C.text,
+        backgroundColor: C.deep,
+        padding: "1px 6px",
+        fontSize: 11,
+        fontWeight: 600,
+      }}
+    >
+      {children}
+    </span>
+  );
+}
+
+/** Una sección dentro del explicador (TNA / TEM / TEA). */
+function ExplainerSection({ title, color, children }) {
+  return (
+    <div style={{ marginTop: 18 }}>
+      <div
+        style={{
+          fontSize: 10,
+          color,
+          letterSpacing: "0.18em",
+          textTransform: "uppercase",
+          fontWeight: 700,
+          marginBottom: 8,
+          paddingBottom: 6,
+          borderBottom: `1px solid ${C.border}`,
+        }}
+      >
+        {title}
+      </div>
+      {children}
+    </div>
+  );
+}
+
+/** Caja con la fórmula matemática destacada. */
+function ExplainerFormula({ children }) {
+  return (
+    <div
+      style={{
+        fontFamily: "'JetBrains Mono', monospace",
+        fontSize: 13,
+        color: C.text,
+        backgroundColor: C.deep,
+        padding: "10px 14px",
+        margin: "6px 0",
+        textAlign: "center",
+        letterSpacing: "0.02em",
+      }}
+    >
+      {children}
+    </div>
+  );
+}
+
+/** Tabla mini con un ejemplo paso a paso. */
+function ExplainerExample({ rows }) {
+  return (
+    <div
+      style={{
+        backgroundColor: "rgba(246, 247, 246, 0.02)",
+        padding: "8px 12px",
+        marginTop: 6,
+        fontSize: 11.5,
+      }}
+    >
+      <div style={{ fontSize: 9, color: C.dim, letterSpacing: "0.14em", textTransform: "uppercase", fontWeight: 500, marginBottom: 6 }}>
+        Ejemplo · DLR/JUL26
+      </div>
+      <table style={{ borderCollapse: "collapse", width: "100%" }}>
+        <tbody>
+          {rows.map(([label, value], i) => (
+            <tr key={i}>
+              <td style={{ padding: "3px 12px 3px 0", color: C.muted, verticalAlign: "top", whiteSpace: "nowrap" }}>
+                {label}
+              </td>
+              <td style={{ padding: "3px 0", color: C.text, fontFamily: "'JetBrains Mono', monospace", fontSize: 11 }}>
+                {value}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
 function ChipInline({ color, bg, border, children }) {
   return (
     <span
