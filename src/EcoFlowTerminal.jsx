@@ -54,6 +54,9 @@ import {
   LogOut,
   LogIn,
   User,
+  Briefcase,
+  Sparkles,
+  ShieldCheck,
 } from "lucide-react";
 import {
   ScatterChart,
@@ -137,6 +140,14 @@ const C = {
 
 const NAV = [
   { id: "dashboard", label: "Dashboard", icon: Home, type: "single" },
+  {
+    id: "portfolio-ia",
+    label: "Portfolio IA",
+    icon: Briefcase,
+    type: "single",
+    badge: "BETA",
+    requiresAuth: true,  // Si no hay sesión, muestra wall de login
+  },
   {
     id: "bcra",
     label: "Estadísticas BCRA",
@@ -658,6 +669,8 @@ export default function EcoFlowTerminal() {
               <CarryTradeModule />
             ) : active === "futuros-caucion" ? (
               <FuturosVsCaucionModule />
+            ) : active === "portfolio-ia" ? (
+              <PortfolioIAModule />
             ) : (
               <EmptyWorkspace key={active} active={active} />
             )}
@@ -820,6 +833,22 @@ function NavBlock({ item, collapsed, isOpen, onToggle, active, setActive }) {
               {item.label}
             </span>
           )}
+          {!collapsed && item.badge && (
+            <span
+              style={{
+                fontSize: 8,
+                color: C.cat.violet,
+                backgroundColor: "rgba(167, 139, 250, 0.10)",
+                border: `1px solid rgba(167, 139, 250, 0.30)`,
+                padding: "1px 5px",
+                letterSpacing: "0.10em",
+                fontWeight: 700,
+                textTransform: "uppercase",
+              }}
+            >
+              {item.badge}
+            </span>
+          )}
         </div>
         {!collapsed && !isSingle && (
           <ChevronDown
@@ -956,6 +985,306 @@ function timeAgo(date, now) {
 }
 
 /* ─────────── Empty Workspace (placeholder de módulos no construidos) ─────────── */
+
+/* ─────────────── Portfolio IA Module ───────────────
+ *
+ * Módulo de gestión de cartera personalizada con detección de oportunidades.
+ *
+ * Estados:
+ *   1. Sin sesión → muestra <PortfolioAuthWall> con CTA grande de login Google
+ *   2. Loading    → spinner (mientras Supabase resuelve la sesión inicial)
+ *   3. Logueado   → dashboard real (V1: placeholder, V2: dashboard + tabla)
+ *
+ * El componente NO espera props — toma todo lo que necesita del AuthContext.
+ *
+ * Roadmap:
+ *   ✓ V1 — Auth wall + scaffolding del módulo
+ *   · V2 — CRUD de posiciones (modal de carga + tabla con filtros)
+ *   · V3 — Dashboard inteligente (header con totales, distribución, liquidez)
+ *   · V4 — Sistema de alertas de oportunidades cruzando cartera + datos mercado
+ */
+function PortfolioIAModule() {
+  const { user, loading } = useAuth();
+
+  if (loading) {
+    return (
+      <div className="absolute inset-0 flex items-center justify-center">
+        <Loader2 size={28} color={C.muted} className="eco-spin" strokeWidth={1.5} />
+      </div>
+    );
+  }
+
+  if (!user) {
+    return <PortfolioAuthWall />;
+  }
+
+  return <PortfolioDashboard />;
+}
+
+/**
+ * Pantalla de bienvenida que invita al login. Se renderiza cuando el usuario
+ * intenta acceder al módulo Portfolio IA sin estar autenticado.
+ *
+ * Diseño:
+ *   - Card centrado verticalmente
+ *   - Ícono grande de Briefcase + Sparkles para connotar "AI"
+ *   - Headline corto y descriptivo
+ *   - CTA prominente con el icono de Google y branding correcto
+ *   - Microcopy de privacidad/seguridad debajo
+ */
+function PortfolioAuthWall() {
+  const { signInWithGoogle } = useAuth();
+  const [signingIn, setSigningIn] = useState(false);
+
+  const handleSignIn = async () => {
+    setSigningIn(true);
+    try {
+      await signInWithGoogle();
+    } catch (e) {
+      setSigningIn(false);
+    }
+  };
+
+  return (
+    <div className="absolute inset-0 flex items-center justify-center px-6">
+      <div
+        className="eco-fade-in"
+        style={{
+          maxWidth: 520,
+          width: "100%",
+          backgroundColor: C.panel,
+          border: `1px solid ${C.border}`,
+          padding: "44px 40px",
+          textAlign: "center",
+          position: "relative",
+        }}
+      >
+        {/* Acento de marca arriba */}
+        <div
+          style={{
+            position: "absolute",
+            top: 0,
+            left: 0,
+            right: 0,
+            height: 2,
+            backgroundColor: C.accent,
+            boxShadow: `0 0 8px ${C.accentGlow}`,
+          }}
+        />
+
+        {/* Ícono central con halo */}
+        <div
+          style={{
+            width: 64,
+            height: 64,
+            margin: "0 auto 20px",
+            backgroundColor: C.accentSoft,
+            border: `1px solid ${C.accentBorder}`,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            position: "relative",
+          }}
+        >
+          <Briefcase size={26} color={C.accent} strokeWidth={1.6} />
+          {/* Sparkle pequeño en esquina superior derecha */}
+          <div
+            style={{
+              position: "absolute",
+              top: -6,
+              right: -6,
+              backgroundColor: C.bg,
+              padding: 2,
+            }}
+          >
+            <Sparkles size={12} color={C.cat.violet} strokeWidth={1.8} />
+          </div>
+        </div>
+
+        {/* Eyebrow + título */}
+        <div
+          style={{
+            fontSize: 9,
+            color: C.dim,
+            letterSpacing: "0.22em",
+            textTransform: "uppercase",
+            fontWeight: 600,
+            marginBottom: 8,
+          }}
+        >
+          Portfolio IA · Beta
+        </div>
+        <h2
+          style={{
+            fontFamily: "'Raleway', sans-serif",
+            fontSize: 24,
+            fontWeight: 700,
+            color: C.text,
+            letterSpacing: "-0.015em",
+            margin: 0,
+            marginBottom: 12,
+            lineHeight: 1.2,
+          }}
+        >
+          Tu cartera, en un solo lugar
+        </h2>
+
+        {/* Subhead descriptivo */}
+        <p
+          style={{
+            fontSize: 13,
+            color: C.muted,
+            lineHeight: 1.6,
+            margin: "0 auto 28px",
+            maxWidth: 380,
+          }}
+        >
+          Cargá tus bonos, futuros, cauciones y acciones. Visualizá tu exposición
+          en pesos y dólares y recibí alertas de oportunidades automáticamente.
+        </p>
+
+        {/* CTA — botón de Google grande */}
+        <button
+          onClick={handleSignIn}
+          disabled={signingIn}
+          className="flex items-center justify-center gap-3"
+          style={{
+            width: "100%",
+            maxWidth: 320,
+            margin: "0 auto",
+            backgroundColor: C.text,
+            color: C.bg,
+            border: "none",
+            padding: "12px 20px",
+            cursor: signingIn ? "not-allowed" : "pointer",
+            opacity: signingIn ? 0.7 : 1,
+            fontSize: 14,
+            fontWeight: 500,
+            fontFamily: "'Roboto', sans-serif",
+            letterSpacing: "0.01em",
+            transition: "transform 120ms ease, box-shadow 120ms ease",
+          }}
+          onMouseEnter={(e) => {
+            if (!signingIn) {
+              e.currentTarget.style.transform = "translateY(-1px)";
+              e.currentTarget.style.boxShadow = `0 4px 12px ${C.accentGlow}`;
+            }
+          }}
+          onMouseLeave={(e) => {
+            e.currentTarget.style.transform = "translateY(0)";
+            e.currentTarget.style.boxShadow = "none";
+          }}
+        >
+          {/* Logo de Google (SVG inline para no depender de assets externos) */}
+          <svg width="18" height="18" viewBox="0 0 18 18" xmlns="http://www.w3.org/2000/svg">
+            <path d="M17.64 9.205c0-.639-.057-1.252-.164-1.841H9v3.481h4.844a4.14 4.14 0 0 1-1.796 2.716v2.259h2.908c1.702-1.567 2.684-3.875 2.684-6.615z" fill="#4285F4"/>
+            <path d="M9 18c2.43 0 4.467-.806 5.956-2.18l-2.908-2.259c-.806.54-1.837.86-3.048.86-2.344 0-4.328-1.584-5.036-3.711H.957v2.332A8.997 8.997 0 0 0 9 18z" fill="#34A853"/>
+            <path d="M3.964 10.71A5.41 5.41 0 0 1 3.682 9c0-.593.102-1.17.282-1.71V4.958H.957A8.996 8.996 0 0 0 0 9c0 1.452.348 2.827.957 4.042l3.007-2.332z" fill="#FBBC05"/>
+            <path d="M9 3.58c1.321 0 2.508.454 3.44 1.345l2.582-2.58C13.463.891 11.426 0 9 0A8.997 8.997 0 0 0 .957 4.958L3.964 7.29C4.672 5.163 6.656 3.58 9 3.58z" fill="#EA4335"/>
+          </svg>
+          {signingIn ? "Conectando..." : "Continuar con Google"}
+        </button>
+
+        {/* Microcopy de privacidad */}
+        <div
+          className="flex items-center justify-center gap-2"
+          style={{ marginTop: 20, fontSize: 11, color: C.dim }}
+        >
+          <ShieldCheck size={12} strokeWidth={1.6} />
+          <span>Solo necesitás una cuenta de Gmail. Tu información es privada.</span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Dashboard del módulo Portfolio IA cuando el usuario está autenticado.
+ * V1: placeholder con mensaje "construcción". V2+: dashboard real.
+ */
+function PortfolioDashboard() {
+  const { user } = useAuth();
+  const displayName =
+    user?.user_metadata?.full_name ||
+    user?.user_metadata?.name ||
+    user?.email?.split("@")[0] ||
+    "Usuario";
+
+  return (
+    <div className="px-7 py-6 eco-fade-in">
+      {/* Header del módulo */}
+      <div
+        className="flex items-center gap-3"
+        style={{ marginBottom: 6, fontSize: 9, letterSpacing: "0.22em", color: C.dim, textTransform: "uppercase", fontWeight: 600 }}
+      >
+        <span>Portfolio IA</span>
+        <span style={{ color: C.faint }}>·</span>
+        <span>Beta</span>
+      </div>
+      <h1
+        style={{
+          fontFamily: "'Raleway', sans-serif",
+          fontSize: 26,
+          fontWeight: 700,
+          color: C.text,
+          letterSpacing: "-0.015em",
+          margin: 0,
+          marginBottom: 6,
+        }}
+      >
+        Hola, {displayName.split(" ")[0]}
+      </h1>
+      <p style={{ fontSize: 13, color: C.muted, marginBottom: 28, maxWidth: 640 }}>
+        Acá vas a poder cargar tu cartera, ver tu exposición y descubrir
+        oportunidades automáticamente. Próximamente.
+      </p>
+
+      {/* Placeholder del dashboard */}
+      <div
+        style={{
+          backgroundColor: C.panel,
+          border: `1px solid ${C.border}`,
+          borderTop: `2px solid ${C.cat.violet}`,
+          padding: "32px 28px",
+          textAlign: "center",
+        }}
+      >
+        <div
+          style={{
+            width: 48,
+            height: 48,
+            margin: "0 auto 18px",
+            backgroundColor: "rgba(167, 139, 250, 0.10)",
+            border: `1px solid rgba(167, 139, 250, 0.30)`,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+          }}
+        >
+          <Sparkles size={20} color={C.cat.violet} strokeWidth={1.6} />
+        </div>
+        <h3
+          style={{
+            fontSize: 16,
+            color: C.text,
+            margin: 0,
+            marginBottom: 6,
+            fontFamily: "'Raleway', sans-serif",
+            fontWeight: 600,
+          }}
+        >
+          En construcción
+        </h3>
+        <p style={{ fontSize: 12, color: C.muted, margin: 0, maxWidth: 480, marginInline: "auto", lineHeight: 1.6 }}>
+          El módulo Portfolio IA está siendo construido en sub-pasos. Próximamente
+          vas a poder cargar tus posiciones, ver el dashboard consolidado, y
+          configurar alertas de oportunidades sobre tu cartera.
+        </p>
+      </div>
+    </div>
+  );
+}
+
 
 function EmptyWorkspace({ active }) {
   const item = flattenNav(NAV).find((i) => i.id === active);
