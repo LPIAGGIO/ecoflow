@@ -1,4 +1,5 @@
 import { useState, useEffect, useMemo } from "react";
+import { useAuth } from "./auth/AuthContext.jsx";
 import { resolveBond, daysToMaturity, shouldIgnoreTicker } from "./bondMaturities.js";
 import {
   DLR_REGISTRY,
@@ -50,6 +51,9 @@ import {
   ArrowUp,
   ArrowDown,
   Pencil,
+  LogOut,
+  LogIn,
+  User,
 } from "lucide-react";
 import {
   ScatterChart,
@@ -547,24 +551,7 @@ export default function EcoFlowTerminal() {
               className="px-4 flex items-center"
               style={{ borderLeft: `1px solid ${C.border}` }}
             >
-              <div
-                className="eco-display"
-                style={{
-                  width: 30,
-                  height: 30,
-                  border: `1px solid ${C.borderStrong}`,
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "center",
-                  fontSize: 10,
-                  letterSpacing: "0.10em",
-                  fontWeight: 700,
-                  color: C.text,
-                  backgroundColor: C.panel,
-                }}
-              >
-                EF
-              </div>
+              <UserMenu />
             </div>
           </div>
         </div>
@@ -1934,6 +1921,212 @@ function RefreshButton({ onClick, spinning }) {
       />
       Refresh
     </button>
+  );
+}
+
+/**
+ * UserMenu — slot del navbar para login/logout y datos del usuario.
+ *
+ * Tres estados visuales:
+ *   1. loading           → mientras Supabase resuelve la sesión (esqueleto)
+ *   2. no autenticado    → botón "Entrar" minimalista
+ *   3. autenticado       → avatar (iniciales o foto Google) + dropdown
+ *                          con email + botón Cerrar sesión
+ *
+ * Este componente NO requiere props — consume directamente del AuthContext.
+ * Asume que <AuthProvider> envuelve toda la app (ver main.jsx).
+ *
+ * Decisión de diseño: mantener el ancho/alto del antiguo placeholder "EF"
+ * para no shiftear el resto del navbar entre estados. El avatar es 30x30
+ * con borde sutil; el dropdown se renderiza absolutamente posicionado
+ * abajo a la derecha para no afectar el layout horizontal.
+ */
+function UserMenu() {
+  const { user, loading, signInWithGoogle, signOut } = useAuth();
+  const [open, setOpen] = useState(false);
+  const [actioning, setActioning] = useState(false);
+
+  // Cerrar el dropdown al hacer click afuera
+  useEffect(() => {
+    if (!open) return;
+    const handleClick = (e) => {
+      // Si el click está dentro del menú, no cerramos. El menú tiene la clase
+      // eco-user-menu-root que evaluamos en closest().
+      if (!e.target.closest?.(".eco-user-menu-root")) setOpen(false);
+    };
+    document.addEventListener("mousedown", handleClick);
+    return () => document.removeEventListener("mousedown", handleClick);
+  }, [open]);
+
+  const handleLogin = async () => {
+    setActioning(true);
+    try {
+      await signInWithGoogle();
+      // El redirect de Google se va a llevar al user fuera de la app, no
+      // hay que setActioning(false) — al volver, el componente se re-monta.
+    } catch (e) {
+      setActioning(false);
+    }
+  };
+
+  const handleLogout = async () => {
+    setActioning(true);
+    try {
+      await signOut();
+      setOpen(false);
+    } catch {} finally {
+      setActioning(false);
+    }
+  };
+
+  // ── Estado 1: loading (esqueleto del mismo tamaño que avatar) ──
+  if (loading) {
+    return (
+      <div
+        style={{
+          width: 30,
+          height: 30,
+          border: `1px solid ${C.borderStrong}`,
+          backgroundColor: C.panel,
+          opacity: 0.4,
+        }}
+      />
+    );
+  }
+
+  // ── Estado 2: no autenticado (botón Entrar minimalista) ──
+  if (!user) {
+    return (
+      <button
+        onClick={handleLogin}
+        disabled={actioning}
+        title="Iniciar sesión con Google"
+        className="flex items-center gap-2"
+        style={{
+          backgroundColor: C.accentSoft,
+          border: `1px solid ${C.accentBorder}`,
+          color: C.accent,
+          fontSize: 11,
+          fontWeight: 500,
+          letterSpacing: "0.04em",
+          padding: "6px 12px",
+          cursor: actioning ? "not-allowed" : "pointer",
+          opacity: actioning ? 0.7 : 1,
+          fontFamily: "'Roboto', sans-serif",
+          borderRadius: 4,
+        }}
+      >
+        <LogIn size={12} strokeWidth={2} />
+        {actioning ? "Conectando..." : "Entrar"}
+      </button>
+    );
+  }
+
+  // ── Estado 3: autenticado ──
+  // Calculamos iniciales como fallback si no hay foto.
+  const displayName = user.user_metadata?.full_name || user.email || "Usuario";
+  const email = user.email || "";
+  const avatarUrl = user.user_metadata?.avatar_url || user.user_metadata?.picture;
+  const initials = displayName
+    .split(" ")
+    .map((p) => p[0])
+    .filter(Boolean)
+    .slice(0, 2)
+    .join("")
+    .toUpperCase();
+
+  return (
+    <div className="eco-user-menu-root" style={{ position: "relative" }}>
+      <button
+        onClick={() => setOpen((v) => !v)}
+        aria-label="Menú de usuario"
+        style={{
+          width: 30,
+          height: 30,
+          border: `1px solid ${open ? C.accent : C.borderStrong}`,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          fontSize: 10,
+          letterSpacing: "0.05em",
+          fontWeight: 700,
+          color: C.text,
+          backgroundColor: C.panel,
+          cursor: "pointer",
+          padding: 0,
+          overflow: "hidden",
+          transition: "border-color 120ms ease",
+        }}
+      >
+        {avatarUrl ? (
+          <img
+            src={avatarUrl}
+            alt={displayName}
+            referrerPolicy="no-referrer"
+            style={{ width: "100%", height: "100%", objectFit: "cover" }}
+          />
+        ) : (
+          <span className="eco-display">{initials || "?"}</span>
+        )}
+      </button>
+
+      {open && (
+        <div
+          style={{
+            position: "absolute",
+            top: "calc(100% + 8px)",
+            right: 0,
+            minWidth: 240,
+            backgroundColor: C.panel,
+            border: `1px solid ${C.borderStrong}`,
+            boxShadow: "0 8px 24px rgba(0, 0, 0, 0.4)",
+            zIndex: 50,
+            fontFamily: "'Roboto', sans-serif",
+          }}
+        >
+          {/* Header del dropdown: nombre + email */}
+          <div style={{ padding: "12px 14px", borderBottom: `1px solid ${C.border}` }}>
+            <div style={{ fontSize: 13, color: C.text, fontWeight: 500, lineHeight: 1.3 }}>
+              {displayName}
+            </div>
+            {email && email !== displayName && (
+              <div style={{ fontSize: 11, color: C.muted, marginTop: 2, lineHeight: 1.3, wordBreak: "break-all" }}>
+                {email}
+              </div>
+            )}
+          </div>
+
+          {/* Acciones */}
+          <button
+            onClick={handleLogout}
+            disabled={actioning}
+            className="flex items-center gap-2.5 w-full"
+            style={{
+              padding: "10px 14px",
+              backgroundColor: "transparent",
+              border: "none",
+              color: C.muted,
+              fontSize: 12,
+              cursor: actioning ? "not-allowed" : "pointer",
+              textAlign: "left",
+              fontFamily: "'Roboto', sans-serif",
+              transition: "background-color 120ms ease, color 120ms ease",
+            }}
+            onMouseEnter={(e) => {
+              e.currentTarget.style.backgroundColor = C.deep;
+              e.currentTarget.style.color = C.text;
+            }}
+            onMouseLeave={(e) => {
+              e.currentTarget.style.backgroundColor = "transparent";
+              e.currentTarget.style.color = C.muted;
+            }}
+          >
+            <LogOut size={13} strokeWidth={1.8} />
+            {actioning ? "Cerrando sesión..." : "Cerrar sesión"}
+          </button>
+        </div>
+      )}
+    </div>
   );
 }
 
