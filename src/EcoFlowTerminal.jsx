@@ -1,5 +1,6 @@
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect, useMemo, useCallback } from "react";
 import { useAuth } from "./auth/AuthContext.jsx";
+import { supabase } from "./lib/supabase.js";
 import { resolveBond, daysToMaturity, shouldIgnoreTicker } from "./bondMaturities.js";
 import {
   DLR_REGISTRY,
@@ -57,6 +58,13 @@ import {
   Briefcase,
   Sparkles,
   ShieldCheck,
+  Plus,
+  X,
+  Trash2,
+  Filter,
+  TrendingDown,
+  Wallet,
+  Bitcoin,
 } from "lucide-react";
 import {
   ScatterChart,
@@ -357,6 +365,8 @@ export default function EcoFlowTerminal() {
 
         @keyframes ecoSpin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
         .eco-spin { animation: ecoSpin 0.9s linear infinite; }
+
+        @keyframes ecoSlideIn { from { transform: translateX(100%); } to { transform: translateX(0); } }
 
         .eco-refresh-btn { transition: background-color 0.15s ease, border-color 0.15s ease; }
         .eco-refresh-btn:hover:not(:disabled) {
@@ -1198,20 +1208,337 @@ function PortfolioAuthWall() {
   );
 }
 
-/**
- * Dashboard del módulo Portfolio IA cuando el usuario está autenticado.
- * V1: placeholder con mensaje "construcción". V2+: dashboard real.
+/* ──────────────────────────────────────────────────────────────────────
+ *  PORTFOLIO IA · Sub-paso 2 — CRUD de posiciones
+ *
+ *  Catálogo de tipos de instrumento que soporta el módulo. Cada entrada
+ *  define cómo se renderiza en la UI y qué campos pide el formulario.
+ *
+ *  La idea es que sumar un tipo nuevo en el futuro sea modificar SOLO
+ *  esta constante, no esparcir lógica en mil ifs por toda la UI.
+ * ─────────────────────────────────────────────────────────────────── */
+const INSTRUMENT_TYPES = {
+  bond_ars: {
+    label: "Bono ARS",
+    description: "Lecaps, Boncaps, Bonares en pesos",
+    icon: Receipt,
+    color: "emerald",
+    quantityLabel: "Valor Nominal (VN)",
+    quantityHint: "Ej. 35.945.426 para T30J6",
+    priceLabel: "Precio (cada 100 VN)",
+    priceHint: "Ej. 1394,50",
+    defaultCurrency: "ARS",
+  },
+  bond_usd: {
+    label: "Bono USD",
+    description: "AL30, GD30, Bonares hardollar",
+    icon: Landmark,
+    color: "cyan",
+    quantityLabel: "Valor Nominal (VN)",
+    quantityHint: "Ej. 100.000",
+    priceLabel: "Precio (cada 100 VN)",
+    priceHint: "Ej. 72,50 USD",
+    defaultCurrency: "USD",
+  },
+  on: {
+    label: "Obligación Negociable",
+    description: "ONs corporativas",
+    icon: Building2,
+    color: "indigo",
+    quantityLabel: "Valor Nominal (VN)",
+    priceLabel: "Precio (cada 100 VN)",
+    defaultCurrency: "USD",
+  },
+  stock: {
+    label: "Acción",
+    description: "Acciones argentinas (GGAL, YPF, ALUA…)",
+    icon: LineChart,
+    color: "yellow",
+    quantityLabel: "Cantidad de acciones",
+    quantityHint: "Ej. 500",
+    priceLabel: "Precio por acción",
+    defaultCurrency: "ARS",
+  },
+  cedear: {
+    label: "CEDEAR",
+    description: "Acciones del exterior con ratio (AAPL, MSFT, NVDA…)",
+    icon: Globe,
+    color: "violet",
+    quantityLabel: "Cantidad de CEDEARs",
+    priceLabel: "Precio por CEDEAR",
+    defaultCurrency: "ARS",
+  },
+  future: {
+    label: "Futuro",
+    description: "DLR, RFX20, oro y otros futuros Matba-Rofex",
+    icon: TrendingUp,
+    color: "pink",
+    quantityLabel: "Cantidad de contratos",
+    quantityHint: "Entero. Ej. 100 (DLR = 1.000 USD por contrato)",
+    priceLabel: "Precio de entrada",
+    priceHint: "Ej. 1456,50",
+    defaultCurrency: "ARS",
+    integerQuantity: true,  // futuros son contratos enteros
+  },
+  option: {
+    label: "Opción",
+    description: "Calls / Puts sobre acciones, índices, futuros",
+    icon: Spline,
+    color: "rose",
+    quantityLabel: "Cantidad de contratos",
+    priceLabel: "Prima",
+    defaultCurrency: "ARS",
+    integerQuantity: true,
+    extraFields: ["strike", "expiry", "option_type"],
+  },
+  caucion: {
+    label: "Caución",
+    description: "Colocada o tomada en pesos / USD",
+    icon: ArrowRightLeft,
+    color: "teal",
+    quantityLabel: "Monto",
+    quantityHint: "Monto colocado o tomado",
+    priceLabel: null,  // las cauciones no tienen "precio"
+    defaultCurrency: "ARS",
+    extraFields: ["rate_tna", "term_days"],
+  },
+  fci: {
+    label: "FCI",
+    description: "Fondos Comunes de Inversión",
+    icon: Coins,
+    color: "amber",
+    quantityLabel: "Cuotapartes",
+    priceLabel: "VCP (Valor Cuotaparte)",
+    defaultCurrency: "ARS",
+  },
+  usd: {
+    label: "USD",
+    description: "Dólares físicos, MEP, CCL, Blue",
+    icon: DollarSign,
+    color: "lime",
+    quantityLabel: "Cantidad de USD",
+    quantityHint: "Ej. 10.000",
+    priceLabel: "Precio compra (ARS)",
+    priceHint: "Ej. 1450 (precio del dólar al comprarlo)",
+    defaultCurrency: "USD",
+  },
+  crypto: {
+    label: "Cripto",
+    description: "BTC, ETH, USDT, USDC y otras",
+    icon: Bitcoin,
+    color: "orange",
+    quantityLabel: "Cantidad",
+    quantityHint: "Ej. 0,15 BTC o 5.000 USDT",
+    priceLabel: "Precio de compra",
+    defaultCurrency: "USD",
+  },
+};
+
+/** Lista ordenada para los selects */
+const INSTRUMENT_TYPE_KEYS = [
+  "bond_ars", "bond_usd", "on", "stock", "cedear",
+  "future", "option", "caucion", "fci", "usd", "crypto",
+];
+
+const CURRENCIES = [
+  { code: "ARS", label: "Pesos (ARS)" },
+  { code: "USD", label: "Dólar oficial (USD)" },
+  { code: "USD-MEP", label: "Dólar MEP" },
+  { code: "USD-CCL", label: "Dólar CCL" },
+  { code: "USD-Blue", label: "Dólar Blue" },
+];
+
+
+/* ─────────────── Hook: useUserPositions ───────────────
+ *
+ * Encapsula toda la interacción con la tabla `public.positions` de Supabase.
+ *
+ * Provee:
+ *   - positions:   array de filas (filtradas por user, ordenadas por fecha)
+ *   - loading:     true durante el primer load
+ *   - error:       mensaje de error si falla algo
+ *   - addPosition: crea una posición nueva
+ *   - updatePosition: edita una existente
+ *   - deletePosition: borra una existente
+ *   - refresh:     recarga el listado
+ *
+ * Consideraciones:
+ *   - RLS de Supabase asegura que cada user solo ve lo suyo, pero
+ *     igualmente filtramos por user_id en el cliente como segunda barrera.
+ *   - El user_id se asigna automáticamente en addPosition desde useAuth.
+ *   - No usamos realtime subscriptions todavía — simple recarga al modificar.
+ */
+function useUserPositions() {
+  const { user } = useAuth();
+  const [positions, setPositions] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+
+  const refresh = useCallback(async () => {
+    if (!user) {
+      setPositions([]);
+      setLoading(false);
+      return;
+    }
+    setLoading(true);
+    setError(null);
+    const { data, error: err } = await supabase
+      .from("positions")
+      .select("*")
+      .eq("user_id", user.id)
+      .order("entry_date", { ascending: false, nullsFirst: false })
+      .order("created_at", { ascending: false });
+
+    if (err) {
+      setError(err.message);
+      setPositions([]);
+    } else {
+      setPositions(data ?? []);
+    }
+    setLoading(false);
+  }, [user]);
+
+  useEffect(() => { refresh(); }, [refresh]);
+
+  const addPosition = useCallback(async (payload) => {
+    if (!user) throw new Error("No hay sesión activa");
+    const row = { ...payload, user_id: user.id };
+    const { data, error: err } = await supabase
+      .from("positions")
+      .insert([row])
+      .select()
+      .single();
+    if (err) throw err;
+    setPositions((prev) => [data, ...prev]);
+    return data;
+  }, [user]);
+
+  const updatePosition = useCallback(async (id, patch) => {
+    const { data, error: err } = await supabase
+      .from("positions")
+      .update(patch)
+      .eq("id", id)
+      .select()
+      .single();
+    if (err) throw err;
+    setPositions((prev) => prev.map((p) => (p.id === id ? data : p)));
+    return data;
+  }, []);
+
+  const deletePosition = useCallback(async (id) => {
+    const { error: err } = await supabase
+      .from("positions")
+      .delete()
+      .eq("id", id);
+    if (err) throw err;
+    setPositions((prev) => prev.filter((p) => p.id !== id));
+  }, []);
+
+  return { positions, loading, error, addPosition, updatePosition, deletePosition, refresh };
+}
+
+
+/* ─────────────── Helpers de formato ─────────────── */
+
+function fmtNumber(n, opts = {}) {
+  if (n == null || isNaN(n)) return "—";
+  const { maxDecimals = 2, minDecimals = 0 } = opts;
+  return Number(n).toLocaleString("es-AR", {
+    minimumFractionDigits: minDecimals,
+    maximumFractionDigits: maxDecimals,
+  });
+}
+
+function fmtCurrencyValue(value, currency) {
+  if (value == null || isNaN(value)) return "—";
+  const symbol = currency === "ARS" ? "$" :
+                 currency === "USD" || currency?.startsWith("USD") ? "u$s" : "";
+  return `${symbol} ${fmtNumber(value, { maxDecimals: 2 })}`;
+}
+
+function fmtDateShort(iso) {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return "—";
+  return d.toLocaleDateString("es-AR", { day: "2-digit", month: "short", year: "2-digit" });
+}
+
+
+/* ─────────────── Dashboard real del módulo Portfolio IA ───────────────
+ *
+ * Layout del Sub-paso 2:
+ *
+ *   ┌─────────────────────────────────────────────────────┐
+ *   │  Header: "Hola, X" + descripción + botón "+Agregar" │
+ *   ├─────────────────────────────────────────────────────┤
+ *   │  Filtros (chips: Todos · Bonos · Futuros · …)       │
+ *   ├─────────────────────────────────────────────────────┤
+ *   │  Tabla de posiciones (o EmptyState si no hay)       │
+ *   └─────────────────────────────────────────────────────┘
+ *
+ * El dashboard "tipo Balanz" con KPIs arriba viene en el Sub-paso 3.
  */
 function PortfolioDashboard() {
   const { user } = useAuth();
+  const { positions, loading, error, addPosition, updatePosition, deletePosition } = useUserPositions();
+
+  // Estados UI
+  const [drawerOpen, setDrawerOpen] = useState(false);
+  const [editingPosition, setEditingPosition] = useState(null);
+  const [filter, setFilter] = useState("all");
+  const [confirmingDelete, setConfirmingDelete] = useState(null);
+
   const displayName =
     user?.user_metadata?.full_name ||
     user?.user_metadata?.name ||
     user?.email?.split("@")[0] ||
     "Usuario";
+  const firstName = displayName.split(" ")[0];
+
+  // Filtrado de posiciones
+  const filteredPositions = useMemo(() => {
+    if (filter === "all") return positions;
+    return positions.filter((p) => p.instrument_type === filter);
+  }, [positions, filter]);
+
+  // Tipos presentes en cartera (para mostrar solo chips relevantes)
+  const presentTypes = useMemo(() => {
+    const set = new Set(positions.map((p) => p.instrument_type));
+    return Array.from(set);
+  }, [positions]);
+
+  const openCreate = () => {
+    setEditingPosition(null);
+    setDrawerOpen(true);
+  };
+
+  const openEdit = (position) => {
+    setEditingPosition(position);
+    setDrawerOpen(true);
+  };
+
+  const closeDrawer = () => {
+    setDrawerOpen(false);
+    setEditingPosition(null);
+  };
+
+  const handleSubmit = async (payload) => {
+    if (editingPosition) {
+      await updatePosition(editingPosition.id, payload);
+    } else {
+      await addPosition(payload);
+    }
+    closeDrawer();
+  };
+
+  const handleDeleteConfirm = async () => {
+    if (!confirmingDelete) return;
+    await deletePosition(confirmingDelete.id);
+    setConfirmingDelete(null);
+  };
 
   return (
-    <div className="px-7 py-6 eco-fade-in">
+    <div className="px-7 py-6 eco-fade-in" style={{ position: "relative" }}>
       {/* Header del módulo */}
       <div
         className="flex items-center gap-3"
@@ -1221,69 +1548,1137 @@ function PortfolioDashboard() {
         <span style={{ color: C.faint }}>·</span>
         <span>Beta</span>
       </div>
-      <h1
-        style={{
-          fontFamily: "'Raleway', sans-serif",
-          fontSize: 26,
-          fontWeight: 700,
-          color: C.text,
-          letterSpacing: "-0.015em",
-          margin: 0,
-          marginBottom: 6,
-        }}
-      >
-        Hola, {displayName.split(" ")[0]}
-      </h1>
-      <p style={{ fontSize: 13, color: C.muted, marginBottom: 28, maxWidth: 640 }}>
-        Acá vas a poder cargar tu cartera, ver tu exposición y descubrir
-        oportunidades automáticamente. Próximamente.
-      </p>
 
-      {/* Placeholder del dashboard */}
+      <div className="flex items-end justify-between gap-4" style={{ marginBottom: 26 }}>
+        <div>
+          <h1
+            style={{
+              fontFamily: "'Raleway', sans-serif",
+              fontSize: 26,
+              fontWeight: 700,
+              color: C.text,
+              letterSpacing: "-0.015em",
+              margin: 0,
+              marginBottom: 6,
+            }}
+          >
+            Hola, {firstName}
+          </h1>
+          <p style={{ fontSize: 13, color: C.muted, margin: 0, maxWidth: 640 }}>
+            Cargá tus posiciones para ver tu cartera consolidada y descubrir oportunidades.
+          </p>
+        </div>
+
+        <button
+          onClick={openCreate}
+          className="flex items-center gap-2"
+          style={{
+            backgroundColor: C.accent,
+            color: C.bg,
+            border: "none",
+            padding: "10px 16px",
+            cursor: "pointer",
+            fontSize: 13,
+            fontWeight: 600,
+            fontFamily: "'Roboto', sans-serif",
+            letterSpacing: "0.01em",
+            transition: "transform 120ms ease, box-shadow 120ms ease",
+            whiteSpace: "nowrap",
+          }}
+          onMouseEnter={(e) => {
+            e.currentTarget.style.transform = "translateY(-1px)";
+            e.currentTarget.style.boxShadow = `0 4px 12px ${C.accentGlow}`;
+          }}
+          onMouseLeave={(e) => {
+            e.currentTarget.style.transform = "translateY(0)";
+            e.currentTarget.style.boxShadow = "none";
+          }}
+        >
+          <Plus size={15} strokeWidth={2.2} />
+          Agregar posición
+        </button>
+      </div>
+
+      {/* Estado de error */}
+      {error && (
+        <div
+          className="flex items-center gap-2"
+          style={{
+            backgroundColor: "rgba(248, 113, 113, 0.08)",
+            border: `1px solid rgba(248, 113, 113, 0.30)`,
+            color: C.red,
+            padding: "10px 14px",
+            fontSize: 12,
+            marginBottom: 16,
+          }}
+        >
+          <AlertTriangle size={13} strokeWidth={1.8} />
+          <span>{error}</span>
+        </div>
+      )}
+
+      {/* Loading inicial */}
+      {loading && positions.length === 0 ? (
+        <div className="flex items-center justify-center" style={{ padding: "80px 0" }}>
+          <Loader2 size={24} color={C.muted} className="eco-spin" strokeWidth={1.5} />
+        </div>
+      ) : positions.length === 0 ? (
+        <PortfolioEmptyState onAdd={openCreate} />
+      ) : (
+        <>
+          {/* Filtros (chips por tipo) */}
+          <div className="flex items-center gap-2 flex-wrap" style={{ marginBottom: 16 }}>
+            <FilterChip
+              active={filter === "all"}
+              onClick={() => setFilter("all")}
+              label={`Todas (${positions.length})`}
+            />
+            {presentTypes.map((type) => {
+              const meta = INSTRUMENT_TYPES[type];
+              if (!meta) return null;
+              const count = positions.filter((p) => p.instrument_type === type).length;
+              return (
+                <FilterChip
+                  key={type}
+                  active={filter === type}
+                  onClick={() => setFilter(type)}
+                  label={`${meta.label} (${count})`}
+                  color={meta.color}
+                />
+              );
+            })}
+          </div>
+
+          {/* Tabla de posiciones */}
+          <PositionsTable
+            positions={filteredPositions}
+            onEdit={openEdit}
+            onDelete={(p) => setConfirmingDelete(p)}
+          />
+        </>
+      )}
+
+      {/* Drawer lateral de carga/edición */}
+      {drawerOpen && (
+        <AddPositionDrawer
+          editingPosition={editingPosition}
+          onClose={closeDrawer}
+          onSubmit={handleSubmit}
+        />
+      )}
+
+      {/* Modal de confirmación de borrado */}
+      {confirmingDelete && (
+        <DeleteConfirmModal
+          position={confirmingDelete}
+          onCancel={() => setConfirmingDelete(null)}
+          onConfirm={handleDeleteConfirm}
+        />
+      )}
+    </div>
+  );
+}
+
+
+/* ─────────────── Empty state (sin posiciones) ─────────────── */
+function PortfolioEmptyState({ onAdd }) {
+  return (
+    <div
+      style={{
+        backgroundColor: C.panel,
+        border: `1px solid ${C.border}`,
+        padding: "60px 40px",
+        textAlign: "center",
+      }}
+    >
       <div
         style={{
-          backgroundColor: C.panel,
-          border: `1px solid ${C.border}`,
-          borderTop: `2px solid ${C.cat.violet}`,
-          padding: "32px 28px",
-          textAlign: "center",
+          width: 56,
+          height: 56,
+          margin: "0 auto 18px",
+          backgroundColor: C.accentSoft,
+          border: `1px solid ${C.accentBorder}`,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
         }}
       >
-        <div
-          style={{
-            width: 48,
-            height: 48,
-            margin: "0 auto 18px",
-            backgroundColor: "rgba(167, 139, 250, 0.10)",
-            border: `1px solid rgba(167, 139, 250, 0.30)`,
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-          }}
-        >
-          <Sparkles size={20} color={C.cat.violet} strokeWidth={1.6} />
-        </div>
-        <h3
-          style={{
-            fontSize: 16,
-            color: C.text,
-            margin: 0,
-            marginBottom: 6,
-            fontFamily: "'Raleway', sans-serif",
-            fontWeight: 600,
-          }}
-        >
-          En construcción
-        </h3>
-        <p style={{ fontSize: 12, color: C.muted, margin: 0, maxWidth: 480, marginInline: "auto", lineHeight: 1.6 }}>
-          El módulo Portfolio IA está siendo construido en sub-pasos. Próximamente
-          vas a poder cargar tus posiciones, ver el dashboard consolidado, y
-          configurar alertas de oportunidades sobre tu cartera.
-        </p>
+        <Wallet size={22} color={C.accent} strokeWidth={1.6} />
+      </div>
+      <h3
+        style={{
+          fontSize: 17,
+          color: C.text,
+          margin: 0,
+          marginBottom: 8,
+          fontFamily: "'Raleway', sans-serif",
+          fontWeight: 600,
+        }}
+      >
+        Tu cartera está vacía
+      </h3>
+      <p style={{ fontSize: 12, color: C.muted, margin: "0 auto 24px", maxWidth: 420, lineHeight: 1.6 }}>
+        Empezá cargando tus bonos, futuros, cauciones, acciones o lo que tengas. Cada
+        operación se carga como una transacción independiente.
+      </p>
+      <button
+        onClick={onAdd}
+        className="flex items-center gap-2"
+        style={{
+          backgroundColor: C.accent,
+          color: C.bg,
+          border: "none",
+          padding: "10px 18px",
+          cursor: "pointer",
+          fontSize: 13,
+          fontWeight: 600,
+          fontFamily: "'Roboto', sans-serif",
+          margin: "0 auto",
+        }}
+      >
+        <Plus size={15} strokeWidth={2.2} />
+        Agregar primera posición
+      </button>
+    </div>
+  );
+}
+
+
+/* ─────────────── Filter chip (botón pill) ─────────────── */
+function FilterChip({ active, onClick, label, color }) {
+  const tint = color ? C.cat[color] : C.accent;
+  return (
+    <button
+      onClick={onClick}
+      style={{
+        backgroundColor: active ? `${tint}1A` : "transparent",
+        border: `1px solid ${active ? tint : C.border}`,
+        color: active ? tint : C.muted,
+        padding: "5px 12px",
+        fontSize: 11,
+        fontWeight: 500,
+        letterSpacing: "0.02em",
+        cursor: "pointer",
+        fontFamily: "'Roboto', sans-serif",
+        transition: "all 120ms ease",
+        borderRadius: 4,
+      }}
+    >
+      {label}
+    </button>
+  );
+}
+
+
+/* ─────────────── Tabla de posiciones ─────────────── */
+function PositionsTable({ positions, onEdit, onDelete }) {
+  return (
+    <div
+      style={{
+        backgroundColor: C.panel,
+        border: `1px solid ${C.border}`,
+        overflow: "hidden",
+      }}
+    >
+      <div style={{ overflowX: "auto" }}>
+        <table style={{ width: "100%", borderCollapse: "collapse", fontFamily: "'Roboto', sans-serif" }}>
+          <thead>
+            <tr style={{ borderBottom: `1px solid ${C.border}` }}>
+              <PTh>Tipo</PTh>
+              <PTh>Op.</PTh>
+              <PTh>Ticker</PTh>
+              <PTh align="right">Cantidad</PTh>
+              <PTh align="right">Precio</PTh>
+              <PTh>Moneda</PTh>
+              <PTh>Fecha</PTh>
+              <PTh>Notas</PTh>
+              <PTh align="right" style={{ width: 90 }}>{""}</PTh>
+            </tr>
+          </thead>
+          <tbody>
+            {positions.map((p) => (
+              <PositionRow
+                key={p.id}
+                position={p}
+                onEdit={() => onEdit(p)}
+                onDelete={() => onDelete(p)}
+              />
+            ))}
+          </tbody>
+        </table>
       </div>
     </div>
   );
 }
+
+function PTh({ children, align = "left", style = {} }) {
+  return (
+    <th
+      style={{
+        textAlign: align,
+        padding: "11px 14px",
+        fontSize: 9,
+        fontWeight: 600,
+        color: C.dim,
+        letterSpacing: "0.14em",
+        textTransform: "uppercase",
+        ...style,
+      }}
+    >
+      {children}
+    </th>
+  );
+}
+
+function PTd({ children, align = "left", style = {} }) {
+  return (
+    <td
+      style={{
+        textAlign: align,
+        padding: "12px 14px",
+        fontSize: 12.5,
+        color: C.text,
+        verticalAlign: "middle",
+        ...style,
+      }}
+    >
+      {children}
+    </td>
+  );
+}
+
+
+/* ─────────────── Fila de posición ─────────────── */
+function PositionRow({ position, onEdit, onDelete }) {
+  const meta = INSTRUMENT_TYPES[position.instrument_type] || {};
+  const TypeIcon = meta.icon || Activity;
+  const typeColor = meta.color ? C.cat[meta.color] : C.muted;
+  const isSell = position.operation_type === "sell";
+
+  return (
+    <tr
+      style={{
+        borderBottom: `1px solid ${C.border}`,
+        transition: "background-color 100ms ease",
+      }}
+      onMouseEnter={(e) => (e.currentTarget.style.backgroundColor = "rgba(255,255,255,0.015)")}
+      onMouseLeave={(e) => (e.currentTarget.style.backgroundColor = "transparent")}
+    >
+      <PTd>
+        <div className="flex items-center gap-2">
+          <TypeIcon size={13} color={typeColor} strokeWidth={1.7} />
+          <span style={{ fontSize: 11.5, color: C.muted }}>{meta.label || position.instrument_type}</span>
+        </div>
+      </PTd>
+      <PTd>
+        <span
+          style={{
+            fontSize: 9.5,
+            fontWeight: 700,
+            letterSpacing: "0.14em",
+            padding: "2px 7px",
+            borderRadius: 3,
+            color: isSell ? C.red : C.green,
+            backgroundColor: isSell ? "rgba(248,113,113,0.10)" : "rgba(74,222,128,0.10)",
+            border: `1px solid ${isSell ? "rgba(248,113,113,0.30)" : "rgba(74,222,128,0.30)"}`,
+          }}
+        >
+          {isSell ? "VENTA" : "COMPRA"}
+        </span>
+      </PTd>
+      <PTd>
+        <span className="eco-mono" style={{ fontWeight: 600, fontSize: 12.5 }}>
+          {position.ticker}
+        </span>
+      </PTd>
+      <PTd align="right">
+        <span className="eco-mono">{fmtNumber(position.quantity, { maxDecimals: 8 })}</span>
+      </PTd>
+      <PTd align="right">
+        <span className="eco-mono">
+          {position.entry_price != null ? fmtNumber(position.entry_price, { maxDecimals: 4 }) : "—"}
+        </span>
+      </PTd>
+      <PTd>
+        <span style={{ fontSize: 11.5, color: C.muted }}>{position.entry_currency}</span>
+      </PTd>
+      <PTd>
+        <span style={{ fontSize: 11.5, color: C.muted }}>{fmtDateShort(position.entry_date)}</span>
+      </PTd>
+      <PTd>
+        <span style={{ fontSize: 11, color: C.dim, maxWidth: 200, display: "inline-block", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={position.notes || ""}>
+          {position.notes || "—"}
+        </span>
+      </PTd>
+      <PTd align="right">
+        <div className="flex items-center justify-end gap-1">
+          <button
+            onClick={onEdit}
+            aria-label="Editar"
+            style={{
+              backgroundColor: "transparent",
+              border: `1px solid transparent`,
+              color: C.dim,
+              padding: 5,
+              cursor: "pointer",
+              transition: "all 100ms ease",
+            }}
+            onMouseEnter={(e) => {
+              e.currentTarget.style.color = C.accent;
+              e.currentTarget.style.borderColor = C.accentBorder;
+            }}
+            onMouseLeave={(e) => {
+              e.currentTarget.style.color = C.dim;
+              e.currentTarget.style.borderColor = "transparent";
+            }}
+          >
+            <Pencil size={12} strokeWidth={1.8} />
+          </button>
+          <button
+            onClick={onDelete}
+            aria-label="Borrar"
+            style={{
+              backgroundColor: "transparent",
+              border: `1px solid transparent`,
+              color: C.dim,
+              padding: 5,
+              cursor: "pointer",
+              transition: "all 100ms ease",
+            }}
+            onMouseEnter={(e) => {
+              e.currentTarget.style.color = C.red;
+              e.currentTarget.style.borderColor = "rgba(248,113,113,0.40)";
+            }}
+            onMouseLeave={(e) => {
+              e.currentTarget.style.color = C.dim;
+              e.currentTarget.style.borderColor = "transparent";
+            }}
+          >
+            <Trash2 size={12} strokeWidth={1.8} />
+          </button>
+        </div>
+      </PTd>
+    </tr>
+  );
+}
+
+
+/* ─────────────── Modal: confirmar borrado ─────────────── */
+function DeleteConfirmModal({ position, onCancel, onConfirm }) {
+  const [deleting, setDeleting] = useState(false);
+
+  const handleConfirm = async () => {
+    setDeleting(true);
+    try {
+      await onConfirm();
+    } finally {
+      setDeleting(false);
+    }
+  };
+
+  return (
+    <div
+      onClick={onCancel}
+      style={{
+        position: "fixed",
+        inset: 0,
+        backgroundColor: "rgba(0, 0, 0, 0.55)",
+        backdropFilter: "blur(2px)",
+        zIndex: 100,
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        padding: 20,
+      }}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        className="eco-fade-in"
+        style={{
+          backgroundColor: C.panel,
+          border: `1px solid ${C.borderStrong}`,
+          padding: 28,
+          maxWidth: 400,
+          width: "100%",
+          fontFamily: "'Roboto', sans-serif",
+        }}
+      >
+        <div
+          className="flex items-center gap-3"
+          style={{ marginBottom: 14 }}
+        >
+          <div
+            style={{
+              width: 36,
+              height: 36,
+              backgroundColor: "rgba(248,113,113,0.10)",
+              border: `1px solid rgba(248,113,113,0.30)`,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+            }}
+          >
+            <AlertTriangle size={16} color={C.red} strokeWidth={1.8} />
+          </div>
+          <h3 style={{ margin: 0, fontSize: 15, color: C.text, fontFamily: "'Raleway', sans-serif", fontWeight: 600 }}>
+            Borrar posición
+          </h3>
+        </div>
+        <p style={{ fontSize: 12.5, color: C.muted, lineHeight: 1.6, marginBottom: 20 }}>
+          ¿Seguro querés borrar la operación de{" "}
+          <strong style={{ color: C.text }}>{position.ticker}</strong>?
+          Esta acción no se puede deshacer.
+        </p>
+        <div className="flex items-center justify-end gap-2">
+          <button
+            onClick={onCancel}
+            disabled={deleting}
+            style={{
+              backgroundColor: "transparent",
+              border: `1px solid ${C.border}`,
+              color: C.muted,
+              padding: "8px 14px",
+              fontSize: 12,
+              cursor: deleting ? "not-allowed" : "pointer",
+              fontFamily: "'Roboto', sans-serif",
+            }}
+          >
+            Cancelar
+          </button>
+          <button
+            onClick={handleConfirm}
+            disabled={deleting}
+            style={{
+              backgroundColor: C.red,
+              border: "none",
+              color: "#fff",
+              padding: "8px 14px",
+              fontSize: 12,
+              fontWeight: 600,
+              cursor: deleting ? "not-allowed" : "pointer",
+              fontFamily: "'Roboto', sans-serif",
+              opacity: deleting ? 0.6 : 1,
+            }}
+          >
+            {deleting ? "Borrando..." : "Borrar"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+
+/* ─────────────── Drawer: agregar / editar posición ───────────────
+ *
+ * Drawer lateral derecho con form inteligente que se adapta al tipo
+ * de instrumento elegido. Cada tipo tiene sus propios labels, hints
+ * y campos extra (ej. cauciones tienen tasa TNA y plazo).
+ *
+ * El form arma un "payload" que matchea el schema de la tabla positions
+ * y lo pasa a onSubmit. La persistencia se hace en el componente padre.
+ */
+function AddPositionDrawer({ editingPosition, onClose, onSubmit }) {
+  const isEditing = Boolean(editingPosition);
+
+  // Estado del form. Si editamos, prellenamos con los valores existentes.
+  const [form, setForm] = useState(() => {
+    if (editingPosition) {
+      return {
+        instrument_type: editingPosition.instrument_type,
+        operation_type: editingPosition.operation_type || "buy",
+        ticker: editingPosition.ticker || "",
+        quantity: editingPosition.quantity ?? "",
+        entry_price: editingPosition.entry_price ?? "",
+        entry_currency: editingPosition.entry_currency || "ARS",
+        entry_date: editingPosition.entry_date || new Date().toISOString().slice(0, 10),
+        notes: editingPosition.notes || "",
+        // extra fields desde el JSONB
+        rate_tna: editingPosition.extra?.rate_tna ?? "",
+        term_days: editingPosition.extra?.term_days ?? "",
+        strike: editingPosition.extra?.strike ?? "",
+        expiry: editingPosition.extra?.expiry ?? "",
+        option_type: editingPosition.extra?.option_type ?? "call",
+      };
+    }
+    return {
+      instrument_type: "bond_ars",
+      operation_type: "buy",
+      ticker: "",
+      quantity: "",
+      entry_price: "",
+      entry_currency: "ARS",
+      entry_date: new Date().toISOString().slice(0, 10),
+      notes: "",
+      rate_tna: "",
+      term_days: "",
+      strike: "",
+      expiry: "",
+      option_type: "call",
+    };
+  });
+
+  const [submitting, setSubmitting] = useState(false);
+  const [errors, setErrors] = useState({});
+
+  // Cuando cambia el tipo, ajustamos la moneda por defecto si todavía no editaste
+  const meta = INSTRUMENT_TYPES[form.instrument_type] || INSTRUMENT_TYPES.bond_ars;
+
+  const setField = (key, value) => {
+    setForm((f) => ({ ...f, [key]: value }));
+    if (errors[key]) {
+      setErrors((e) => ({ ...e, [key]: null }));
+    }
+  };
+
+  // Cuando cambia tipo de instrumento, sugerimos moneda default si es nuevo
+  const handleTypeChange = (newType) => {
+    const newMeta = INSTRUMENT_TYPES[newType];
+    setForm((f) => ({
+      ...f,
+      instrument_type: newType,
+      // Solo cambiar moneda si no está editando
+      entry_currency: isEditing ? f.entry_currency : (newMeta?.defaultCurrency || "ARS"),
+    }));
+  };
+
+  // Cerrar con ESC
+  useEffect(() => {
+    const handleEsc = (e) => {
+      if (e.key === "Escape") onClose();
+    };
+    document.addEventListener("keydown", handleEsc);
+    return () => document.removeEventListener("keydown", handleEsc);
+  }, [onClose]);
+
+  // Validación
+  const validate = () => {
+    const errs = {};
+    if (!form.ticker.trim()) errs.ticker = "Ticker requerido";
+    if (form.ticker.length > 16) errs.ticker = "Máximo 16 caracteres";
+
+    const qty = Number(form.quantity);
+    if (!form.quantity || isNaN(qty) || qty <= 0) {
+      errs.quantity = "Cantidad debe ser mayor a 0";
+    } else if (meta.integerQuantity && !Number.isInteger(qty)) {
+      errs.quantity = "Debe ser un número entero";
+    }
+
+    // Precio: solo obligatorio si el tipo lo tiene definido
+    if (meta.priceLabel != null) {
+      const price = Number(form.entry_price);
+      if (form.entry_price === "" || isNaN(price) || price <= 0) {
+        errs.entry_price = "Precio debe ser mayor a 0";
+      }
+    }
+
+    if (!form.entry_date) errs.entry_date = "Fecha requerida";
+
+    // Validaciones específicas
+    if (form.instrument_type === "caucion") {
+      const tna = Number(form.rate_tna);
+      if (form.rate_tna === "" || isNaN(tna) || tna < 0) {
+        errs.rate_tna = "Tasa TNA requerida";
+      }
+      const term = Number(form.term_days);
+      if (form.term_days === "" || isNaN(term) || term <= 0 || !Number.isInteger(term)) {
+        errs.term_days = "Plazo en días entero";
+      }
+    }
+
+    if (form.instrument_type === "option") {
+      const k = Number(form.strike);
+      if (form.strike === "" || isNaN(k) || k <= 0) errs.strike = "Strike requerido";
+      if (!form.expiry) errs.expiry = "Vencimiento requerido";
+    }
+
+    return errs;
+  };
+
+  const handleSubmit = async () => {
+    const errs = validate();
+    if (Object.keys(errs).length > 0) {
+      setErrors(errs);
+      return;
+    }
+    setErrors({});
+
+    // Armar el payload limpio para la BD
+    const extra = {};
+    if (form.instrument_type === "caucion") {
+      extra.rate_tna = Number(form.rate_tna);
+      extra.term_days = Number(form.term_days);
+    }
+    if (form.instrument_type === "option") {
+      extra.strike = Number(form.strike);
+      extra.expiry = form.expiry;
+      extra.option_type = form.option_type;
+    }
+
+    const payload = {
+      instrument_type: form.instrument_type,
+      operation_type: form.operation_type,
+      ticker: form.ticker.trim().toUpperCase(),
+      quantity: Number(form.quantity),
+      entry_price: meta.priceLabel != null && form.entry_price !== "" ? Number(form.entry_price) : null,
+      entry_currency: form.entry_currency,
+      entry_date: form.entry_date,
+      notes: form.notes.trim() || null,
+      extra,
+    };
+
+    setSubmitting(true);
+    try {
+      await onSubmit(payload);
+    } catch (err) {
+      setErrors({ _form: err.message || "Error al guardar" });
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <>
+      {/* Backdrop */}
+      <div
+        onClick={onClose}
+        style={{
+          position: "fixed",
+          inset: 0,
+          backgroundColor: "rgba(0,0,0,0.45)",
+          backdropFilter: "blur(2px)",
+          zIndex: 90,
+        }}
+      />
+      {/* Drawer */}
+      <div
+        className="eco-drawer"
+        style={{
+          position: "fixed",
+          top: 0,
+          right: 0,
+          bottom: 0,
+          width: "min(560px, 100vw)",
+          backgroundColor: C.panel,
+          borderLeft: `1px solid ${C.borderStrong}`,
+          zIndex: 91,
+          display: "flex",
+          flexDirection: "column",
+          fontFamily: "'Roboto', sans-serif",
+          animation: "ecoSlideIn 220ms ease-out",
+        }}
+      >
+        {/* Header */}
+        <div
+          className="flex items-center justify-between"
+          style={{
+            padding: "18px 24px",
+            borderBottom: `1px solid ${C.border}`,
+            flexShrink: 0,
+          }}
+        >
+          <div>
+            <div style={{ fontSize: 9, color: C.dim, letterSpacing: "0.22em", textTransform: "uppercase", fontWeight: 600 }}>
+              {isEditing ? "Editar posición" : "Nueva posición"}
+            </div>
+            <h3
+              style={{
+                fontFamily: "'Raleway', sans-serif",
+                fontSize: 18,
+                fontWeight: 600,
+                color: C.text,
+                margin: 0,
+                marginTop: 2,
+                letterSpacing: "-0.01em",
+              }}
+            >
+              {meta.label}
+            </h3>
+          </div>
+          <button
+            onClick={onClose}
+            aria-label="Cerrar"
+            style={{
+              backgroundColor: "transparent",
+              border: `1px solid ${C.border}`,
+              color: C.muted,
+              width: 32,
+              height: 32,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              cursor: "pointer",
+            }}
+          >
+            <X size={14} strokeWidth={1.8} />
+          </button>
+        </div>
+
+        {/* Body scrolleable */}
+        <div className="eco-scroll" style={{ flex: 1, overflowY: "auto", padding: 24 }}>
+          {/* Tipo de instrumento */}
+          <FormSection label="Instrumento">
+            <Select
+              value={form.instrument_type}
+              onChange={handleTypeChange}
+              options={INSTRUMENT_TYPE_KEYS.map((key) => ({
+                value: key,
+                label: INSTRUMENT_TYPES[key].label,
+              }))}
+            />
+            <FieldHint>{meta.description}</FieldHint>
+          </FormSection>
+
+          {/* Tipo de operación */}
+          <FormSection label="Operación">
+            <div className="flex gap-2">
+              <ToggleButton
+                active={form.operation_type === "buy"}
+                onClick={() => setField("operation_type", "buy")}
+                color="green"
+              >
+                Compra / Coloco
+              </ToggleButton>
+              <ToggleButton
+                active={form.operation_type === "sell"}
+                onClick={() => setField("operation_type", "sell")}
+                color="red"
+              >
+                Venta / Tomo
+              </ToggleButton>
+            </div>
+          </FormSection>
+
+          {/* Ticker */}
+          <FormSection label="Ticker" error={errors.ticker}>
+            <Input
+              value={form.ticker}
+              onChange={(v) => setField("ticker", v.toUpperCase())}
+              placeholder={
+                form.instrument_type === "bond_ars" ? "T30J6, S29Y6, T15D5..." :
+                form.instrument_type === "future" ? "DLR052026, DLR062026..." :
+                form.instrument_type === "stock" ? "GGAL, YPF, ALUA..." :
+                form.instrument_type === "cedear" ? "AAPL, MSFT, NVDA..." :
+                form.instrument_type === "caucion" ? "CAUCION..." :
+                "Código del instrumento"
+              }
+              hasError={Boolean(errors.ticker)}
+            />
+          </FormSection>
+
+          {/* Cantidad */}
+          <FormSection label={meta.quantityLabel} error={errors.quantity} hint={meta.quantityHint}>
+            <Input
+              type="number"
+              value={form.quantity}
+              onChange={(v) => setField("quantity", v)}
+              placeholder={meta.integerQuantity ? "Entero" : "0,00"}
+              step={meta.integerQuantity ? "1" : "any"}
+              hasError={Boolean(errors.quantity)}
+            />
+          </FormSection>
+
+          {/* Precio (solo si aplica) */}
+          {meta.priceLabel && (
+            <FormSection label={meta.priceLabel} error={errors.entry_price} hint={meta.priceHint}>
+              <Input
+                type="number"
+                value={form.entry_price}
+                onChange={(v) => setField("entry_price", v)}
+                placeholder="0,00"
+                step="any"
+                hasError={Boolean(errors.entry_price)}
+              />
+            </FormSection>
+          )}
+
+          {/* Moneda + Fecha lado a lado */}
+          <div className="grid grid-cols-2 gap-3">
+            <FormSection label="Moneda">
+              <Select
+                value={form.entry_currency}
+                onChange={(v) => setField("entry_currency", v)}
+                options={CURRENCIES.map((c) => ({ value: c.code, label: c.label }))}
+              />
+            </FormSection>
+            <FormSection label="Fecha" error={errors.entry_date}>
+              <Input
+                type="date"
+                value={form.entry_date}
+                onChange={(v) => setField("entry_date", v)}
+                hasError={Boolean(errors.entry_date)}
+              />
+            </FormSection>
+          </div>
+
+          {/* Campos extra: caución */}
+          {form.instrument_type === "caucion" && (
+            <div className="grid grid-cols-2 gap-3">
+              <FormSection label="Tasa TNA (%)" error={errors.rate_tna} hint="Ej. 32,5">
+                <Input
+                  type="number"
+                  value={form.rate_tna}
+                  onChange={(v) => setField("rate_tna", v)}
+                  placeholder="0,00"
+                  step="any"
+                  hasError={Boolean(errors.rate_tna)}
+                />
+              </FormSection>
+              <FormSection label="Plazo (días)" error={errors.term_days} hint="Ej. 1, 7, 30">
+                <Input
+                  type="number"
+                  value={form.term_days}
+                  onChange={(v) => setField("term_days", v)}
+                  placeholder="1"
+                  step="1"
+                  hasError={Boolean(errors.term_days)}
+                />
+              </FormSection>
+            </div>
+          )}
+
+          {/* Campos extra: opción */}
+          {form.instrument_type === "option" && (
+            <>
+              <div className="grid grid-cols-2 gap-3">
+                <FormSection label="Tipo">
+                  <Select
+                    value={form.option_type}
+                    onChange={(v) => setField("option_type", v)}
+                    options={[
+                      { value: "call", label: "Call" },
+                      { value: "put", label: "Put" },
+                    ]}
+                  />
+                </FormSection>
+                <FormSection label="Strike" error={errors.strike}>
+                  <Input
+                    type="number"
+                    value={form.strike}
+                    onChange={(v) => setField("strike", v)}
+                    placeholder="0,00"
+                    step="any"
+                    hasError={Boolean(errors.strike)}
+                  />
+                </FormSection>
+              </div>
+              <FormSection label="Vencimiento" error={errors.expiry}>
+                <Input
+                  type="date"
+                  value={form.expiry}
+                  onChange={(v) => setField("expiry", v)}
+                  hasError={Boolean(errors.expiry)}
+                />
+              </FormSection>
+            </>
+          )}
+
+          {/* Notas */}
+          <FormSection label="Notas (opcional)">
+            <textarea
+              value={form.notes}
+              onChange={(e) => setField("notes", e.target.value)}
+              placeholder="Cualquier comentario sobre esta operación..."
+              rows={3}
+              style={{
+                width: "100%",
+                backgroundColor: C.deep,
+                border: `1px solid ${C.border}`,
+                color: C.text,
+                padding: "9px 12px",
+                fontSize: 12.5,
+                fontFamily: "'Roboto', sans-serif",
+                resize: "vertical",
+                outline: "none",
+              }}
+              onFocus={(e) => (e.currentTarget.style.borderColor = C.accent)}
+              onBlur={(e) => (e.currentTarget.style.borderColor = C.border)}
+            />
+          </FormSection>
+
+          {/* Error general */}
+          {errors._form && (
+            <div
+              className="flex items-center gap-2"
+              style={{
+                backgroundColor: "rgba(248,113,113,0.08)",
+                border: `1px solid rgba(248,113,113,0.30)`,
+                color: C.red,
+                padding: "10px 12px",
+                fontSize: 12,
+                marginTop: 16,
+              }}
+            >
+              <AlertTriangle size={13} strokeWidth={1.8} />
+              <span>{errors._form}</span>
+            </div>
+          )}
+        </div>
+
+        {/* Footer con acciones */}
+        <div
+          className="flex items-center justify-end gap-2"
+          style={{
+            padding: "14px 24px",
+            borderTop: `1px solid ${C.border}`,
+            backgroundColor: C.deep,
+            flexShrink: 0,
+          }}
+        >
+          <button
+            onClick={onClose}
+            disabled={submitting}
+            style={{
+              backgroundColor: "transparent",
+              border: `1px solid ${C.border}`,
+              color: C.muted,
+              padding: "9px 16px",
+              fontSize: 12.5,
+              cursor: submitting ? "not-allowed" : "pointer",
+              fontFamily: "'Roboto', sans-serif",
+            }}
+          >
+            Cancelar
+          </button>
+          <button
+            onClick={handleSubmit}
+            disabled={submitting}
+            style={{
+              backgroundColor: C.accent,
+              color: C.bg,
+              border: "none",
+              padding: "9px 18px",
+              fontSize: 12.5,
+              fontWeight: 600,
+              cursor: submitting ? "not-allowed" : "pointer",
+              fontFamily: "'Roboto', sans-serif",
+              opacity: submitting ? 0.7 : 1,
+              minWidth: 110,
+            }}
+          >
+            {submitting ? "Guardando..." : isEditing ? "Guardar cambios" : "Agregar posición"}
+          </button>
+        </div>
+      </div>
+    </>
+  );
+}
+
+
+/* ─────────────── Form helpers (Inputs/Selects/Sections) ─────────────── */
+
+function FormSection({ label, error, hint, children }) {
+  return (
+    <div style={{ marginBottom: 16 }}>
+      <label
+        style={{
+          display: "block",
+          fontSize: 10.5,
+          color: C.muted,
+          letterSpacing: "0.10em",
+          textTransform: "uppercase",
+          fontWeight: 600,
+          marginBottom: 6,
+        }}
+      >
+        {label}
+      </label>
+      {children}
+      {hint && !error && <FieldHint>{hint}</FieldHint>}
+      {error && (
+        <div style={{ fontSize: 10.5, color: C.red, marginTop: 4, letterSpacing: "0.01em" }}>
+          {error}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function FieldHint({ children }) {
+  return (
+    <div style={{ fontSize: 10.5, color: C.dim, marginTop: 4, letterSpacing: "0.01em" }}>
+      {children}
+    </div>
+  );
+}
+
+function Input({ value, onChange, placeholder, type = "text", step, hasError }) {
+  return (
+    <input
+      type={type}
+      value={value}
+      onChange={(e) => onChange(e.target.value)}
+      placeholder={placeholder}
+      step={step}
+      style={{
+        width: "100%",
+        backgroundColor: C.deep,
+        border: `1px solid ${hasError ? C.red : C.border}`,
+        color: C.text,
+        padding: "9px 12px",
+        fontSize: 12.5,
+        fontFamily: type === "number" ? "'JetBrains Mono', monospace" : "'Roboto', sans-serif",
+        outline: "none",
+        transition: "border-color 120ms ease",
+      }}
+      onFocus={(e) => {
+        if (!hasError) e.currentTarget.style.borderColor = C.accent;
+      }}
+      onBlur={(e) => {
+        if (!hasError) e.currentTarget.style.borderColor = C.border;
+      }}
+    />
+  );
+}
+
+function Select({ value, onChange, options }) {
+  return (
+    <select
+      value={value}
+      onChange={(e) => onChange(e.target.value)}
+      style={{
+        width: "100%",
+        backgroundColor: C.deep,
+        border: `1px solid ${C.border}`,
+        color: C.text,
+        padding: "9px 12px",
+        fontSize: 12.5,
+        fontFamily: "'Roboto', sans-serif",
+        outline: "none",
+        cursor: "pointer",
+      }}
+    >
+      {options.map((opt) => (
+        <option key={opt.value} value={opt.value}>{opt.label}</option>
+      ))}
+    </select>
+  );
+}
+
+function ToggleButton({ active, onClick, children, color }) {
+  const tint = color === "green" ? C.green : color === "red" ? C.red : C.accent;
+  return (
+    <button
+      onClick={onClick}
+      style={{
+        flex: 1,
+        backgroundColor: active ? `${tint}1A` : C.deep,
+        border: `1px solid ${active ? tint : C.border}`,
+        color: active ? tint : C.muted,
+        padding: "9px 12px",
+        fontSize: 12,
+        fontWeight: active ? 600 : 400,
+        cursor: "pointer",
+        fontFamily: "'Roboto', sans-serif",
+        transition: "all 120ms ease",
+      }}
+    >
+      {children}
+    </button>
+  );
+}
+
+
 
 
 function EmptyWorkspace({ active }) {
