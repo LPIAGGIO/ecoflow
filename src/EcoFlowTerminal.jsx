@@ -1748,6 +1748,129 @@ function useInstrumentCatalog() {
 }
 
 
+/* ─────────────── Hook: useDashboardFx ───────────────
+ *
+ * Lee las cotizaciones FX desde /api/dolares (que ya proxea dolarapi.com).
+ * El dashboard del Portfolio necesita 4 valores: Mayorista, MEP, CCL, Blue.
+ *
+ * Cache:
+ *   - sessionStorage: si ya hay datos, los muestra inmediato y refresca atrás.
+ *   - Stale-while-revalidate: el user no ve un loader si tenemos cache previo.
+ *
+ * Estructura del retorno:
+ *   {
+ *     fx: { mayorista, mep, ccl, blue }  // cada uno: { buy, sell, mid, change }
+ *     loading,
+ *     error,
+ *     lastUpdated,
+ *     refresh: () => void,
+ *   }
+ *
+ * El campo `change` es la variación porcentual del valor mid respecto al
+ * cierre anterior. Como dolarapi no expone histórico, lo calculamos como
+ * diff entre el `sell` y el `compra` que aporte el endpoint cuando estén
+ * disponibles. Si no, queda en null y la UI muestra "-".
+ */
+
+const DASHBOARD_FX_KEYS = ["mayorista", "bolsa", "contadoconliqui", "blue"];
+const FX_LABEL_MAP = {
+  mayorista: "Mayorista",
+  bolsa: "MEP",
+  contadoconliqui: "CCL",
+  blue: "Blue",
+};
+const FX_INTERNAL_MAP = {
+  mayorista: "mayorista",
+  bolsa: "mep",
+  contadoconliqui: "ccl",
+  blue: "blue",
+};
+
+const FX_CACHE_KEY = "ecoflow_dashboard_fx_v1";
+
+function readFxCache() {
+  try {
+    const raw = sessionStorage.getItem(FX_CACHE_KEY);
+    if (!raw) return null;
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
+
+function writeFxCache(payload) {
+  try {
+    sessionStorage.setItem(FX_CACHE_KEY, JSON.stringify(payload));
+  } catch {
+    /* sessionStorage puede fallar en private mode */
+  }
+}
+
+function useDashboardFx() {
+  const cached = readFxCache();
+  const [fx, setFx] = useState(cached?.fx || null);
+  const [lastUpdated, setLastUpdated] = useState(cached?.lastUpdated || null);
+  const [loading, setLoading] = useState(!cached);
+  const [error, setError] = useState(null);
+  const [refreshKey, setRefreshKey] = useState(0);
+
+  useEffect(() => {
+    let mounted = true;
+    setError(null);
+    (async () => {
+      try {
+        const r = await fetch("/api/dolares");
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        const arr = await r.json();
+        if (!Array.isArray(arr)) throw new Error("Respuesta inválida");
+
+        const result = {};
+        for (const apiKey of DASHBOARD_FX_KEYS) {
+          const match = arr.find(
+            (d) => (d.casa || "").toLowerCase() === apiKey.toLowerCase()
+          );
+          const internalKey = FX_INTERNAL_MAP[apiKey];
+          if (!match) {
+            result[internalKey] = null;
+            continue;
+          }
+          const buy = Number(match.compra) || null;
+          const sell = Number(match.venta) || null;
+          const mid = buy && sell ? (buy + sell) / 2 : sell || buy;
+          result[internalKey] = {
+            label: FX_LABEL_MAP[apiKey],
+            buy,
+            sell,
+            mid,
+            // dolarapi no da histórico — dejamos placeholder por ahora
+            change: null,
+            updatedAt: match.fechaActualizacion
+              ? new Date(match.fechaActualizacion)
+              : null,
+          };
+        }
+
+        if (!mounted) return;
+        const now = new Date().toISOString();
+        setFx(result);
+        setLastUpdated(now);
+        setLoading(false);
+        writeFxCache({ fx: result, lastUpdated: now });
+      } catch (e) {
+        if (!mounted) return;
+        setError(e.message || "Error cargando cotizaciones");
+        setLoading(false);
+      }
+    })();
+    return () => { mounted = false; };
+  }, [refreshKey]);
+
+  const refresh = useCallback(() => setRefreshKey((k) => k + 1), []);
+
+  return { fx, loading, error, lastUpdated, refresh };
+}
+
+
 /* ─────────────── Hook: useUserPositions ───────────────
  *
  * Encapsula toda la interacción con la tabla `public.positions` de Supabase.
@@ -1860,6 +1983,838 @@ function fmtDateShort(iso) {
   const d = new Date(iso);
   if (isNaN(d.getTime())) return "—";
   return d.toLocaleDateString("es-AR", { day: "2-digit", month: "short", year: "2-digit" });
+}
+
+
+/* ─────────────── DASHBOARD OVERVIEW (Sub-paso 3) ───────────────
+ *
+ * Componente separado que renderiza la "experiencia tipo Balanz":
+ *
+ *   ┌─────────────────────────────────────────────────────┐
+ *   │  Banda FX: 4 cards Mayorista / MEP / CCL / Blue     │
+ *   ├─────────────────────────────────────────────────────┤
+ *   │  Toggle moneda valuación: ARS / USD-MEP / USD-CCL   │
+ *   ├─────────────────────────────────────────────────────┤
+ *   │  ┌──────────┐ ┌──────────┐ ┌──────────────────┐    │
+ *   │  │  Total   │ │ Distrib. │ │ Liquidez Proy.   │    │
+ *   │  │  $ XXX   │ │ ░░░ donut│ │ 30d / 90d toggle │    │
+ *   │  │  +X,XX%  │ │ Inst/Mon │ │ ARS/MEP/CCL      │    │
+ *   │  └──────────┘ └──────────┘ └──────────────────┘    │
+ *   ├─────────────────────────────────────────────────────┤
+ *   │  Flujos Proyectados (V1: lista próximos 5 vtos)    │
+ *   └─────────────────────────────────────────────────────┘
+ *
+ * Recibe `positions` desde el padre (PortfolioDashboard) para no duplicar
+ * la lectura de Supabase. Las cotizaciones FX se traen con useDashboardFx().
+ *
+ * Para precios actuales de bonos (cálculo del valor de cartera) usaremos
+ * en futuras iteraciones data912 vía /api/bonos y /api/letras. Por ahora
+ * V1 valúa todo a entry_price (costo) — sirve para tener layout funcional
+ * y los números reales los conectamos al final.
+ */
+
+function DashboardOverview({ positions }) {
+  const { fx, loading: fxLoading, error: fxError, lastUpdated, refresh: refreshFx } = useDashboardFx();
+
+  // Toggle de moneda de valuación: ARS / USD-MEP / USD-CCL
+  const [valuationCurrency, setValuationCurrency] = useState("ARS");
+
+  // Toggle Distribución: instrumentos / monedas
+  const [distView, setDistView] = useState("instruments");
+
+  // Toggle Liquidez Proyectada ventana
+  const [liquidityWindow, setLiquidityWindow] = useState("30d");
+
+  return (
+    <div style={{ marginBottom: 32 }}>
+      {/* 1. Banda FX */}
+      <FxBand fx={fx} loading={fxLoading} error={fxError} onRefresh={refreshFx} lastUpdated={lastUpdated} />
+
+      {/* 2. Toggle moneda de valuación */}
+      <div className="flex items-center justify-between gap-3" style={{ marginTop: 16, marginBottom: 14 }}>
+        <ValuationToggle
+          value={valuationCurrency}
+          onChange={setValuationCurrency}
+        />
+        <span style={{ fontSize: 11, color: C.dim, fontFamily: "'Roboto', sans-serif" }}>
+          Cartera valuada en {valuationCurrency === "ARS" ? "Pesos" : valuationCurrency === "USD-MEP" ? "Dólar MEP" : "Dólar CCL"}
+        </span>
+      </div>
+
+      {/* 3. Tres cards principales lado a lado */}
+      <div
+        className="grid"
+        style={{
+          gridTemplateColumns: "minmax(0, 1.1fr) minmax(0, 1fr) minmax(0, 1.2fr)",
+          gap: 14,
+          marginBottom: 18,
+        }}
+      >
+        <TotalCard
+          positions={positions}
+          fx={fx}
+          valuationCurrency={valuationCurrency}
+        />
+        <DistributionCard
+          positions={positions}
+          fx={fx}
+          valuationCurrency={valuationCurrency}
+          view={distView}
+          onViewChange={setDistView}
+        />
+        <LiquidityCard
+          positions={positions}
+          fx={fx}
+          valuationCurrency={valuationCurrency}
+          window={liquidityWindow}
+          onWindowChange={setLiquidityWindow}
+        />
+      </div>
+
+      {/* 4. Flujos proyectados (V1: lista simple) */}
+      <FlowsSection positions={positions} />
+    </div>
+  );
+}
+
+
+/* ─────────────── FX Band: 4 cards de cotizaciones ─────────────── */
+
+function FxBand({ fx, loading, error, onRefresh, lastUpdated }) {
+  const items = [
+    { key: "mayorista", label: "Mayorista" },
+    { key: "mep",       label: "Dólar MEP"  },
+    { key: "ccl",       label: "Dólar CCL"  },
+    { key: "blue",      label: "Dólar Blue" },
+  ];
+
+  return (
+    <div>
+      <div className="flex items-center justify-between" style={{ marginBottom: 8 }}>
+        <span style={{ fontSize: 9, letterSpacing: "0.22em", color: C.dim, textTransform: "uppercase", fontWeight: 600 }}>
+          Cotizaciones del día
+        </span>
+        <button
+          onClick={onRefresh}
+          className="eco-refresh-btn"
+          disabled={loading}
+          style={{
+            backgroundColor: "transparent",
+            border: `1px solid ${C.border}`,
+            color: C.muted,
+            padding: "4px 10px",
+            fontSize: 10.5,
+            fontFamily: "'Roboto', sans-serif",
+            cursor: loading ? "wait" : "pointer",
+            display: "flex",
+            alignItems: "center",
+            gap: 6,
+          }}
+        >
+          <RefreshCw size={11} strokeWidth={1.8} className={loading ? "eco-spin" : undefined} />
+          {loading ? "Cargando" : "Actualizar"}
+        </button>
+      </div>
+      <div className="grid" style={{ gridTemplateColumns: "repeat(4, 1fr)", gap: 10 }}>
+        {items.map((it) => (
+          <FxCard key={it.key} label={it.label} data={fx?.[it.key]} loading={loading && !fx} />
+        ))}
+      </div>
+      {error && !fx && (
+        <div style={{ fontSize: 11, color: C.red, marginTop: 6 }}>
+          Error cargando cotizaciones: {error}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function FxCard({ label, data, loading }) {
+  const sell = data?.sell;
+  const buy = data?.buy;
+  const placeholder = loading || !data;
+
+  return (
+    <div
+      style={{
+        backgroundColor: C.panel,
+        border: `1px solid ${C.border}`,
+        padding: "12px 14px",
+        display: "flex",
+        flexDirection: "column",
+        gap: 4,
+        minHeight: 76,
+      }}
+    >
+      <span style={{ fontSize: 10.5, color: C.muted, fontWeight: 500, textTransform: "uppercase", letterSpacing: "0.05em" }}>
+        {label}
+      </span>
+      {placeholder ? (
+        <div style={{ height: 26, display: "flex", alignItems: "center" }}>
+          <span style={{ fontSize: 18, color: C.dim, fontFamily: "'JetBrains Mono', monospace" }}>—</span>
+        </div>
+      ) : (
+        <div className="flex items-baseline gap-2">
+          <span
+            style={{
+              fontSize: 19,
+              fontWeight: 600,
+              color: C.text,
+              fontFamily: "'JetBrains Mono', monospace",
+              letterSpacing: "-0.01em",
+            }}
+          >
+            {fmtCurrencyValue(sell || buy, "ARS")}
+          </span>
+        </div>
+      )}
+      {!placeholder && buy && sell && (
+        <span style={{ fontSize: 10.5, color: C.dim, fontFamily: "'JetBrains Mono', monospace" }}>
+          Compra {fmtCurrencyValue(buy, "ARS")}
+        </span>
+      )}
+    </div>
+  );
+}
+
+
+/* ─────────────── Toggle de moneda de valuación ─────────────── */
+
+function ValuationToggle({ value, onChange }) {
+  const options = [
+    { key: "ARS",     label: "ARS" },
+    { key: "USD-MEP", label: "USD MEP" },
+    { key: "USD-CCL", label: "USD CCL" },
+  ];
+  return (
+    <div
+      className="flex"
+      style={{
+        backgroundColor: C.deep,
+        border: `1px solid ${C.border}`,
+        padding: 3,
+      }}
+    >
+      {options.map((opt) => {
+        const active = value === opt.key;
+        return (
+          <button
+            key={opt.key}
+            onClick={() => onChange(opt.key)}
+            style={{
+              backgroundColor: active ? C.accent : "transparent",
+              color: active ? C.bg : C.muted,
+              border: "none",
+              padding: "5px 14px",
+              fontSize: 11,
+              fontWeight: active ? 600 : 500,
+              cursor: "pointer",
+              fontFamily: "'Roboto', sans-serif",
+              letterSpacing: "0.02em",
+              transition: "background-color 120ms ease, color 120ms ease",
+            }}
+          >
+            {opt.label}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+
+/* ─────────────── Card 1: Total de cartera ─────────────── */
+
+function TotalCard({ positions, fx, valuationCurrency }) {
+  // V1: valuamos al entry_price (costo). En V2 conectamos data912 para
+  // bonos con precio actualizado y un current_price manual para acciones.
+  const totals = useMemo(
+    () => computePortfolioTotals(positions, fx, valuationCurrency),
+    [positions, fx, valuationCurrency]
+  );
+
+  const tcLine = useMemo(() => {
+    if (!fx) return null;
+    const parts = [];
+    if (fx.mep?.sell) parts.push(`MEP ${fmtCurrencyValue(fx.mep.sell, "ARS")}`);
+    if (fx.ccl?.sell) parts.push(`CCL ${fmtCurrencyValue(fx.ccl.sell, "ARS")}`);
+    return parts.join(" · ");
+  }, [fx]);
+
+  return (
+    <div style={cardBaseStyle()}>
+      <div className="flex items-center justify-between" style={{ marginBottom: 10 }}>
+        <span style={cardTitleStyle()}>Total</span>
+      </div>
+
+      <div className="flex items-baseline gap-3" style={{ marginBottom: 8 }}>
+        <span
+          style={{
+            fontSize: 28,
+            fontWeight: 700,
+            color: C.text,
+            fontFamily: "'JetBrains Mono', monospace",
+            letterSpacing: "-0.02em",
+          }}
+        >
+          {totals.value !== null
+            ? fmtCurrencyValue(totals.value, valuationCurrency === "ARS" ? "ARS" : "USD")
+            : "—"}
+        </span>
+      </div>
+
+      {/* Variación día (placeholder hasta tener current_price) */}
+      <div style={{ fontSize: 12, color: C.dim, marginBottom: 12, fontFamily: "'Roboto', sans-serif" }}>
+        Variación día —
+        <span style={{ marginLeft: 6, color: C.faint, fontSize: 10.5 }}>
+          (requiere precios actualizados)
+        </span>
+      </div>
+
+      {tcLine && (
+        <div style={{ fontSize: 11, color: C.muted, fontFamily: "'JetBrains Mono', monospace" }}>
+          {tcLine}
+        </div>
+      )}
+
+      {totals.unvalued > 0 && (
+        <div
+          className="flex items-center gap-1"
+          style={{
+            marginTop: 10,
+            fontSize: 10.5,
+            color: C.yellow,
+            fontFamily: "'Roboto', sans-serif",
+          }}
+        >
+          <AlertTriangle size={11} strokeWidth={1.8} />
+          <span>{totals.unvalued} {totals.unvalued === 1 ? "posición" : "posiciones"} sin precio actualizado</span>
+        </div>
+      )}
+    </div>
+  );
+}
+
+
+/* ─────────────── Card 2: Distribución ─────────────── */
+
+function DistributionCard({ positions, fx, valuationCurrency, view, onViewChange }) {
+  const slices = useMemo(() => {
+    const totals = computePortfolioTotals(positions, fx, valuationCurrency);
+    if (!totals.value || totals.value <= 0) return [];
+
+    const groups = view === "monedas"
+      ? groupByCurrency(positions, fx, valuationCurrency)
+      : groupByCategory(positions, fx, valuationCurrency);
+
+    const total = Object.values(groups).reduce((acc, v) => acc + v, 0);
+    if (total <= 0) return [];
+
+    return Object.entries(groups)
+      .filter(([_, v]) => v > 0)
+      .map(([key, value], idx) => ({
+        key,
+        label: prettifyGroupKey(key, view),
+        value,
+        pct: (value / total) * 100,
+        color: PROVIDER_COLORS[idx % PROVIDER_COLORS.length],
+      }))
+      .sort((a, b) => b.value - a.value);
+  }, [positions, fx, valuationCurrency, view]);
+
+  return (
+    <div style={cardBaseStyle()}>
+      <div className="flex items-center justify-between" style={{ marginBottom: 12 }}>
+        <span style={cardTitleStyle()}>Distribución</span>
+        <div className="flex" style={{ backgroundColor: C.deep, border: `1px solid ${C.border}`, padding: 2 }}>
+          {[
+            { key: "instruments", label: "Instrumentos" },
+            { key: "monedas",     label: "Monedas" },
+          ].map((opt) => {
+            const active = view === opt.key;
+            return (
+              <button
+                key={opt.key}
+                onClick={() => onViewChange(opt.key)}
+                style={{
+                  backgroundColor: active ? C.accent : "transparent",
+                  color: active ? C.bg : C.muted,
+                  border: "none",
+                  padding: "3px 8px",
+                  fontSize: 9.5,
+                  fontWeight: active ? 600 : 500,
+                  cursor: "pointer",
+                  fontFamily: "'Roboto', sans-serif",
+                }}
+              >
+                {opt.label}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      {slices.length === 0 ? (
+        <div style={{ fontSize: 12, color: C.dim, padding: "20px 0", textAlign: "center" }}>
+          Sin datos para distribuir
+        </div>
+      ) : (
+        <div className="flex items-center gap-3">
+          <DonutChart slices={slices} size={106} />
+          <div className="flex flex-col" style={{ flex: 1, gap: 6, minWidth: 0 }}>
+            {slices.slice(0, 5).map((s) => (
+              <div key={s.key} className="flex items-center gap-2" style={{ minWidth: 0 }}>
+                <span style={{ width: 8, height: 8, backgroundColor: s.color, flexShrink: 0 }} />
+                <span style={{ fontSize: 11, color: C.muted, fontFamily: "'Roboto', sans-serif", flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  {s.label}
+                </span>
+                <span style={{ fontSize: 11, color: C.text, fontFamily: "'JetBrains Mono', monospace", fontWeight: 500 }}>
+                  {s.pct.toFixed(1)}%
+                </span>
+              </div>
+            ))}
+            {slices.length > 5 && (
+              <div style={{ fontSize: 10, color: C.dim, fontFamily: "'Roboto', sans-serif" }}>
+                +{slices.length - 5} más
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function DonutChart({ slices, size = 100 }) {
+  const radius = size / 2 - 4;
+  const innerRadius = radius * 0.6;
+  const cx = size / 2;
+  const cy = size / 2;
+
+  let cumulative = 0;
+  const total = slices.reduce((acc, s) => acc + s.value, 0);
+
+  return (
+    <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`} style={{ flexShrink: 0 }}>
+      {slices.map((s, idx) => {
+        const fraction = s.value / total;
+        const startAngle = cumulative * Math.PI * 2 - Math.PI / 2;
+        cumulative += fraction;
+        const endAngle = cumulative * Math.PI * 2 - Math.PI / 2;
+
+        const largeArc = fraction > 0.5 ? 1 : 0;
+        const x1 = cx + Math.cos(startAngle) * radius;
+        const y1 = cy + Math.sin(startAngle) * radius;
+        const x2 = cx + Math.cos(endAngle) * radius;
+        const y2 = cy + Math.sin(endAngle) * radius;
+        const x3 = cx + Math.cos(endAngle) * innerRadius;
+        const y3 = cy + Math.sin(endAngle) * innerRadius;
+        const x4 = cx + Math.cos(startAngle) * innerRadius;
+        const y4 = cy + Math.sin(startAngle) * innerRadius;
+
+        const d = [
+          `M ${x1} ${y1}`,
+          `A ${radius} ${radius} 0 ${largeArc} 1 ${x2} ${y2}`,
+          `L ${x3} ${y3}`,
+          `A ${innerRadius} ${innerRadius} 0 ${largeArc} 0 ${x4} ${y4}`,
+          "Z",
+        ].join(" ");
+
+        return <path key={idx} d={d} fill={s.color} />;
+      })}
+    </svg>
+  );
+}
+
+
+/* ─────────────── Card 3: Liquidez Proyectada ─────────────── */
+
+function LiquidityCard({ positions, fx, valuationCurrency, window: windowKey, onWindowChange }) {
+  const breakdown = useMemo(
+    () => computeLiquidityBreakdown(positions, fx, valuationCurrency, windowKey),
+    [positions, fx, valuationCurrency, windowKey]
+  );
+
+  return (
+    <div style={cardBaseStyle()}>
+      <div className="flex items-center justify-between" style={{ marginBottom: 12 }}>
+        <span style={cardTitleStyle()}>Liquidez proyectada</span>
+        <div className="flex" style={{ backgroundColor: C.deep, border: `1px solid ${C.border}`, padding: 2 }}>
+          {[
+            { key: "30d", label: "30 días" },
+            { key: "90d", label: "90 días" },
+          ].map((opt) => {
+            const active = windowKey === opt.key;
+            return (
+              <button
+                key={opt.key}
+                onClick={() => onWindowChange(opt.key)}
+                style={{
+                  backgroundColor: active ? C.accent : "transparent",
+                  color: active ? C.bg : C.muted,
+                  border: "none",
+                  padding: "3px 8px",
+                  fontSize: 9.5,
+                  fontWeight: active ? 600 : 500,
+                  cursor: "pointer",
+                  fontFamily: "'Roboto', sans-serif",
+                }}
+              >
+                {opt.label}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      <div className="flex flex-col gap-2.5" style={{ marginBottom: 6 }}>
+        {[
+          { key: "ARS",      label: "Pesos" },
+          { key: "USD-MEP",  label: "USD MEP" },
+          { key: "USD-CCL",  label: "USD CCL" },
+        ].map((row) => {
+          const v = breakdown[row.key] ?? 0;
+          const display = v > 0
+            ? fmtCurrencyValue(v, row.key === "ARS" ? "ARS" : "USD")
+            : "—";
+          return (
+            <div key={row.key} className="flex items-center justify-between">
+              <span style={{ fontSize: 11.5, color: C.muted, fontFamily: "'Roboto', sans-serif" }}>
+                {row.label}
+              </span>
+              <span style={{ fontSize: 13, color: v > 0 ? C.text : C.dim, fontFamily: "'JetBrains Mono', monospace", fontWeight: 500 }}>
+                {display}
+              </span>
+            </div>
+          );
+        })}
+      </div>
+
+      <div style={{ fontSize: 10, color: C.dim, marginTop: 10, fontFamily: "'Roboto', sans-serif", lineHeight: 1.4 }}>
+        Incluye bonos, ONs, cauciones, futuros y opciones que vencen en la ventana elegida.
+      </div>
+    </div>
+  );
+}
+
+
+/* ─────────────── Sección Flujos Proyectados (V1: placeholder) ─────────────── */
+
+function FlowsSection({ positions }) {
+  const upcomingMaturities = useMemo(() => {
+    const now = new Date();
+    const events = [];
+    for (const p of positions) {
+      const t = p.instrument_type;
+      const ticker = (p.ticker || "").toUpperCase();
+      // Bonos ARS — vencimientos del registry
+      if (t === "bond_ars" && BOND_REGISTRY[ticker]?.maturityDate) {
+        events.push({
+          ticker,
+          type: "Bono ARS",
+          date: BOND_REGISTRY[ticker].maturityDate,
+          quantity: p.quantity,
+          currency: p.entry_currency,
+        });
+      }
+      // Cauciones — vencimiento = entry_date + plazo
+      if (t === "caucion" && p.entry_date && p.extra?.term_days) {
+        const start = new Date(p.entry_date);
+        const end = new Date(start.getTime() + Number(p.extra.term_days) * 86400000);
+        events.push({
+          ticker: p.ticker || "Caución",
+          type: "Caución",
+          date: end.toISOString().slice(0, 10),
+          quantity: p.quantity,
+          currency: p.entry_currency,
+        });
+      }
+      // Futuros DLR — fecha de vencimiento del registry
+      if (t === "future") {
+        const contract = DLR_REGISTRY.find((c) => c.ticker === ticker);
+        if (contract?.maturityDate) {
+          events.push({
+            ticker,
+            type: "Futuro",
+            date: contract.maturityDate,
+            quantity: p.quantity,
+            currency: p.entry_currency,
+          });
+        }
+      }
+    }
+    return events
+      .filter((e) => new Date(e.date) >= now)
+      .sort((a, b) => a.date.localeCompare(b.date))
+      .slice(0, 5);
+  }, [positions]);
+
+  return (
+    <div style={cardBaseStyle()}>
+      <div className="flex items-center justify-between" style={{ marginBottom: 12 }}>
+        <span style={cardTitleStyle()}>Flujos proyectados</span>
+        <span style={{ fontSize: 10, color: C.dim, fontFamily: "'Roboto', sans-serif" }}>
+          Próximos 5 vencimientos
+        </span>
+      </div>
+
+      {upcomingMaturities.length === 0 ? (
+        <div style={{ fontSize: 12, color: C.dim, padding: "16px 0", textAlign: "center" }}>
+          No hay vencimientos próximos en tu cartera
+        </div>
+      ) : (
+        <div className="flex flex-col">
+          {upcomingMaturities.map((e, idx) => (
+            <div
+              key={`${e.ticker}-${idx}`}
+              className="flex items-center justify-between"
+              style={{
+                padding: "8px 0",
+                borderBottom: idx < upcomingMaturities.length - 1 ? `1px solid ${C.border}` : "none",
+              }}
+            >
+              <div className="flex items-center gap-3" style={{ minWidth: 0, flex: 1 }}>
+                <span style={{ fontSize: 12, color: C.text, fontFamily: "'JetBrains Mono', monospace", fontWeight: 600, minWidth: 70 }}>
+                  {e.ticker}
+                </span>
+                <span style={{ fontSize: 11, color: C.muted, fontFamily: "'Roboto', sans-serif" }}>
+                  {e.type}
+                </span>
+              </div>
+              <div className="flex items-center gap-4">
+                <span style={{ fontSize: 11, color: C.muted, fontFamily: "'JetBrains Mono', monospace" }}>
+                  {fmtMaturityShort(e.date)}
+                </span>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+
+/* ─────────────── Helpers de cálculo ─────────────── */
+
+function cardBaseStyle() {
+  return {
+    backgroundColor: C.panel,
+    border: `1px solid ${C.border}`,
+    padding: "16px 18px",
+    minHeight: 180,
+  };
+}
+
+function cardTitleStyle() {
+  return {
+    fontSize: 11,
+    color: C.muted,
+    textTransform: "uppercase",
+    letterSpacing: "0.08em",
+    fontWeight: 600,
+    fontFamily: "'Roboto', sans-serif",
+  };
+}
+
+/**
+ * Convierte un valor desde su moneda original a la moneda de valuación.
+ * Si no hay FX disponible o la moneda no se puede mapear, retorna null.
+ */
+function convertValue(amount, fromCurrency, toCurrency, fx) {
+  if (amount == null || isNaN(amount)) return null;
+  if (fromCurrency === toCurrency) return amount;
+
+  // Mismas monedas vía alias
+  if (
+    (fromCurrency === "USD-MEP" && toCurrency === "USD-MEP") ||
+    (fromCurrency === "USD-CCL" && toCurrency === "USD-CCL")
+  ) return amount;
+
+  if (!fx) return null;
+
+  // Tasa ARS por unidad de moneda extranjera
+  const ratesArs = {
+    "ARS":     1,
+    "USD-MEP": fx.mep?.sell || null,
+    "USD-CCL": fx.ccl?.sell || null,
+  };
+  const fromRate = ratesArs[fromCurrency];
+  const toRate = ratesArs[toCurrency];
+  if (!fromRate || !toRate) return null;
+
+  // amount en ARS = amount * fromRate; luego dividir por toRate
+  return (amount * fromRate) / toRate;
+}
+
+/**
+ * Calcula el valor de mercado de una posición.
+ * V1: si tenemos current_price (futuro) lo usamos; sino caemos a entry_price.
+ * Para cauciones, retornamos el monto colocado/tomado a su valor nominal.
+ */
+function positionValue(p) {
+  const price = p.current_price ?? p.entry_price;
+  if (price == null) {
+    // Cauciones: el valor es directamente la cantidad (es plata)
+    if (p.instrument_type === "caucion") return Number(p.quantity) || 0;
+    return null;
+  }
+  const qty = Number(p.quantity) || 0;
+  // Bonos: precio cada 100 VN
+  if (p.instrument_type === "bond_ars" || p.instrument_type === "bond_usd" || p.instrument_type === "on") {
+    return (qty * Number(price)) / 100;
+  }
+  // Futuros: contrato * multiplicador * precio. DLR multiplicador típico = 1000.
+  if (p.instrument_type === "future") {
+    const mult = 1000;
+    return qty * mult * Number(price);
+  }
+  // Opciones: contrato * 100 * prima (placeholder)
+  if (p.instrument_type === "option") {
+    return qty * 100 * Number(price);
+  }
+  // Acciones, CEDEARs, FCI, USD, Cripto: cantidad * precio
+  return qty * Number(price);
+}
+
+function computePortfolioTotals(positions, fx, valuationCurrency) {
+  let total = 0;
+  let unvalued = 0;
+  let valuedAny = false;
+
+  for (const p of positions) {
+    // Para venta corta de futuros, el "valor" se invierte (es deuda nominal)
+    // pero para V1 lo dejamos absoluto — se ajustará en V2 con P&L real.
+    let raw = positionValue(p);
+    if (raw == null) {
+      unvalued++;
+      continue;
+    }
+    valuedAny = true;
+    const converted = convertValue(raw, p.entry_currency || "ARS", valuationCurrency, fx);
+    if (converted == null) {
+      unvalued++;
+      continue;
+    }
+    total += converted;
+  }
+
+  return {
+    value: valuedAny ? total : null,
+    unvalued,
+  };
+}
+
+function groupByCategory(positions, fx, valuationCurrency) {
+  const result = {};
+  for (const p of positions) {
+    const raw = positionValue(p);
+    if (raw == null) continue;
+    const v = convertValue(raw, p.entry_currency || "ARS", valuationCurrency, fx);
+    if (v == null) continue;
+    const cat = simplifyCategory(p.instrument_type);
+    result[cat] = (result[cat] || 0) + v;
+  }
+  return result;
+}
+
+function groupByCurrency(positions, fx, valuationCurrency) {
+  const result = {};
+  for (const p of positions) {
+    const raw = positionValue(p);
+    if (raw == null) continue;
+    const v = convertValue(raw, p.entry_currency || "ARS", valuationCurrency, fx);
+    if (v == null) continue;
+    const cur = p.entry_currency || "ARS";
+    result[cur] = (result[cur] || 0) + v;
+  }
+  return result;
+}
+
+/**
+ * Mapea los 11 instrument_types a 5 categorías de alto nivel para el donut.
+ */
+function simplifyCategory(instrumentType) {
+  switch (instrumentType) {
+    case "bond_ars":
+      return "Renta Fija ARS";
+    case "bond_usd":
+    case "on":
+      return "Renta Fija USD";
+    case "stock":
+    case "cedear":
+      return "Renta Variable";
+    case "future":
+    case "option":
+      return "Cobertura";
+    case "caucion":
+    case "fci":
+    case "usd":
+      return "Liquidez";
+    case "crypto":
+      return "Cripto";
+    default:
+      return "Otros";
+  }
+}
+
+function prettifyGroupKey(key, view) {
+  if (view === "monedas") {
+    if (key === "ARS")     return "Pesos";
+    if (key === "USD-MEP") return "USD MEP";
+    if (key === "USD-CCL") return "USD CCL";
+    if (key === "USD")     return "USD";
+    return key;
+  }
+  return key;
+}
+
+/**
+ * Suma vencimientos en la ventana elegida y devuelve el total por moneda.
+ */
+function computeLiquidityBreakdown(positions, fx, valuationCurrency, windowKey) {
+  const days = windowKey === "30d" ? 30 : 90;
+  const now = new Date();
+  const cutoff = new Date(now.getTime() + days * 86400000);
+
+  const result = { ARS: 0, "USD-MEP": 0, "USD-CCL": 0 };
+
+  for (const p of positions) {
+    const matDate = getPositionMaturity(p);
+    if (!matDate) continue;
+    const md = new Date(matDate);
+    if (md < now || md > cutoff) continue;
+
+    const raw = positionValue(p);
+    if (raw == null) continue;
+    const cur = p.entry_currency || "ARS";
+    if (result[cur] != null) {
+      result[cur] += raw;
+    }
+  }
+
+  return result;
+}
+
+function getPositionMaturity(p) {
+  const t = p.instrument_type;
+  const ticker = (p.ticker || "").toUpperCase();
+  if (t === "bond_ars" && BOND_REGISTRY[ticker]?.maturityDate) {
+    return BOND_REGISTRY[ticker].maturityDate;
+  }
+  if (t === "future") {
+    const c = DLR_REGISTRY.find((x) => x.ticker === ticker);
+    if (c) return c.maturityDate;
+  }
+  if (t === "caucion" && p.entry_date && p.extra?.term_days) {
+    const start = new Date(p.entry_date);
+    return new Date(start.getTime() + Number(p.extra.term_days) * 86400000)
+      .toISOString().slice(0, 10);
+  }
+  if (t === "option" && p.extra?.expiry) {
+    return p.extra.expiry;
+  }
+  return null;
 }
 
 
@@ -2040,6 +2995,14 @@ function PortfolioDashboard() {
         <PortfolioEmptyState onAdd={openCreate} />
       ) : (
         <>
+          {/* Sub-paso 3: Dashboard tipo Balanz */}
+          <DashboardOverview positions={positions} />
+
+          {/* Tabla de posiciones (heredada del Sub-paso 2) */}
+          <div style={{ marginBottom: 8, fontSize: 9, letterSpacing: "0.22em", color: C.dim, textTransform: "uppercase", fontWeight: 600 }}>
+            Posiciones cargadas
+          </div>
+
           {/* Filtros (chips por tipo) */}
           <div className="flex items-center gap-2 flex-wrap" style={{ marginBottom: 16 }}>
             <FilterChip
