@@ -2241,13 +2241,33 @@ function TotalCard({ positions, fx, valuationCurrency }) {
     return parts.join(" · ");
   }, [fx]);
 
+  // Mini-stats útiles en V1 (mientras no tenemos current_price para variación día)
+  const stats = useMemo(() => {
+    const distinctTickers = new Set(positions.map((p) => p.ticker)).size;
+    const distinctTypes = new Set(
+      positions.map((p) =>
+        p.instrument_type === "bond_ars" || p.instrument_type === "bond_usd"
+          ? "bond"
+          : p.instrument_type
+      )
+    ).size;
+    return {
+      positionsCount: positions.length,
+      distinctTickers,
+      distinctTypes,
+    };
+  }, [positions]);
+
   return (
     <div style={cardBaseStyle()}>
       <div className="flex items-center justify-between" style={{ marginBottom: 10 }}>
         <span style={cardTitleStyle()}>Total</span>
+        <span style={{ fontSize: 9.5, color: C.dim, fontFamily: "'Roboto', sans-serif", letterSpacing: "0.04em" }}>
+          A costo
+        </span>
       </div>
 
-      <div className="flex items-baseline gap-3" style={{ marginBottom: 8 }}>
+      <div className="flex items-baseline gap-3" style={{ marginBottom: 12 }}>
         <span
           style={{
             fontSize: 28,
@@ -2263,12 +2283,33 @@ function TotalCard({ positions, fx, valuationCurrency }) {
         </span>
       </div>
 
-      {/* Variación día (placeholder hasta tener current_price) */}
-      <div style={{ fontSize: 12, color: C.dim, marginBottom: 12, fontFamily: "'Roboto', sans-serif" }}>
-        Variación día —
-        <span style={{ marginLeft: 6, color: C.faint, fontSize: 10.5 }}>
-          (requiere precios actualizados)
-        </span>
+      {/* Mini-stats informativas: en V2 esto se reemplaza por variación diaria
+          cuando conectemos current_price desde data912 + precios manuales. */}
+      <div className="flex items-center gap-4" style={{ marginBottom: 12 }}>
+        <div className="flex flex-col">
+          <span style={{ fontSize: 10, color: C.dim, fontFamily: "'Roboto', sans-serif", letterSpacing: "0.03em" }}>
+            Posiciones
+          </span>
+          <span style={{ fontSize: 14, color: C.text, fontFamily: "'JetBrains Mono', monospace", fontWeight: 600 }}>
+            {stats.positionsCount}
+          </span>
+        </div>
+        <div className="flex flex-col">
+          <span style={{ fontSize: 10, color: C.dim, fontFamily: "'Roboto', sans-serif", letterSpacing: "0.03em" }}>
+            Tickers
+          </span>
+          <span style={{ fontSize: 14, color: C.text, fontFamily: "'JetBrains Mono', monospace", fontWeight: 600 }}>
+            {stats.distinctTickers}
+          </span>
+        </div>
+        <div className="flex flex-col">
+          <span style={{ fontSize: 10, color: C.dim, fontFamily: "'Roboto', sans-serif", letterSpacing: "0.03em" }}>
+            Categorías
+          </span>
+          <span style={{ fontSize: 14, color: C.text, fontFamily: "'JetBrains Mono', monospace", fontWeight: 600 }}>
+            {stats.distinctTypes}
+          </span>
+        </div>
       </div>
 
       {tcLine && (
@@ -2391,9 +2432,32 @@ function DonutChart({ slices, size = 100 }) {
   const cx = size / 2;
   const cy = size / 2;
 
-  let cumulative = 0;
   const total = slices.reduce((acc, s) => acc + s.value, 0);
+  if (total <= 0 || slices.length === 0) return null;
 
+  // Caso especial: una sola slice del 100%. Un path SVG con start = end
+  // colapsa a 0 (el arco no se dibuja). Para evitarlo, dibujamos un anillo
+  // completo con dos círculos concéntricos usando fill-rule="evenodd".
+  if (slices.length === 1) {
+    return (
+      <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`} style={{ flexShrink: 0 }}>
+        <path
+          d={`
+            M ${cx} ${cy - radius}
+            A ${radius} ${radius} 0 1 1 ${cx - 0.001} ${cy - radius}
+            Z
+            M ${cx} ${cy - innerRadius}
+            A ${innerRadius} ${innerRadius} 0 1 0 ${cx - 0.001} ${cy - innerRadius}
+            Z
+          `}
+          fill={slices[0].color}
+          fillRule="evenodd"
+        />
+      </svg>
+    );
+  }
+
+  let cumulative = 0;
   return (
     <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`} style={{ flexShrink: 0 }}>
       {slices.map((s, idx) => {
@@ -2491,7 +2555,7 @@ function LiquidityCard({ positions, fx, valuationCurrency, window: windowKey, on
       </div>
 
       <div style={{ fontSize: 10, color: C.dim, marginTop: 10, fontFamily: "'Roboto', sans-serif", lineHeight: 1.4 }}>
-        Incluye bonos, ONs, cauciones, futuros y opciones que vencen en la ventana elegida.
+        Bonos, ONs, cauciones, futuros y opciones con vencimiento en la ventana. Valor de mercado a costo · al vencimiento puede variar.
       </div>
     </div>
   );
