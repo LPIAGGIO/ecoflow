@@ -173,11 +173,22 @@ export default async function handler(req, res) {
 
   /* — Upsert masivo — */
   let upsertError = null;
+  let upsertErrorDetail = null;
   if (allRows.length > 0) {
     const { error } = await supabase
       .from("instruments")
       .upsert(allRows, { onConflict: "instrument_type,ticker" });
-    if (error) upsertError = error.message;
+    if (error) {
+      upsertError = error.message;
+      // Capturamos el objeto error completo de Supabase para diagnóstico:
+      // a veces el message es genérico pero hint/details/code traen pistas.
+      upsertErrorDetail = {
+        message: error.message,
+        code: error.code,
+        details: error.details,
+        hint: error.hint,
+      };
+    }
   }
 
   /* — Determinar status final — */
@@ -212,6 +223,7 @@ export default async function handler(req, res) {
     recordsUpdated: allRows.length,
     perType,
     failedTypes,
+    upsertErrorDetail,  // null si no falló el upsert; objeto con code/hint/details si falló
     ranAt: nowIso,
     durationMs: Date.now() - startedAt,
   });
