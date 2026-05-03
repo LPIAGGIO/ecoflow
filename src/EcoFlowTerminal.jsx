@@ -2436,22 +2436,21 @@ function DonutChart({ slices, size = 100 }) {
   if (total <= 0 || slices.length === 0) return null;
 
   // Caso especial: una sola slice del 100%. Un path SVG con start = end
-  // colapsa a 0 (el arco no se dibuja). Para evitarlo, dibujamos un anillo
-  // completo con dos círculos concéntricos usando fill-rule="evenodd".
+  // colapsa a 0, así que dibujamos un anillo perfecto con un <circle>
+  // que solo tiene stroke (sin fill). El stroke pintado sobre el radio
+  // medio entre el outer y el inner queda como un anillo lleno.
   if (slices.length === 1) {
+    const ringMidRadius = (radius + innerRadius) / 2;
+    const ringWidth = radius - innerRadius;
     return (
       <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`} style={{ flexShrink: 0 }}>
-        <path
-          d={`
-            M ${cx} ${cy - radius}
-            A ${radius} ${radius} 0 1 1 ${cx - 0.001} ${cy - radius}
-            Z
-            M ${cx} ${cy - innerRadius}
-            A ${innerRadius} ${innerRadius} 0 1 0 ${cx - 0.001} ${cy - innerRadius}
-            Z
-          `}
-          fill={slices[0].color}
-          fillRule="evenodd"
+        <circle
+          cx={cx}
+          cy={cy}
+          r={ringMidRadius}
+          fill="none"
+          stroke={slices[0].color}
+          strokeWidth={ringWidth}
         />
       </svg>
     );
