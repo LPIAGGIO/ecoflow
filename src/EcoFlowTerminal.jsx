@@ -1535,29 +1535,34 @@ function ensureCurrentInOptions(opts, currentTicker, mode) {
 
 /* ─────────────── Resolución de moneda desde ticker + tipo ───────────────
  *
- * Dado un instrument_type y un ticker, devuelve la moneda en que se opera
- * y si es bloqueable (la mayoría sí — solo cauciones, opciones y FCI son
- * editables porque dependen del contexto del usuario).
+ * Dado un instrument_type y un ticker, devuelve la moneda SUGERIDA en la
+ * que se opera y si esa sugerencia es fuerte (suggested=true) o si el
+ * tipo no permite inferir nada (suggested=false).
+ *
+ * IMPORTANTE: el campo de moneda en el form es SIEMPRE editable. La
+ * sugerencia solo se usa para preseleccionar el valor al elegir ticker.
+ * El usuario puede cambiarla después si su broker convierte internamente
+ * (ej. comprar AL30 contra USD-MEP en algunos brokers).
  *
  * Reglas según mercado argentino (BYMA / Matba-Rofex):
- *   - Bonos ARS (lecaps, boncaps, etc.)        → ARS,     bloqueado
- *   - Bono USD puro (AL30, GD30, etc.)         → ARS,     bloqueado
- *   - Bono USD sufijo D (AL30D, GD30D, etc.)   → USD-MEP, bloqueado
- *   - Bono USD sufijo C (AL30C, GD30C, etc.)   → USD-CCL, bloqueado
- *   - Acciones / CEDEARs / ONs                  → ARS,     bloqueado
- *   - Futuros DLR                               → ARS,     bloqueado
- *   - Cauciones / Opciones / FCI                → editable (sin auto-set)
+ *   - Bonos ARS (lecaps, boncaps, etc.)        → ARS
+ *   - Bono USD puro (AL30, GD30, etc.)         → ARS
+ *   - Bono USD sufijo D (AL30D, GD30D, etc.)   → USD-MEP
+ *   - Bono USD sufijo C (AL30C, GD30C, etc.)   → USD-CCL
+ *   - Acciones / CEDEARs / ONs                  → ARS
+ *   - Futuros DLR                               → ARS
+ *   - Cauciones / Opciones / FCI                → sin sugerencia
  *
- * @returns {{ currency: string, locked: boolean }}
+ * @returns {{ currency: string|null, suggested: boolean }}
  */
 function resolveCurrencyFromTicker(instrumentType, ticker) {
-  // Tipos donde no podemos inferir moneda — el user elige libre
+  // Tipos donde no podemos inferir moneda — el user elige libre, sin hint
   if (
     instrumentType === "caucion" ||
     instrumentType === "option" ||
     instrumentType === "fci"
   ) {
-    return { currency: null, locked: false };
+    return { currency: null, suggested: false };
   }
 
   // Tipos siempre en ARS (sin importar el ticker)
@@ -1568,36 +1573,36 @@ function resolveCurrencyFromTicker(instrumentType, ticker) {
     instrumentType === "on" ||
     instrumentType === "future"
   ) {
-    return { currency: "ARS", locked: true };
+    return { currency: "ARS", suggested: true };
   }
 
   // Bonos USD (instrument_type === "bond_usd" o "bond" virtual con ticker USD):
-  // el sufijo del ticker determina la moneda.
+  // el sufijo del ticker determina la moneda sugerida.
   if (instrumentType === "bond_usd" || instrumentType === "bond") {
     if (!ticker) {
-      // Bono virtual sin ticker todavía: por default asumimos ARS
+      // Bono virtual sin ticker todavía: por default sugerimos ARS
       // (operación en el bono puro sin sufijo). Cuando el user elija
       // ticker con sufijo, se reasigna.
-      return { currency: "ARS", locked: true };
+      return { currency: "ARS", suggested: true };
     }
 
     // Si el ticker pertenece a BOND_REGISTRY (lecaps, boncaps, etc.),
     // es un bono ARS aunque el instrument_type del form diga "bond".
     if (BOND_REGISTRY[ticker]) {
-      return { currency: "ARS", locked: true };
+      return { currency: "ARS", suggested: true };
     }
 
     // Sufijos de plaza
     const lastChar = ticker.charAt(ticker.length - 1);
-    if (lastChar === "C") return { currency: "USD-CCL", locked: true };
-    if (lastChar === "D") return { currency: "USD-MEP", locked: true };
+    if (lastChar === "C") return { currency: "USD-CCL", suggested: true };
+    if (lastChar === "D") return { currency: "USD-MEP", suggested: true };
 
     // Bono USD puro (AL30, GD30, etc.) → ARS
-    return { currency: "ARS", locked: true };
+    return { currency: "ARS", suggested: true };
   }
 
-  // Tipo desconocido — fallback editable
-  return { currency: null, locked: false };
+  // Tipo desconocido — fallback editable sin sugerencia
+  return { currency: null, suggested: false };
 }
 
 /**
@@ -2592,8 +2597,8 @@ function AddPositionDrawer({ editingPosition, onClose, onSubmit }) {
    */
   const handleTypeChange = (newType) => {
     setForm((f) => {
-      const { currency, locked } = resolveCurrencyFromTicker(newType, "");
-      const newCurrency = locked
+      const { currency, suggested } = resolveCurrencyFromTicker(newType, "");
+      const newCurrency = suggested
         ? currency
         : (currency || INSTRUMENT_TYPES[newType]?.defaultCurrency || "ARS");
       return {
@@ -2609,7 +2614,7 @@ function AddPositionDrawer({ editingPosition, onClose, onSubmit }) {
         strike: "",
         expiry: "",
         option_type: "call",
-        // Moneda: la determina el tipo (y se ajustará de nuevo al elegir ticker)
+        // Moneda: arranca con la sugerencia del tipo (editable después)
         entry_currency: newCurrency,
       };
     });
@@ -2620,8 +2625,9 @@ function AddPositionDrawer({ editingPosition, onClose, onSubmit }) {
   /**
    * Cuando cambia el TICKER.
    *
-   * Reset de quantity, entry_price y extras. La moneda se recalcula
-   * con resolveCurrencyFromTicker:
+   * Reset de quantity, entry_price y extras. La moneda se PRESELECCIONA
+   * según resolveCurrencyFromTicker pero queda editable para que el user
+   * pueda reflejar conversiones internas del broker:
    *   - Si el ticker tiene sufijo C → USD-CCL
    *   - Si tiene sufijo D → USD-MEP
    *   - Si es bono ARS o puro USD → ARS
@@ -2629,7 +2635,7 @@ function AddPositionDrawer({ editingPosition, onClose, onSubmit }) {
    */
   const handleTickerChange = (newTicker) => {
     setForm((f) => {
-      const { currency, locked } = resolveCurrencyFromTicker(
+      const { currency, suggested } = resolveCurrencyFromTicker(
         f.instrument_type,
         newTicker
       );
@@ -2639,9 +2645,9 @@ function AddPositionDrawer({ editingPosition, onClose, onSubmit }) {
         // Resetear cantidad y precio porque el contexto cambió
         quantity: "",
         entry_price: "",
-        // Si el ticker fija la moneda (locked=true), la sobrescribimos.
-        // Si no fija (caucion/option/fci), respetamos lo que el user tenía.
-        entry_currency: locked && currency ? currency : f.entry_currency,
+        // Si el ticker tiene sugerencia, la aplicamos como default. El user
+        // puede modificarla después si su broker convierte internamente.
+        entry_currency: suggested && currency ? currency : f.entry_currency,
       };
     });
     if (errors.ticker || errors.quantity || errors.entry_price) {
@@ -2967,12 +2973,14 @@ function AddPositionDrawer({ editingPosition, onClose, onSubmit }) {
 
           {/* Moneda + Fecha lado a lado.
            *
-           * La moneda queda bloqueada para tipos donde está unívocamente
-           * determinada por el ticker (bonos, acciones, CEDEARs, ONs, futuros
-           * DLR). Cauciones, opciones y FCI quedan editables.
+           * La moneda se PRESELECCIONA según el ticker (ARS para puros,
+           * USD-MEP para sufijo D, USD-CCL para C, etc.) pero queda
+           * editable. Algunos brokers convierten internamente y permiten
+           * comprar AL30 contra USD-MEP, por ejemplo, así que el usuario
+           * tiene que poder reflejar eso.
            */}
           {(() => {
-            const { locked: currencyLocked } = resolveCurrencyFromTicker(
+            const { suggested: currencySuggested } = resolveCurrencyFromTicker(
               form.instrument_type,
               form.ticker
             );
@@ -2980,13 +2988,12 @@ function AddPositionDrawer({ editingPosition, onClose, onSubmit }) {
               <div className="grid grid-cols-2 gap-3">
                 <FormSection
                   label="Moneda"
-                  hint={currencyLocked ? "Determinada por el ticker" : undefined}
+                  hint={currencySuggested ? "Sugerida según el ticker" : undefined}
                 >
                   <Select
                     value={form.entry_currency}
                     onChange={(v) => setField("entry_currency", v)}
                     options={CURRENCIES.map((c) => ({ value: c.code, label: c.label }))}
-                    disabled={currencyLocked}
                   />
                 </FormSection>
                 <FormSection label="Fecha" error={errors.entry_date}>
