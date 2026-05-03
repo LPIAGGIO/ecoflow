@@ -1445,18 +1445,41 @@ function getTickerOptions(instrumentType, currentTicker, catalog) {
 
     const dynamicUsdBonds = catalog?.bond_usd?.length ? catalog.bond_usd : null;
     const usdBonds = dynamicUsdBonds
-      ? dynamicUsdBonds.map((b) => ({
-          ticker: b.ticker,
-          sortKey: `Z_${b.ticker}`,
-          label: b.description ? `${b.ticker} — ${b.description}` : b.ticker,
-        }))
+      ? dynamicUsdBonds.map((b) => {
+          // El endpoint enriquece description con sufijo legible:
+          //   AL30  → "Bonar 2030"
+          //   AL30D → "Bonar 2030 · MEP"
+          //   AL30C → "Bonar 2030 · CCL"
+          // Y metadata.maturityDate hereda del ticker base.
+          const maturity = b.metadata?.maturityDate;
+          const plaza = b.metadata?.plaza || "ars";
+          const desc = b.description;
+          let label;
+          if (desc && maturity) {
+            label = `${b.ticker} — ${desc} · vto ${fmtMaturityShort(maturity)}`;
+          } else if (desc) {
+            label = `${b.ticker} — ${desc}`;
+          } else {
+            label = b.ticker;
+          }
+          // Sort: agrupamos las 3 variantes (puro/D/C) consecutivas por
+          // ticker base. Para eso tomamos el ticker sin último char si es
+          // C o D, y agregamos un sub-orden ARS=0, MEP=1, CCL=2.
+          const plazaOrder = plaza === "ars" ? "0" : plaza === "mep" ? "1" : "2";
+          const sortKey = maturity
+            ? `${maturity}_${plazaOrder}`
+            : `Z_${b.ticker}`;
+          return { ticker: b.ticker, sortKey, label };
+        })
       : BONDS_USD_POPULAR.map((b) => ({
           ticker: b.ticker,
           sortKey: `Z_${b.ticker}`,
           label: `${b.ticker} — ${b.description}`,
         }));
 
-    const all = [...arsBonds, ...usdBonds];
+    const all = [...arsBonds, ...usdBonds].sort((a, b) =>
+      a.sortKey.localeCompare(b.sortKey)
+    );
     return ensureCurrentInOptions(all, currentTicker, "select");
   }
 
@@ -1510,18 +1533,101 @@ function ensureCurrentInOptions(opts, currentTicker, mode) {
   return { mode, options: formatted };
 }
 
+/* ─────────────── Resolución de moneda desde ticker + tipo ───────────────
+ *
+ * Dado un instrument_type y un ticker, devuelve la moneda en que se opera
+ * y si es bloqueable (la mayoría sí — solo cauciones, opciones y FCI son
+ * editables porque dependen del contexto del usuario).
+ *
+ * Reglas según mercado argentino (BYMA / Matba-Rofex):
+ *   - Bonos ARS (lecaps, boncaps, etc.)        → ARS,     bloqueado
+ *   - Bono USD puro (AL30, GD30, etc.)         → ARS,     bloqueado
+ *   - Bono USD sufijo D (AL30D, GD30D, etc.)   → USD-MEP, bloqueado
+ *   - Bono USD sufijo C (AL30C, GD30C, etc.)   → USD-CCL, bloqueado
+ *   - Acciones / CEDEARs / ONs                  → ARS,     bloqueado
+ *   - Futuros DLR                               → ARS,     bloqueado
+ *   - Cauciones / Opciones / FCI                → editable (sin auto-set)
+ *
+ * @returns {{ currency: string, locked: boolean }}
+ */
+function resolveCurrencyFromTicker(instrumentType, ticker) {
+  // Tipos donde no podemos inferir moneda — el user elige libre
+  if (
+    instrumentType === "caucion" ||
+    instrumentType === "option" ||
+    instrumentType === "fci"
+  ) {
+    return { currency: null, locked: false };
+  }
+
+  // Tipos siempre en ARS (sin importar el ticker)
+  if (
+    instrumentType === "bond_ars" ||
+    instrumentType === "stock" ||
+    instrumentType === "cedear" ||
+    instrumentType === "on" ||
+    instrumentType === "future"
+  ) {
+    return { currency: "ARS", locked: true };
+  }
+
+  // Bonos USD (instrument_type === "bond_usd" o "bond" virtual con ticker USD):
+  // el sufijo del ticker determina la moneda.
+  if (instrumentType === "bond_usd" || instrumentType === "bond") {
+    if (!ticker) {
+      // Bono virtual sin ticker todavía: por default asumimos ARS
+      // (operación en el bono puro sin sufijo). Cuando el user elija
+      // ticker con sufijo, se reasigna.
+      return { currency: "ARS", locked: true };
+    }
+
+    // Si el ticker pertenece a BOND_REGISTRY (lecaps, boncaps, etc.),
+    // es un bono ARS aunque el instrument_type del form diga "bond".
+    if (BOND_REGISTRY[ticker]) {
+      return { currency: "ARS", locked: true };
+    }
+
+    // Sufijos de plaza
+    const lastChar = ticker.charAt(ticker.length - 1);
+    if (lastChar === "C") return { currency: "USD-CCL", locked: true };
+    if (lastChar === "D") return { currency: "USD-MEP", locked: true };
+
+    // Bono USD puro (AL30, GD30, etc.) → ARS
+    return { currency: "ARS", locked: true };
+  }
+
+  // Tipo desconocido — fallback editable
+  return { currency: null, locked: false };
+}
+
+/**
+ * Normaliza monedas legacy (USD genérico, USD-Blue) a USD-MEP para que
+ * posiciones cargadas con el modelo viejo se editen sin error.
+ */
+function normalizeLegacyCurrency(currency) {
+  if (currency === "USD" || currency === "USD-Blue") return "USD-MEP";
+  return currency || "ARS";
+}
+
 /**
  * Monedas soportadas para entry_currency.
  *
- * Los valores legacy USD-MEP y USD-Blue siguen siendo válidos en la BD
- * (el check constraint los acepta), así que cualquier posición existente
- * con esas monedas no rompe al editarse — solo no aparecen en el menú
- * para nuevas cargas. Si en algún momento queremos limpiarlos, hacemos
- * un UPDATE masivo + restringimos el constraint.
+ * El modelo refleja la cuenta comitente real en Argentina:
+ *   - ARS:     pesos
+ *   - USD-MEP: dólares vía bonos sufijo D (AL30D, GD30D, etc.)
+ *   - USD-CCL: dólares vía bonos sufijo C (AL30C, GD30C, etc.)
+ *
+ * NO existe "USD oficial" o "USD Blue" como moneda válida en cuenta
+ * comitente: si el user deposita USD físicos, al operarlos el broker
+ * los considera USD-MEP. Para pasar a CCL hay que hacer canje (comprar
+ * AL30D y vender AL30C, o viceversa).
+ *
+ * Posiciones legacy con USD / USD-Blue se normalizan al cargarlas
+ * (ver AddPositionDrawer) para no romper edición.
  */
 const CURRENCIES = [
-  { code: "ARS", label: "Pesos (ARS)" },
-  { code: "USD", label: "Dólar (USD)" },
+  { code: "ARS",     label: "Pesos (ARS)" },
+  { code: "USD-MEP", label: "Dólar MEP" },
   { code: "USD-CCL", label: "Dólar CCL" },
 ];
 
@@ -2420,7 +2526,7 @@ function AddPositionDrawer({ editingPosition, onClose, onSubmit }) {
         ticker: editingPosition.ticker || "",
         quantity: editingPosition.quantity ?? "",
         entry_price: editingPosition.entry_price ?? "",
-        entry_currency: editingPosition.entry_currency || "ARS",
+        entry_currency: normalizeLegacyCurrency(editingPosition.entry_currency),
         entry_date: editingPosition.entry_date || new Date().toISOString().slice(0, 10),
         notes: editingPosition.notes || "",
         // extra fields desde el JSONB
@@ -2472,27 +2578,75 @@ function AddPositionDrawer({ editingPosition, onClose, onSubmit }) {
     }
   };
 
-  // Cuando cambia tipo de instrumento, sugerimos moneda default si es nuevo
-  // y limpiamos el ticker si el actual no aplica al nuevo tipo (evita
-  // que un T30J6 quede cargado al pasar de "Bono" a "Acción").
+  /**
+   * Cuando cambia el TIPO de instrumento.
+   *
+   * Reset agresivo: blanqueamos ticker, quantity, entry_price y campos
+   * extra contextuales (rate_tna, term_days, strike, expiry, option_type).
+   * Mantenemos fecha y notas, que son del meta-evento de la operación y
+   * no dependen del instrumento.
+   *
+   * La moneda se recalcula con resolveCurrencyFromTicker (al no haber
+   * ticker todavía, queda en el default del tipo: ARS para casi todos,
+   * null/editable para cauciones / opciones / fci).
+   */
   const handleTypeChange = (newType) => {
-    const newMeta = INSTRUMENT_TYPES[newType];
     setForm((f) => {
-      // Si el nuevo tipo tiene lista controlada y el ticker actual no
-      // pertenece a esa lista, lo blanqueamos.
-      const { mode, options } = getTickerOptions(newType, undefined, instrumentCatalog);
-      const currentTickerStillValid =
-        mode !== "select" ||
-        !f.ticker ||
-        options.some((o) => o.value === f.ticker);
+      const { currency, locked } = resolveCurrencyFromTicker(newType, "");
+      const newCurrency = locked
+        ? currency
+        : (currency || INSTRUMENT_TYPES[newType]?.defaultCurrency || "ARS");
       return {
         ...f,
         instrument_type: newType,
-        ticker: currentTickerStillValid ? f.ticker : "",
-        // Solo cambiar moneda si no está editando
-        entry_currency: isEditing ? f.entry_currency : (newMeta?.defaultCurrency || "ARS"),
+        // Reset de campos dependientes del tipo
+        ticker: "",
+        quantity: "",
+        entry_price: "",
+        // Extras (todos blanqueados para que el form siguiente arranque limpio)
+        rate_tna: "",
+        term_days: "",
+        strike: "",
+        expiry: "",
+        option_type: "call",
+        // Moneda: la determina el tipo (y se ajustará de nuevo al elegir ticker)
+        entry_currency: newCurrency,
       };
     });
+    // Limpiar errores asociados al form anterior
+    setErrors({});
+  };
+
+  /**
+   * Cuando cambia el TICKER.
+   *
+   * Reset de quantity, entry_price y extras. La moneda se recalcula
+   * con resolveCurrencyFromTicker:
+   *   - Si el ticker tiene sufijo C → USD-CCL
+   *   - Si tiene sufijo D → USD-MEP
+   *   - Si es bono ARS o puro USD → ARS
+   *   - etc.
+   */
+  const handleTickerChange = (newTicker) => {
+    setForm((f) => {
+      const { currency, locked } = resolveCurrencyFromTicker(
+        f.instrument_type,
+        newTicker
+      );
+      return {
+        ...f,
+        ticker: newTicker,
+        // Resetear cantidad y precio porque el contexto cambió
+        quantity: "",
+        entry_price: "",
+        // Si el ticker fija la moneda (locked=true), la sobrescribimos.
+        // Si no fija (caucion/option/fci), respetamos lo que el user tenía.
+        entry_currency: locked && currency ? currency : f.entry_currency,
+      };
+    });
+    if (errors.ticker || errors.quantity || errors.entry_price) {
+      setErrors((e) => ({ ...e, ticker: null, quantity: null, entry_price: null }));
+    }
   };
 
   // Cerrar con ESC
@@ -2568,13 +2722,17 @@ function AddPositionDrawer({ editingPosition, onClose, onSubmit }) {
       extra.option_type = form.option_type;
     }
 
-    // El tipo "bond" del form es virtual: lo desambiguamos a bond_ars
-    // (si la moneda elegida es ARS) o bond_usd (cualquier USD: oficial,
-    // MEP, CCL o Blue) antes de mandarlo a la BD, donde el enum sigue
-    // siendo bond_ars / bond_usd.
+    // El tipo "bond" del form es virtual: lo desambiguamos a bond_ars o
+    // bond_usd antes de mandarlo a la BD, donde el enum sigue siendo
+    // bond_ars / bond_usd.
+    //
+    // El criterio NO es la moneda elegida (porque AL30 puro se opera en
+    // ARS pero es un bono USD), sino la presencia del ticker en BOND_REGISTRY:
+    //   - Si está en BOND_REGISTRY (lecaps, boncaps, duales) → bond_ars
+    //   - Caso contrario (AL30, GD30, AL30D, GD30C, etc.)    → bond_usd
     const persistedType =
       form.instrument_type === "bond"
-        ? (form.entry_currency === "ARS" ? "bond_ars" : "bond_usd")
+        ? (BOND_REGISTRY[form.ticker.trim().toUpperCase()] ? "bond_ars" : "bond_usd")
         : form.instrument_type;
 
     const payload = {
@@ -2754,7 +2912,7 @@ function AddPositionDrawer({ editingPosition, onClose, onSubmit }) {
                 <FormSection label="Ticker" error={errors.ticker}>
                   <Select
                     value={form.ticker}
-                    onChange={(v) => setField("ticker", v)}
+                    onChange={handleTickerChange}
                     options={[
                       { value: "", label: "Elegí un ticker..." },
                       ...options,
@@ -2768,7 +2926,7 @@ function AddPositionDrawer({ editingPosition, onClose, onSubmit }) {
               <FormSection label="Ticker" error={errors.ticker}>
                 <Input
                   value={form.ticker}
-                  onChange={(v) => setField("ticker", v.toUpperCase())}
+                  onChange={(v) => handleTickerChange(v.toUpperCase())}
                   placeholder={
                     form.instrument_type === "stock" ? "GGAL, YPF, ALUA..." :
                     form.instrument_type === "cedear" ? "AAPL, MSFT, NVDA..." :
@@ -2807,24 +2965,41 @@ function AddPositionDrawer({ editingPosition, onClose, onSubmit }) {
             </FormSection>
           )}
 
-          {/* Moneda + Fecha lado a lado */}
-          <div className="grid grid-cols-2 gap-3">
-            <FormSection label="Moneda">
-              <Select
-                value={form.entry_currency}
-                onChange={(v) => setField("entry_currency", v)}
-                options={CURRENCIES.map((c) => ({ value: c.code, label: c.label }))}
-              />
-            </FormSection>
-            <FormSection label="Fecha" error={errors.entry_date}>
-              <Input
-                type="date"
-                value={form.entry_date}
-                onChange={(v) => setField("entry_date", v)}
-                hasError={Boolean(errors.entry_date)}
-              />
-            </FormSection>
-          </div>
+          {/* Moneda + Fecha lado a lado.
+           *
+           * La moneda queda bloqueada para tipos donde está unívocamente
+           * determinada por el ticker (bonos, acciones, CEDEARs, ONs, futuros
+           * DLR). Cauciones, opciones y FCI quedan editables.
+           */}
+          {(() => {
+            const { locked: currencyLocked } = resolveCurrencyFromTicker(
+              form.instrument_type,
+              form.ticker
+            );
+            return (
+              <div className="grid grid-cols-2 gap-3">
+                <FormSection
+                  label="Moneda"
+                  hint={currencyLocked ? "Determinada por el ticker" : undefined}
+                >
+                  <Select
+                    value={form.entry_currency}
+                    onChange={(v) => setField("entry_currency", v)}
+                    options={CURRENCIES.map((c) => ({ value: c.code, label: c.label }))}
+                    disabled={currencyLocked}
+                  />
+                </FormSection>
+                <FormSection label="Fecha" error={errors.entry_date}>
+                  <Input
+                    type="date"
+                    value={form.entry_date}
+                    onChange={(v) => setField("entry_date", v)}
+                    hasError={Boolean(errors.entry_date)}
+                  />
+                </FormSection>
+              </div>
+            );
+          })()}
 
           {/* Campos extra: caución */}
           {form.instrument_type === "caucion" && (
@@ -3047,21 +3222,23 @@ function Input({ value, onChange, placeholder, type = "text", step, hasError }) 
   );
 }
 
-function Select({ value, onChange, options, hasError }) {
+function Select({ value, onChange, options, hasError, disabled }) {
   return (
     <select
       value={value}
       onChange={(e) => onChange(e.target.value)}
+      disabled={disabled}
       style={{
         width: "100%",
-        backgroundColor: C.deep,
+        backgroundColor: disabled ? "rgba(13,26,41,0.5)" : C.deep,
         border: `1px solid ${hasError ? C.red : C.border}`,
-        color: C.text,
+        color: disabled ? C.muted : C.text,
         padding: "9px 12px",
         fontSize: 12.5,
         fontFamily: "'Roboto', sans-serif",
         outline: "none",
-        cursor: "pointer",
+        cursor: disabled ? "not-allowed" : "pointer",
+        opacity: disabled ? 0.7 : 1,
       }}
     >
       {options.map((opt) => (

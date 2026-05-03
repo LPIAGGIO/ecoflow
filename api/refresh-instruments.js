@@ -85,6 +85,72 @@ function normalizeTicker(item) {
   return ticker;
 }
 
+/* ─────────────── Metadata enrichment para bond_usd ───────────────
+ *
+ * data912 devuelve solo el symbol (ej. "AL30") sin descripción ni
+ * vencimiento. Para que el dropdown del front muestre "AL30 — Bonar
+ * 2030 · vto 09/jul/30" en vez de solo "AL30", enriquecemos manualmente
+ * los bonos soberanos más conocidos. Lo guardamos en metadata + description.
+ *
+ * Si data912 trae un ticker que NO está en este lookup, queda con
+ * description: null y en el front se muestra solo el ticker.
+ */
+const BOND_USD_METADATA = {
+  // Bonares ley local (AL...)
+  AL29:  { description: "Bonar 2029",  maturityDate: "2029-07-09" },
+  AL30:  { description: "Bonar 2030",  maturityDate: "2030-07-09" },
+  AL35:  { description: "Bonar 2035",  maturityDate: "2035-07-09" },
+  AE38:  { description: "Bonar 2038",  maturityDate: "2038-01-09" },
+  AL41:  { description: "Bonar 2041",  maturityDate: "2041-07-09" },
+
+  // Globales ley NY (GD...)
+  GD29:  { description: "Global 2029", maturityDate: "2029-07-09" },
+  GD30:  { description: "Global 2030", maturityDate: "2030-07-09" },
+  GD35:  { description: "Global 2035", maturityDate: "2035-07-09" },
+  GD38:  { description: "Global 2038", maturityDate: "2038-01-09" },
+  GD41:  { description: "Global 2041", maturityDate: "2041-07-09" },
+  GD46:  { description: "Global 2046", maturityDate: "2046-07-09" },
+
+  // Bonos provinciales / históricos comunes
+  AY24:  { description: "Bonar 2024",                   maturityDate: "2024-05-07" },
+  AO20:  { description: "Bonar 2020",                   maturityDate: "2020-10-08" },
+  PARY:  { description: "Par USD ley NY",               maturityDate: "2038-12-31" },
+  DICY:  { description: "Discount USD ley NY",          maturityDate: "2033-12-31" },
+  PARA:  { description: "Par USD ley local",            maturityDate: "2038-12-31" },
+  DICA:  { description: "Discount USD ley local",       maturityDate: "2033-12-31" },
+};
+
+/**
+ * Analiza un ticker de bono USD para detectar si tiene sufijo de plaza.
+ *
+ * Patrón típico:
+ *   - AL30  → puro      → operación en ARS
+ *   - AL30C → sufijo C  → operación en USD-CCL ("Cable")
+ *   - AL30D → sufijo D  → operación en USD-MEP
+ *
+ * @returns {{ base: string, plaza: 'ars' | 'mep' | 'ccl' }}
+ *   base:  el ticker sin sufijo (para heredar metadata del puro)
+ *   plaza: la moneda en que se opera ese ticker
+ */
+function analyzeBondUsdTicker(ticker) {
+  if (ticker.length < 2) return { base: ticker, plaza: "ars" };
+  const lastChar = ticker[ticker.length - 1];
+
+  // Solo consideramos sufijo si el ticker base (sin último char) es un
+  // bono conocido o cumple el patrón 2 letras + 2-3 dígitos.
+  if (lastChar === "C" || lastChar === "D") {
+    const base = ticker.slice(0, -1);
+    const isKnownBase =
+      Boolean(BOND_USD_METADATA[base]) || /^[A-Z]{2}\d{2,3}$/.test(base);
+    if (isKnownBase) {
+      return { base, plaza: lastChar === "C" ? "ccl" : "mep" };
+    }
+  }
+
+  // No tiene sufijo de plaza reconocible → ticker puro, opera en ARS
+  return { base: ticker, plaza: "ars" };
+}
+
 /* ─────────────── handler ─────────────── */
 
 export default async function handler(req, res) {
@@ -156,11 +222,41 @@ export default async function handler(req, res) {
         const ticker = normalizeTicker(item);
         if (!ticker || seen.has(ticker)) continue;
         seen.add(ticker);
+
+        // Metadata enrichment según tipo
+        let description = null;
+        let metadata = {};
+
+        if (type === "bond_usd") {
+          // Analizamos el sufijo para detectar plaza (ars/mep/ccl) y heredar
+          // metadata (description, maturityDate) del ticker base si existe.
+          const { base, plaza } = analyzeBondUsdTicker(ticker);
+          const baseMeta = BOND_USD_METADATA[base];
+
+          metadata = { plaza };
+
+          if (baseMeta) {
+            metadata.maturityDate = baseMeta.maturityDate;
+            // La descripción la heredamos del puro y agregamos el sufijo de
+            // plaza al texto para que sea distinguible visualmente:
+            //   AL30  → "Bonar 2030"
+            //   AL30D → "Bonar 2030 · MEP"
+            //   AL30C → "Bonar 2030 · CCL"
+            if (plaza === "ars") {
+              description = baseMeta.description;
+            } else if (plaza === "mep") {
+              description = `${baseMeta.description} · MEP`;
+            } else if (plaza === "ccl") {
+              description = `${baseMeta.description} · CCL`;
+            }
+          }
+        }
+
         allRows.push({
           ticker,
           instrument_type: type,
-          description: null,
-          metadata: {},
+          description,
+          metadata,
           last_refreshed_at: nowIso,
         });
       }
