@@ -1,7 +1,7 @@
 import { useState, useEffect, useMemo, useCallback } from "react";
 import { useAuth } from "./auth/AuthContext.jsx";
 import { supabase } from "./lib/supabase.js";
-import { resolveBond, daysToMaturity, shouldIgnoreTicker } from "./bondMaturities.js";
+import { resolveBond, daysToMaturity, shouldIgnoreTicker, BOND_REGISTRY } from "./bondMaturities.js";
 import {
   DLR_REGISTRY,
   DLR_SPOT_SEED,
@@ -338,8 +338,8 @@ export default function EcoFlowTerminal() {
 
         .eco-fade-in { animation: ecoFade 0.35s ease both; }
         @keyframes ecoFade {
-          from { opacity: 0; transform: translateY(2px); }
-          to { opacity: 1; transform: translateY(0); }
+          from { opacity: 0; }
+          to { opacity: 1; }
         }
 
         .eco-icon-btn {
@@ -367,6 +367,9 @@ export default function EcoFlowTerminal() {
         .eco-spin { animation: ecoSpin 0.9s linear infinite; }
 
         @keyframes ecoSlideIn { from { transform: translateX(100%); } to { transform: translateX(0); } }
+        @keyframes ecoSlideOut { from { transform: translateX(0); } to { transform: translateX(100%); } }
+        @keyframes ecoBackdropIn { from { opacity: 0; } to { opacity: 1; } }
+        @keyframes ecoBackdropOut { from { opacity: 1; } to { opacity: 0; } }
 
         .eco-refresh-btn { transition: background-color 0.15s ease, border-color 0.15s ease; }
         .eco-refresh-btn:hover:not(:disabled) {
@@ -1218,14 +1221,28 @@ function PortfolioAuthWall() {
  *  esta constante, no esparcir lógica en mil ifs por toda la UI.
  * ─────────────────────────────────────────────────────────────────── */
 const INSTRUMENT_TYPES = {
+  // Tipo "bond" UNIFICADO (visible en el dropdown). Al guardar, se mapea
+  // a bond_ars o bond_usd según la moneda elegida. Las posiciones legacy
+  // siguen funcionando porque bond_ars y bond_usd existen abajo.
+  bond: {
+    label: "Bono",
+    description: "Lecaps, Boncaps, Bonares, AL30, GD30 (en ARS o USD)",
+    icon: Receipt,
+    color: "emerald",
+    quantityLabel: "Cantidad",
+    quantityHint: "Ej. 35.945.426",
+    priceLabel: "Precio",
+    priceHint: "Ej. 1394,50 (ARS) o 72,50 (USD)",
+    defaultCurrency: "ARS",
+  },
   bond_ars: {
     label: "Bono ARS",
     description: "Lecaps, Boncaps, Bonares en pesos",
     icon: Receipt,
     color: "emerald",
-    quantityLabel: "Valor Nominal (VN)",
-    quantityHint: "Ej. 35.945.426 para T30J6",
-    priceLabel: "Precio (cada 100 VN)",
+    quantityLabel: "Cantidad",
+    quantityHint: "Ej. 35.945.426",
+    priceLabel: "Precio",
     priceHint: "Ej. 1394,50",
     defaultCurrency: "ARS",
   },
@@ -1234,9 +1251,9 @@ const INSTRUMENT_TYPES = {
     description: "AL30, GD30, Bonares hardollar",
     icon: Landmark,
     color: "cyan",
-    quantityLabel: "Valor Nominal (VN)",
+    quantityLabel: "Cantidad",
     quantityHint: "Ej. 100.000",
-    priceLabel: "Precio (cada 100 VN)",
+    priceLabel: "Precio",
     priceHint: "Ej. 72,50 USD",
     defaultCurrency: "USD",
   },
@@ -1245,8 +1262,8 @@ const INSTRUMENT_TYPES = {
     description: "ONs corporativas",
     icon: Building2,
     color: "indigo",
-    quantityLabel: "Valor Nominal (VN)",
-    priceLabel: "Precio (cada 100 VN)",
+    quantityLabel: "Cantidad",
+    priceLabel: "Precio",
     defaultCurrency: "USD",
   },
   stock: {
@@ -1254,9 +1271,9 @@ const INSTRUMENT_TYPES = {
     description: "Acciones argentinas (GGAL, YPF, ALUA…)",
     icon: LineChart,
     color: "yellow",
-    quantityLabel: "Cantidad de acciones",
+    quantityLabel: "Cantidad",
     quantityHint: "Ej. 500",
-    priceLabel: "Precio por acción",
+    priceLabel: "Precio",
     defaultCurrency: "ARS",
   },
   cedear: {
@@ -1264,8 +1281,8 @@ const INSTRUMENT_TYPES = {
     description: "Acciones del exterior con ratio (AAPL, MSFT, NVDA…)",
     icon: Globe,
     color: "violet",
-    quantityLabel: "Cantidad de CEDEARs",
-    priceLabel: "Precio por CEDEAR",
+    quantityLabel: "Cantidad",
+    priceLabel: "Precio",
     defaultCurrency: "ARS",
   },
   future: {
@@ -1273,9 +1290,9 @@ const INSTRUMENT_TYPES = {
     description: "DLR, RFX20, oro y otros futuros Matba-Rofex",
     icon: TrendingUp,
     color: "pink",
-    quantityLabel: "Cantidad de contratos",
+    quantityLabel: "Cantidad",
     quantityHint: "Entero. Ej. 100 (DLR = 1.000 USD por contrato)",
-    priceLabel: "Precio de entrada",
+    priceLabel: "Precio",
     priceHint: "Ej. 1456,50",
     defaultCurrency: "ARS",
     integerQuantity: true,  // futuros son contratos enteros
@@ -1285,8 +1302,8 @@ const INSTRUMENT_TYPES = {
     description: "Calls / Puts sobre acciones, índices, futuros",
     icon: Spline,
     color: "rose",
-    quantityLabel: "Cantidad de contratos",
-    priceLabel: "Prima",
+    quantityLabel: "Cantidad",
+    priceLabel: "Precio",
     defaultCurrency: "ARS",
     integerQuantity: true,
     extraFields: ["strike", "expiry", "option_type"],
@@ -1296,7 +1313,7 @@ const INSTRUMENT_TYPES = {
     description: "Colocada o tomada en pesos / USD",
     icon: ArrowRightLeft,
     color: "teal",
-    quantityLabel: "Monto",
+    quantityLabel: "Cantidad",
     quantityHint: "Monto colocado o tomado",
     priceLabel: null,  // las cauciones no tienen "precio"
     defaultCurrency: "ARS",
@@ -1307,8 +1324,8 @@ const INSTRUMENT_TYPES = {
     description: "Fondos Comunes de Inversión",
     icon: Coins,
     color: "amber",
-    quantityLabel: "Cuotapartes",
-    priceLabel: "VCP (Valor Cuotaparte)",
+    quantityLabel: "Cantidad",
+    priceLabel: "Precio",
     defaultCurrency: "ARS",
   },
   usd: {
@@ -1316,9 +1333,9 @@ const INSTRUMENT_TYPES = {
     description: "Dólares físicos, MEP, CCL, Blue",
     icon: DollarSign,
     color: "lime",
-    quantityLabel: "Cantidad de USD",
+    quantityLabel: "Cantidad",
     quantityHint: "Ej. 10.000",
-    priceLabel: "Precio compra (ARS)",
+    priceLabel: "Precio",
     priceHint: "Ej. 1450 (precio del dólar al comprarlo)",
     defaultCurrency: "USD",
   },
@@ -1329,24 +1346,295 @@ const INSTRUMENT_TYPES = {
     color: "orange",
     quantityLabel: "Cantidad",
     quantityHint: "Ej. 0,15 BTC o 5.000 USDT",
-    priceLabel: "Precio de compra",
+    priceLabel: "Precio",
     defaultCurrency: "USD",
   },
 };
 
-/** Lista ordenada para los selects */
+/**
+ * Lista ordenada para los SELECTS (lo que ve el usuario en el dropdown).
+ *
+ * "bond" es el item unificado (en lugar de "bond_ars" + "bond_usd"):
+ * el usuario elige "Bono" y la moneda determina si se persiste como
+ * bond_ars o bond_usd. Las claves bond_ars y bond_usd siguen en el
+ * catálogo de arriba para que las posiciones existentes editen sin
+ * romperse.
+ *
+ * "usd" y "crypto" quedan ocultos por ahora. Para el saldo en cuenta
+ * (ARS / USD / USD-CCL) se evaluará un tipo "cash" dedicado más adelante.
+ */
 const INSTRUMENT_TYPE_KEYS = [
-  "bond_ars", "bond_usd", "on", "stock", "cedear",
-  "future", "option", "caucion", "fci", "usd", "crypto",
+  "bond", "on", "stock", "cedear",
+  "future", "option", "caucion", "fci",
 ];
 
+/* ─────────────── Catálogos de tickers por tipo ───────────────
+ *
+ * Para evitar que el usuario tipee tickers con errores (T03J6 en lugar
+ * de T30J6), cuando hay una lista controlada renderizamos un Select
+ * en vez de un Input.
+ *
+ * Cobertura:
+ *   - bond:   BOND_REGISTRY (lecaps, boncaps, duales en pesos) +
+ *             BONDS_USD_POPULAR (Bonares y Globales hard-dollar)
+ *   - future: DLR_REGISTRY (todos los DLR Matba-Rofex)
+ *   - resto:  input libre por ahora. Para acciones/CEDEARs/ONs/FCI
+ *             el universo es grande (~500+ instrumentos) y necesitaríamos
+ *             una API o un dataset estático, queda como tech-debt.
+ *
+ * Si una posición editada tiene un ticker que NO está en la lista
+ * controlada (porque venía de un input libre previo o está fuera del
+ * registry), el helper lo agrega como opción "(custom)" al final del
+ * Select para que la edición no rompa.
+ */
+
+/** Bonos hard-dollar más populares de Argentina (no están en BOND_REGISTRY) */
+const BONDS_USD_POPULAR = [
+  { ticker: "AL29", description: "Bonar 2029" },
+  { ticker: "AL30", description: "Bonar 2030" },
+  { ticker: "AL35", description: "Bonar 2035" },
+  { ticker: "AE38", description: "Bonar 2038" },
+  { ticker: "AL41", description: "Bonar 2041" },
+  { ticker: "GD29", description: "Global 2029" },
+  { ticker: "GD30", description: "Global 2030" },
+  { ticker: "GD35", description: "Global 2035" },
+  { ticker: "GD38", description: "Global 2038" },
+  { ticker: "GD41", description: "Global 2041" },
+  { ticker: "GD46", description: "Global 2046" },
+];
+
+const MONTH_ES_SHORT = [
+  "ene", "feb", "mar", "abr", "may", "jun",
+  "jul", "ago", "sep", "oct", "nov", "dic",
+];
+
+function fmtMaturityShort(isoDate) {
+  if (!isoDate) return "";
+  const [y, m, d] = isoDate.split("-").map((s) => parseInt(s, 10));
+  if (!y || !m || !d) return "";
+  return `${String(d).padStart(2, "0")}/${MONTH_ES_SHORT[m - 1]}/${String(y).slice(-2)}`;
+}
+
+/**
+ * Devuelve las opciones de ticker para un tipo de instrumento.
+ *
+ * @param {string} instrumentType - clave de INSTRUMENT_TYPES (puede ser "bond",
+ *   "bond_ars", "bond_usd", "future", etc).
+ * @param {string} [currentTicker] - si la posición ya tiene un ticker que no
+ *   está en la lista controlada, lo agregamos como opción "(custom)" para no
+ *   romper edición.
+ * @param {object} [catalog] - catálogo dinámico desde Supabase (ver
+ *   useInstrumentCatalog). Forma: { stock: [...], cedear: [...], bond_usd: [...], on: [...] }.
+ *   Si no se provee o está vacío, se cae al hardcoded para bonos USD y se
+ *   devuelve mode="input" (libre) para stock/cedear/on.
+ * @returns {{ mode: 'select' | 'input', options: Array<{value, label}> }}
+ */
+function getTickerOptions(instrumentType, currentTicker, catalog) {
+  // Bonos: combino el registry de pesos hardcoded (filtrando duales según
+  // shouldIgnoreTicker) con bonos USD del catálogo dinámico (o el hardcoded
+  // popular como fallback).
+  if (instrumentType === "bond" || instrumentType === "bond_ars" || instrumentType === "bond_usd") {
+    const arsBonds = Object.entries(BOND_REGISTRY)
+      .filter(([t]) => !shouldIgnoreTicker(t))
+      .map(([t, info]) => ({
+        ticker: t,
+        sortKey: info.maturityDate || "9999-12-31",
+        label: `${t} — ${info.type.toUpperCase()} · vto ${fmtMaturityShort(info.maturityDate)}`,
+      }))
+      .sort((a, b) => a.sortKey.localeCompare(b.sortKey));
+
+    const dynamicUsdBonds = catalog?.bond_usd?.length ? catalog.bond_usd : null;
+    const usdBonds = dynamicUsdBonds
+      ? dynamicUsdBonds.map((b) => ({
+          ticker: b.ticker,
+          sortKey: `Z_${b.ticker}`,
+          label: b.description ? `${b.ticker} — ${b.description}` : b.ticker,
+        }))
+      : BONDS_USD_POPULAR.map((b) => ({
+          ticker: b.ticker,
+          sortKey: `Z_${b.ticker}`,
+          label: `${b.ticker} — ${b.description}`,
+        }));
+
+    const all = [...arsBonds, ...usdBonds];
+    return ensureCurrentInOptions(all, currentTicker, "select");
+  }
+
+  // Futuros: hardcoded en DLR_REGISTRY (data912 no los provee).
+  if (instrumentType === "future") {
+    const opts = DLR_REGISTRY.map((c) => ({
+      ticker: c.ticker,
+      sortKey: c.maturityDate,
+      label: `${c.displayTicker} — vto ${fmtMaturityShort(c.maturityDate)}`,
+    })).sort((a, b) => a.sortKey.localeCompare(b.sortKey));
+    return ensureCurrentInOptions(opts, currentTicker, "select");
+  }
+
+  // Stock / CEDEAR / ON: usar catálogo dinámico si está poblado, sino input libre.
+  if (instrumentType === "stock" || instrumentType === "cedear" || instrumentType === "on") {
+    const list = catalog?.[instrumentType];
+    if (list && list.length > 0) {
+      const opts = list
+        .map((row) => ({
+          ticker: row.ticker,
+          sortKey: row.ticker,
+          label: row.description ? `${row.ticker} — ${row.description}` : row.ticker,
+        }))
+        .sort((a, b) => a.sortKey.localeCompare(b.sortKey));
+      return ensureCurrentInOptions(opts, currentTicker, "select");
+    }
+    // Catálogo vacío todavía (cargando o BD sin datos): input libre.
+    return { mode: "input", options: [] };
+  }
+
+  // Resto (caucion, option, fci): input libre por ahora.
+  return { mode: "input", options: [] };
+}
+
+/**
+ * Si el ticker actual no está en la lista, lo agregamos al final
+ * como opción "(custom)" para que editar una posición vieja no falle.
+ */
+function ensureCurrentInOptions(opts, currentTicker, mode) {
+  const formatted = opts.map((o) => ({ value: o.ticker, label: o.label }));
+  if (
+    currentTicker &&
+    currentTicker.trim() &&
+    !formatted.some((o) => o.value === currentTicker)
+  ) {
+    formatted.push({
+      value: currentTicker,
+      label: `${currentTicker} — (cargado manualmente)`,
+    });
+  }
+  return { mode, options: formatted };
+}
+
+/**
+ * Monedas soportadas para entry_currency.
+ *
+ * Los valores legacy USD-MEP y USD-Blue siguen siendo válidos en la BD
+ * (el check constraint los acepta), así que cualquier posición existente
+ * con esas monedas no rompe al editarse — solo no aparecen en el menú
+ * para nuevas cargas. Si en algún momento queremos limpiarlos, hacemos
+ * un UPDATE masivo + restringimos el constraint.
+ */
 const CURRENCIES = [
   { code: "ARS", label: "Pesos (ARS)" },
-  { code: "USD", label: "Dólar oficial (USD)" },
-  { code: "USD-MEP", label: "Dólar MEP" },
+  { code: "USD", label: "Dólar (USD)" },
   { code: "USD-CCL", label: "Dólar CCL" },
-  { code: "USD-Blue", label: "Dólar Blue" },
 ];
+
+
+/* ─────────────── Hook: useInstrumentCatalog ───────────────
+ *
+ * Lee el catálogo de tickers desde la tabla `public.instruments` de Supabase
+ * (poblada por /api/refresh-instruments una vez al día con datos de data912).
+ *
+ * Caching:
+ *   - Cache en memoria a nivel módulo (sobrevive entre re-mounts del drawer
+ *     pero no entre recargas de página).
+ *   - Cache en sessionStorage (sobrevive recargas suaves dentro de la sesión).
+ *   - Stale-while-revalidate: si tenemos cache lo mostramos inmediato y
+ *     refrescamos en background.
+ *
+ * Lazy refresh on-demand:
+ *   - Después de leer el catálogo, dispara fire-and-forget POST a
+ *     /api/refresh-instruments. El endpoint ignora el llamado si el último
+ *     refresh fue hace < 12hs, así que esto es seguro de hacer en cada apertura.
+ *
+ * Si la query falla (BD caída, sin internet), devolvemos catalog vacío y los
+ * tipos sin lista degradan automáticamente a input libre.
+ */
+
+const INSTRUMENT_CATALOG_TYPES = ["stock", "cedear", "bond_usd", "on"];
+const INSTRUMENT_CATALOG_CACHE_KEY = "ecoflow_instrument_catalog_v1";
+
+// Cache a nivel módulo (sobrevive re-mounts del componente)
+let _moduleCatalogCache = null;
+
+function readSessionCache() {
+  try {
+    const raw = sessionStorage.getItem(INSTRUMENT_CATALOG_CACHE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object") return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function writeSessionCache(catalog) {
+  try {
+    sessionStorage.setItem(INSTRUMENT_CATALOG_CACHE_KEY, JSON.stringify(catalog));
+  } catch {
+    /* sessionStorage puede no estar disponible en private mode */
+  }
+}
+
+function useInstrumentCatalog() {
+  // Inicializamos con cache (módulo > sessionStorage > vacío) para evitar
+  // el flash de "input libre" mientras carga.
+  const initial =
+    _moduleCatalogCache ||
+    readSessionCache() ||
+    { stock: [], cedear: [], bond_usd: [], on: [] };
+
+  const [catalog, setCatalog] = useState(initial);
+  const [loading, setLoading] = useState(_moduleCatalogCache == null);
+  const [error, setError] = useState(null);
+
+  useEffect(() => {
+    let mounted = true;
+
+    (async () => {
+      try {
+        const { data: rows, error: err } = await supabase
+          .from("instruments")
+          .select("ticker, instrument_type, description, metadata")
+          .in("instrument_type", INSTRUMENT_CATALOG_TYPES)
+          .order("ticker", { ascending: true });
+
+        if (err) throw err;
+        if (!mounted) return;
+
+        const grouped = { stock: [], cedear: [], bond_usd: [], on: [] };
+        for (const row of rows || []) {
+          if (grouped[row.instrument_type]) {
+            grouped[row.instrument_type].push(row);
+          }
+        }
+
+        _moduleCatalogCache = grouped;
+        writeSessionCache(grouped);
+        setCatalog(grouped);
+        setLoading(false);
+      } catch (e) {
+        if (!mounted) return;
+        setError(e.message || "No se pudo cargar el catálogo");
+        setLoading(false);
+        // Si falla pero tenemos cache, lo dejamos visible. El usuario no
+        // pierde funcionalidad.
+      }
+    })();
+
+    // Lazy refresh on-demand: fire-and-forget al endpoint, que internamente
+    // decide si correr o no según el threshold de 12hs.
+    fetch("/api/refresh-instruments", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+    }).catch(() => {
+      /* silencioso: si falla no afecta al user */
+    });
+
+    return () => {
+      mounted = false;
+    };
+  }, []);
+
+  return { catalog, loading, error };
+}
 
 
 /* ─────────────── Hook: useUserPositions ───────────────
@@ -1498,12 +1786,27 @@ function PortfolioDashboard() {
   // Filtrado de posiciones
   const filteredPositions = useMemo(() => {
     if (filter === "all") return positions;
+    // El filtro virtual "bond" matchea tanto bond_ars como bond_usd
+    if (filter === "bond") {
+      return positions.filter(
+        (p) => p.instrument_type === "bond_ars" || p.instrument_type === "bond_usd"
+      );
+    }
     return positions.filter((p) => p.instrument_type === filter);
   }, [positions, filter]);
 
-  // Tipos presentes en cartera (para mostrar solo chips relevantes)
+  // Tipos presentes en cartera (para mostrar solo chips relevantes).
+  // Colapsamos bond_ars/bond_usd en un único "bond" para alinear con
+  // el dropdown del drawer y la columna Tipo de la tabla.
   const presentTypes = useMemo(() => {
-    const set = new Set(positions.map((p) => p.instrument_type));
+    const set = new Set();
+    for (const p of positions) {
+      if (p.instrument_type === "bond_ars" || p.instrument_type === "bond_usd") {
+        set.add("bond");
+      } else {
+        set.add(p.instrument_type);
+      }
+    }
     return Array.from(set);
   }, [positions]);
 
@@ -1636,7 +1939,12 @@ function PortfolioDashboard() {
             {presentTypes.map((type) => {
               const meta = INSTRUMENT_TYPES[type];
               if (!meta) return null;
-              const count = positions.filter((p) => p.instrument_type === type).length;
+              const count =
+                type === "bond"
+                  ? positions.filter(
+                      (p) => p.instrument_type === "bond_ars" || p.instrument_type === "bond_usd"
+                    ).length
+                  : positions.filter((p) => p.instrument_type === type).length;
               return (
                 <FilterChip
                   key={type}
@@ -1855,6 +2163,14 @@ function PositionRow({ position, onEdit, onDelete }) {
   const typeColor = meta.color ? C.cat[meta.color] : C.muted;
   const isSell = position.operation_type === "sell";
 
+  // Para bond_ars y bond_usd mostramos "Bono" unificado: la moneda real
+  // ya aparece en su propia columna, así que distinguir ARS/USD acá
+  // duplica info y desincroniza con el dropdown del drawer ("Bono").
+  const displayLabel =
+    position.instrument_type === "bond_ars" || position.instrument_type === "bond_usd"
+      ? "Bono"
+      : (meta.label || position.instrument_type);
+
   return (
     <tr
       style={{
@@ -1867,7 +2183,7 @@ function PositionRow({ position, onEdit, onDelete }) {
       <PTd>
         <div className="flex items-center gap-2">
           <TypeIcon size={13} color={typeColor} strokeWidth={1.7} />
-          <span style={{ fontSize: 11.5, color: C.muted }}>{meta.label || position.instrument_type}</span>
+          <span style={{ fontSize: 11.5, color: C.muted }}>{displayLabel}</span>
         </div>
       </PTd>
       <PTd>
@@ -2081,11 +2397,25 @@ function DeleteConfirmModal({ position, onCancel, onConfirm }) {
 function AddPositionDrawer({ editingPosition, onClose, onSubmit }) {
   const isEditing = Boolean(editingPosition);
 
+  // Catálogo dinámico de tickers (acciones, CEDEARs, ONs, bonos USD).
+  // Para los demás tipos sigue usándose el hardcoded de bondMaturities.js
+  // y dlrContracts.js. El hook trae sessionStorage cache instantáneo si
+  // existe, así que el dropdown raramente queda en estado "loading".
+  const { catalog: instrumentCatalog } = useInstrumentCatalog();
+
   // Estado del form. Si editamos, prellenamos con los valores existentes.
   const [form, setForm] = useState(() => {
     if (editingPosition) {
+      // Mapeo virtual: bond_ars y bond_usd se muestran como "bond"
+      // unificado en el dropdown. La moneda real (ARS/USD/MEP/CCL/Blue)
+      // sigue en entry_currency y al guardar volvemos a desambiguar.
+      const persistedType = editingPosition.instrument_type;
+      const formType =
+        persistedType === "bond_ars" || persistedType === "bond_usd"
+          ? "bond"
+          : persistedType;
       return {
-        instrument_type: editingPosition.instrument_type,
+        instrument_type: formType,
         operation_type: editingPosition.operation_type || "buy",
         ticker: editingPosition.ticker || "",
         quantity: editingPosition.quantity ?? "",
@@ -2102,7 +2432,7 @@ function AddPositionDrawer({ editingPosition, onClose, onSubmit }) {
       };
     }
     return {
-      instrument_type: "bond_ars",
+      instrument_type: "bond",
       operation_type: "buy",
       ticker: "",
       quantity: "",
@@ -2121,8 +2451,19 @@ function AddPositionDrawer({ editingPosition, onClose, onSubmit }) {
   const [submitting, setSubmitting] = useState(false);
   const [errors, setErrors] = useState({});
 
+  // Animación de salida: cuando el user cancela (backdrop / X / Cancelar / ESC),
+  // marcamos closing=true para disparar ecoSlideOut y recién al terminar la
+  // animación llamamos al onClose del padre (que desmonta el componente).
+  // El submit exitoso NO pasa por aquí porque el feedback de "guardado" es
+  // mejor cuando el cierre es instantáneo.
+  const [closing, setClosing] = useState(false);
+  const requestClose = () => {
+    if (closing || submitting) return;
+    setClosing(true);
+  };
+
   // Cuando cambia el tipo, ajustamos la moneda por defecto si todavía no editaste
-  const meta = INSTRUMENT_TYPES[form.instrument_type] || INSTRUMENT_TYPES.bond_ars;
+  const meta = INSTRUMENT_TYPES[form.instrument_type] || INSTRUMENT_TYPES.bond;
 
   const setField = (key, value) => {
     setForm((f) => ({ ...f, [key]: value }));
@@ -2132,24 +2473,36 @@ function AddPositionDrawer({ editingPosition, onClose, onSubmit }) {
   };
 
   // Cuando cambia tipo de instrumento, sugerimos moneda default si es nuevo
+  // y limpiamos el ticker si el actual no aplica al nuevo tipo (evita
+  // que un T30J6 quede cargado al pasar de "Bono" a "Acción").
   const handleTypeChange = (newType) => {
     const newMeta = INSTRUMENT_TYPES[newType];
-    setForm((f) => ({
-      ...f,
-      instrument_type: newType,
-      // Solo cambiar moneda si no está editando
-      entry_currency: isEditing ? f.entry_currency : (newMeta?.defaultCurrency || "ARS"),
-    }));
+    setForm((f) => {
+      // Si el nuevo tipo tiene lista controlada y el ticker actual no
+      // pertenece a esa lista, lo blanqueamos.
+      const { mode, options } = getTickerOptions(newType, undefined, instrumentCatalog);
+      const currentTickerStillValid =
+        mode !== "select" ||
+        !f.ticker ||
+        options.some((o) => o.value === f.ticker);
+      return {
+        ...f,
+        instrument_type: newType,
+        ticker: currentTickerStillValid ? f.ticker : "",
+        // Solo cambiar moneda si no está editando
+        entry_currency: isEditing ? f.entry_currency : (newMeta?.defaultCurrency || "ARS"),
+      };
+    });
   };
 
   // Cerrar con ESC
   useEffect(() => {
     const handleEsc = (e) => {
-      if (e.key === "Escape") onClose();
+      if (e.key === "Escape") requestClose();
     };
     document.addEventListener("keydown", handleEsc);
     return () => document.removeEventListener("keydown", handleEsc);
-  }, [onClose]);
+  }, [closing, submitting]);
 
   // Validación
   const validate = () => {
@@ -2215,8 +2568,17 @@ function AddPositionDrawer({ editingPosition, onClose, onSubmit }) {
       extra.option_type = form.option_type;
     }
 
+    // El tipo "bond" del form es virtual: lo desambiguamos a bond_ars
+    // (si la moneda elegida es ARS) o bond_usd (cualquier USD: oficial,
+    // MEP, CCL o Blue) antes de mandarlo a la BD, donde el enum sigue
+    // siendo bond_ars / bond_usd.
+    const persistedType =
+      form.instrument_type === "bond"
+        ? (form.entry_currency === "ARS" ? "bond_ars" : "bond_usd")
+        : form.instrument_type;
+
     const payload = {
-      instrument_type: form.instrument_type,
+      instrument_type: persistedType,
       operation_type: form.operation_type,
       ticker: form.ticker.trim().toUpperCase(),
       quantity: Number(form.quantity),
@@ -2239,25 +2601,38 @@ function AddPositionDrawer({ editingPosition, onClose, onSubmit }) {
 
   return (
     <>
-      {/* Backdrop */}
+      {/* Backdrop (respeta los 26px del status bar inferior del workspace) */}
       <div
-        onClick={onClose}
-        style={{
-          position: "fixed",
-          inset: 0,
-          backgroundColor: "rgba(0,0,0,0.45)",
-          backdropFilter: "blur(2px)",
-          zIndex: 90,
-        }}
-      />
-      {/* Drawer */}
-      <div
-        className="eco-drawer"
+        onClick={requestClose}
         style={{
           position: "fixed",
           top: 0,
           right: 0,
-          bottom: 0,
+          bottom: 26,
+          left: 0,
+          backgroundColor: "rgba(0,0,0,0.45)",
+          backdropFilter: "blur(2px)",
+          zIndex: 90,
+          animation: closing
+            ? "ecoBackdropOut 220ms ease-in forwards"
+            : "ecoBackdropIn 220ms ease-out",
+        }}
+      />
+      {/* Drawer (respeta los 26px del status bar inferior del workspace) */}
+      <div
+        className="eco-drawer"
+        onAnimationEnd={(e) => {
+          // Solo desmontamos cuando termina la animación de salida del drawer.
+          // Filtramos por animationName para no reaccionar a la de entrada.
+          if (closing && e.animationName === "ecoSlideOut") {
+            onClose();
+          }
+        }}
+        style={{
+          position: "fixed",
+          top: 0,
+          right: 0,
+          bottom: 26,
           width: "min(560px, 100vw)",
           backgroundColor: C.panel,
           borderLeft: `1px solid ${C.borderStrong}`,
@@ -2265,7 +2640,9 @@ function AddPositionDrawer({ editingPosition, onClose, onSubmit }) {
           display: "flex",
           flexDirection: "column",
           fontFamily: "'Roboto', sans-serif",
-          animation: "ecoSlideIn 220ms ease-out",
+          animation: closing
+            ? "ecoSlideOut 220ms ease-in forwards"
+            : "ecoSlideIn 220ms ease-out",
         }}
       >
         {/* Header */}
@@ -2296,7 +2673,7 @@ function AddPositionDrawer({ editingPosition, onClose, onSubmit }) {
             </h3>
           </div>
           <button
-            onClick={onClose}
+            onClick={requestClose}
             aria-label="Cerrar"
             style={{
               backgroundColor: "transparent",
@@ -2329,7 +2706,13 @@ function AddPositionDrawer({ editingPosition, onClose, onSubmit }) {
             <FieldHint>{meta.description}</FieldHint>
           </FormSection>
 
-          {/* Tipo de operación */}
+          {/* Tipo de operación.
+           *
+           * Para cauciones la jerga del mercado es "Colocar" (prestar plata
+           * a tasa) y "Tomar" (pedirla prestada). Para todo lo demás son
+           * compra/venta clásicas. Los valores internos siguen siendo
+           * "buy" y "sell" para no romper la BD ni la lógica de cálculo.
+           */}
           <FormSection label="Operación">
             <div className="flex gap-2">
               <ToggleButton
@@ -2337,34 +2720,66 @@ function AddPositionDrawer({ editingPosition, onClose, onSubmit }) {
                 onClick={() => setField("operation_type", "buy")}
                 color="green"
               >
-                Compra / Coloco
+                {form.instrument_type === "caucion" ? "Colocar" : "Comprar"}
               </ToggleButton>
               <ToggleButton
                 active={form.operation_type === "sell"}
                 onClick={() => setField("operation_type", "sell")}
                 color="red"
               >
-                Venta / Tomo
+                {form.instrument_type === "caucion" ? "Tomar" : "Vender"}
               </ToggleButton>
             </div>
           </FormSection>
 
-          {/* Ticker */}
-          <FormSection label="Ticker" error={errors.ticker}>
-            <Input
-              value={form.ticker}
-              onChange={(v) => setField("ticker", v.toUpperCase())}
-              placeholder={
-                form.instrument_type === "bond_ars" ? "T30J6, S29Y6, T15D5..." :
-                form.instrument_type === "future" ? "DLR052026, DLR062026..." :
-                form.instrument_type === "stock" ? "GGAL, YPF, ALUA..." :
-                form.instrument_type === "cedear" ? "AAPL, MSFT, NVDA..." :
-                form.instrument_type === "caucion" ? "CAUCION..." :
-                "Código del instrumento"
-              }
-              hasError={Boolean(errors.ticker)}
-            />
-          </FormSection>
+          {/* Ticker.
+           *
+           * Para tipos con lista controlada renderizamos un Select para
+           * evitar tipeos erróneos (T03J6 vs T30J6):
+           *   - bond  → BOND_REGISTRY (ARS) + catálogo dinámico USD
+           *   - future → DLR_REGISTRY hardcoded
+           *   - stock / cedear / on → catálogo dinámico desde Supabase
+           *
+           * Si el catálogo dinámico todavía no cargó (primer login) o data912
+           * está caído, stock/cedear/on caen a Input libre como fallback.
+           */}
+          {(() => {
+            const { mode, options } = getTickerOptions(
+              form.instrument_type,
+              form.ticker,
+              instrumentCatalog,
+            );
+            if (mode === "select") {
+              return (
+                <FormSection label="Ticker" error={errors.ticker}>
+                  <Select
+                    value={form.ticker}
+                    onChange={(v) => setField("ticker", v)}
+                    options={[
+                      { value: "", label: "Elegí un ticker..." },
+                      ...options,
+                    ]}
+                    hasError={Boolean(errors.ticker)}
+                  />
+                </FormSection>
+              );
+            }
+            return (
+              <FormSection label="Ticker" error={errors.ticker}>
+                <Input
+                  value={form.ticker}
+                  onChange={(v) => setField("ticker", v.toUpperCase())}
+                  placeholder={
+                    form.instrument_type === "stock" ? "GGAL, YPF, ALUA..." :
+                    form.instrument_type === "cedear" ? "AAPL, MSFT, NVDA..." :
+                    form.instrument_type === "caucion" ? "CAUCION..." :
+                    "Código del instrumento"
+                  }
+                  hasError={Boolean(errors.ticker)}
+                />
+              </FormSection>
+            );
+          })()}
 
           {/* Cantidad */}
           <FormSection label={meta.quantityLabel} error={errors.quantity} hint={meta.quantityHint}>
@@ -2513,51 +2928,52 @@ function AddPositionDrawer({ editingPosition, onClose, onSubmit }) {
               <span>{errors._form}</span>
             </div>
           )}
-        </div>
 
-        {/* Footer con acciones */}
-        <div
-          className="flex items-center justify-end gap-2"
-          style={{
-            padding: "14px 24px",
-            borderTop: `1px solid ${C.border}`,
-            backgroundColor: C.deep,
-            flexShrink: 0,
-          }}
-        >
-          <button
-            onClick={onClose}
-            disabled={submitting}
-            style={{
-              backgroundColor: "transparent",
-              border: `1px solid ${C.border}`,
-              color: C.muted,
-              padding: "9px 16px",
-              fontSize: 12.5,
-              cursor: submitting ? "not-allowed" : "pointer",
-              fontFamily: "'Roboto', sans-serif",
-            }}
+          {/* Acciones (inline, justo después del contenido — estilo Balanz).
+           *
+           * Se ubican al final del body en vez de un footer fijo abajo: si
+           * el form es chico los botones aparecen cerca del último campo
+           * (no al fondo del drawer con un océano de espacio en blanco).
+           * Si el form es largo, scrollean junto con el resto.
+           */}
+          <div
+            className="flex items-center justify-end gap-2"
+            style={{ marginTop: 24 }}
           >
-            Cancelar
-          </button>
-          <button
-            onClick={handleSubmit}
-            disabled={submitting}
-            style={{
-              backgroundColor: C.accent,
-              color: C.bg,
-              border: "none",
-              padding: "9px 18px",
-              fontSize: 12.5,
-              fontWeight: 600,
-              cursor: submitting ? "not-allowed" : "pointer",
-              fontFamily: "'Roboto', sans-serif",
-              opacity: submitting ? 0.7 : 1,
-              minWidth: 110,
-            }}
-          >
-            {submitting ? "Guardando..." : isEditing ? "Guardar cambios" : "Agregar posición"}
-          </button>
+            <button
+              onClick={requestClose}
+              disabled={submitting}
+              style={{
+                backgroundColor: "transparent",
+                border: `1px solid ${C.border}`,
+                color: C.muted,
+                padding: "9px 16px",
+                fontSize: 12.5,
+                cursor: submitting ? "not-allowed" : "pointer",
+                fontFamily: "'Roboto', sans-serif",
+              }}
+            >
+              Cancelar
+            </button>
+            <button
+              onClick={handleSubmit}
+              disabled={submitting}
+              style={{
+                backgroundColor: C.accent,
+                color: C.bg,
+                border: "none",
+                padding: "9px 18px",
+                fontSize: 12.5,
+                fontWeight: 600,
+                cursor: submitting ? "not-allowed" : "pointer",
+                fontFamily: "'Roboto', sans-serif",
+                opacity: submitting ? 0.7 : 1,
+                minWidth: 110,
+              }}
+            >
+              {submitting ? "Guardando..." : isEditing ? "Guardar cambios" : "Agregar posición"}
+            </button>
+          </div>
         </div>
       </div>
     </>
@@ -2631,7 +3047,7 @@ function Input({ value, onChange, placeholder, type = "text", step, hasError }) 
   );
 }
 
-function Select({ value, onChange, options }) {
+function Select({ value, onChange, options, hasError }) {
   return (
     <select
       value={value}
@@ -2639,7 +3055,7 @@ function Select({ value, onChange, options }) {
       style={{
         width: "100%",
         backgroundColor: C.deep,
-        border: `1px solid ${C.border}`,
+        border: `1px solid ${hasError ? C.red : C.border}`,
         color: C.text,
         padding: "9px 12px",
         fontSize: 12.5,
