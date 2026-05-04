@@ -3546,30 +3546,57 @@ function consolidatePositions(positions, bondPrices) {
     // que "current_price manual" del modelo individual no se pierda
     // a nivel grupo.
     //
-    // Estrategia simple: si CUALQUIERA de las operaciones del grupo
-    // tiene current_price seteado manualmente, lo usamos (último gana).
+    // Detectar override manual + timestamp para resolver prioridad vs cierre.
+    // Si el user editó el precio manualmente DESPUÉS de la última venta,
+    // ese override gana. Si fue antes, el cierre gana (porque el manual viejo
+    // ya no representa el precio actual real).
     let manualOverride = null;
+    let manualOverrideAt = null; // timestamp del último manual update
     for (const op of g.operations) {
-      if (op.current_price != null) manualOverride = Number(op.current_price);
+      if (op.current_price != null) {
+        const ts = op.current_price_updated_at;
+        // Tomamos el manual override más reciente (por timestamp) como ganador.
+        if (manualOverrideAt == null || (ts && ts > manualOverrideAt)) {
+          manualOverride = Number(op.current_price);
+          manualOverrideAt = ts;
+        }
+      }
     }
 
     let currentPrice = null;
     let priceSource = "cost";
 
-    // CASO ESPECIAL — Futuros con ventas (cierre total o parcial):
-    // El "precio actual" se autoupdate al precio de la última venta.
-    // Esto refleja el modelo donde cerrar una posición de futuro fija
-    // el precio efectivo al que saliste, y el P&L queda calculado contra
-    // ese precio.
+    // Para futuros con ventas, decidimos si gana el cierre o el manual:
+    //   - Si hay manual override Y su timestamp es POSTERIOR a la fecha de
+    //     la última venta → manual gana (el user lo cargó a propósito
+    //     post-cierre, sabiendo que ya había una venta).
+    //   - Si no hay manual, o el manual fue cargado antes de la venta
+    //     → el cierre gana.
     //
-    // PRIORIDAD: si hay ventas, el precio de la última venta SIEMPRE
-    // gana — incluso por encima del current_price manual cargado antes
-    // de cerrar (ese ya no aplica, la posición se cerró a otro precio).
-    // El user puede después editar el precio manualmente si quiere
-    // (vía el lápiz), pero por default el cierre manda.
+    // Comparación: convertimos ambos a milisegundos. lastSellDate es solo
+    // un día (ej "2026-05-03") así que lo tratamos como medianoche UTC
+    // de ese día. manualOverrideAt es timestamptz exacto.
+    let manualBeatsClose = false;
     if (
       g.instrument_type === "future" &&
-      g.lastSellPrice != null
+      g.lastSellPrice != null &&
+      manualOverride != null &&
+      manualOverrideAt &&
+      g.lastSellDate
+    ) {
+      const manualMs = new Date(manualOverrideAt).getTime();
+      // lastSellDate como inicio del día siguiente — para que un manual
+      // cargado el mismo día de la venta también cuente como post-cierre.
+      // (En la práctica si vendiste y después en el mismo día editaste
+      // manualmente, fue post-cierre).
+      const sellDateMs = new Date(g.lastSellDate).getTime();
+      manualBeatsClose = manualMs > sellDateMs;
+    }
+
+    if (
+      g.instrument_type === "future" &&
+      g.lastSellPrice != null &&
+      !manualBeatsClose
     ) {
       currentPrice = g.lastSellPrice;
       priceSource = "close"; // badge "CIERRE"
@@ -3612,19 +3639,117 @@ function consolidatePositions(positions, bondPrices) {
       const mult = FUTURE_MULTIPLIER_DEFAULT;
 
       // P&L REALIZADO (de ventas/cierres):
-      // = qty_vendida × mult × (PPV − PPP)
+      //   = qty_vendida × mult × (PPV − PPP)
       // Es lo que efectivamente ganaste/perdiste al cerrar contratos
-      // contra el precio promedio de compra. Aplica tanto a cierres
-      // totales (qty neta = 0) como parciales.
+      // contra el precio promedio de compra.
       if (g.totalSellQty > 0 && ppp != null && ppv != null) {
         realizedPnl = g.totalSellQty * mult * (ppv - ppp);
       } else {
         realizedPnl = 0;
       }
 
-      // P&L NO REALIZADO (mark-to-market sobre la posición abierta):
-      // = netQty × mult × (precio_actual − PPP)
-      // Si netQty = 0 (cerrada), no hay nada abierto → 0.
+      // CASO ESPECIAL — cierre parcial:
+      //   Si hay ventas Y todavía queda posición abierta (netQty != 0), el
+      //   grupo se DIVIDE en dos entradas separadas:
+      //     - Una "abierta" con netQty contratos, sólo P&L no realizado.
+      //     - Una "cerrada" con totalSellQty contratos, sólo P&L realizado.
+      //   Esto evita mostrar +885k de PnL "abierto" en una posición que
+      //   parcialmente ya se realizó.
+      const isPartialClose = netQty !== 0 && g.totalSellQty > 0;
+
+      if (isPartialClose) {
+        // Para la entrada ABIERTA: P&L no realizado solo (netQty × mult × (current − PPP))
+        let openUnrealizedPnl = 0;
+        if (currentPrice != null && ppp != null && priceSource !== "cost") {
+          openUnrealizedPnl = netQty * mult * (currentPrice - ppp);
+        }
+        const openNotional = currentPrice != null
+          ? Math.abs(netQty) * mult * currentPrice
+          : 0;
+        const openPnlPct = openNotional > 0
+          ? (openUnrealizedPnl / openNotional) * 100
+          : null;
+
+        // Filtrar las operations: solo las de compra van a la entrada abierta.
+        // (las de venta van a la cerrada). Para el detalle expandible esto
+        // significa que en la fila abierta se ven solo las compras.
+        const openOperations = g.operations.filter((o) => o.operation_type !== "sell");
+        const closedOperations = g.operations; // la cerrada lleva todo el contexto
+
+        // Para la entrada CERRADA: precio actual = lastSellPrice, P&L realizado
+        const closedPnl = realizedPnl;
+        const initialNotional = g.totalSellQty * mult * ppp;
+        const closedPnlPct = initialNotional > 0
+          ? (closedPnl / initialNotional) * 100
+          : null;
+
+        // Push entrada ABIERTA
+        result.push({
+          groupKey: g.groupKey + "|open",
+          instrument_type: g.instrument_type,
+          ticker: g.ticker,
+          currency: g.currency,
+          operations: openOperations,
+          operationsCount: openOperations.length,
+          buyOpsCount: openOperations.length,
+          sellOpsCount: 0,
+          netQty,
+          isShort: netQty < 0,
+          isClosed: false,
+          ppp,
+          ppv: null,
+          currentPrice,
+          priceSource,
+          valueAtMarket: openUnrealizedPnl,
+          valueAtCost: 0,
+          pnl: openUnrealizedPnl,
+          pnlPct: openPnlPct,
+          realizedPnl: 0,
+          unrealizedPnl: openUnrealizedPnl,
+          notional: openNotional,
+          firstDate: g.firstDate,
+          lastDate: g.lastDate,
+          notesAggregated: g.notesAggregated,
+        });
+
+        // Push entrada CERRADA
+        result.push({
+          groupKey: g.groupKey + "|closed",
+          instrument_type: g.instrument_type,
+          ticker: g.ticker,
+          currency: g.currency,
+          operations: closedOperations,
+          operationsCount: closedOperations.length,
+          buyOpsCount: g.operations.filter((o) => o.operation_type !== "sell").length,
+          sellOpsCount: g.operations.filter((o) => o.operation_type === "sell").length,
+          netQty: 0,
+          isShort: false,
+          isClosed: true,
+          ppp,
+          ppv,
+          currentPrice: g.lastSellPrice,
+          priceSource: "close",
+          valueAtMarket: closedPnl,
+          valueAtCost: 0,
+          pnl: closedPnl,
+          pnlPct: closedPnlPct,
+          realizedPnl: closedPnl,
+          unrealizedPnl: 0,
+          notional: 0,
+          // Una info adicional útil para mostrar: cuántos contratos se cerraron
+          closedQty: g.totalSellQty,
+          firstDate: g.firstDate,
+          lastDate: g.lastDate,
+          notesAggregated: g.notesAggregated,
+        });
+        continue; // saltamos el push genérico de abajo
+      }
+
+      // CASOS NO PARTICULARES (sin venta, o cierre total):
+      //   Cierre total (netQty = 0): solo P&L realizado. isClosed = true.
+      //   Sin ventas (totalSellQty = 0): solo P&L no realizado. isClosed = false.
+
+      // P&L NO REALIZADO (sobre netQty)
       if (netQty !== 0 && currentPrice != null && ppp != null && priceSource !== "cost") {
         unrealizedPnl = netQty * mult * (currentPrice - ppp);
       } else {
@@ -3633,19 +3758,15 @@ function consolidatePositions(positions, bondPrices) {
 
       pnl = realizedPnl + unrealizedPnl;
 
-      // Notional: solo aplica si hay posición abierta. Para cerradas = 0.
       if (netQty !== 0 && currentPrice != null) {
         notional = Math.abs(netQty) * mult * currentPrice;
       } else {
         notional = 0;
       }
 
-      valueAtMarket = pnl; // el "valor de cartera" del futuro ES el P&L
+      valueAtMarket = pnl;
       valueAtCost = 0;
 
-      // P&L % de un futuro:
-      //   - posición abierta: sobre el notional actual.
-      //   - cerrada: sobre lo que era el notional cuando la abriste (PPP × qty_total).
       if (notional && notional > 0) {
         pnlPct = (pnl / notional) * 100;
       } else if (isClosed && ppp != null && g.totalBuyQty > 0) {
