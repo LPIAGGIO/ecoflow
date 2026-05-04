@@ -2807,16 +2807,27 @@ function FlowsSection({ positions, bondPrices, fx }) {
       // esto no afecta nada.
       if (!date) continue;
 
-      // Monto estimado al vencimiento: cantidad × precio efectivo
-      // (ajustado por convención del instrumento: /100 para bonos, etc.)
-      const m = positionValueAtMarket(p, bondPrices);
+      // Para futuros, el "monto al vencimiento" no es predecible: depende
+      // del precio final del subyacente. Mostramos "—" con una nota.
+      // Para todo lo demás, calculamos cantidad × precio efectivo.
+      let amount = null;
+      let amountSource = null;
+      let amountNote = null;
+      if (t === "future") {
+        amountNote = "se realiza al vto";
+      } else {
+        const m = positionValueAtMarket(p, bondPrices);
+        amount = m?.value ?? null;
+        amountSource = m?.source ?? null;
+      }
       events.push({
         ticker: p.ticker || "—",
         type: typeLabel,
         date,
         quantity: Number(p.quantity) || 0,
-        amount: m?.value ?? null,
-        amountSource: m?.source ?? null,
+        amount,
+        amountSource,
+        amountNote,
         currency: p.entry_currency || "ARS",
       });
     }
@@ -2887,6 +2898,13 @@ function FlowsSection({ positions, bondPrices, fx }) {
                             a costo
                           </span>
                         )}
+                      </div>
+                    ) : e.amountNote ? (
+                      <div className="flex flex-col items-end" style={{ gap: 1 }}>
+                        <span style={{ color: C.dim, fontSize: 11 }}>—</span>
+                        <span style={{ fontSize: 8.5, color: C.dim, letterSpacing: "0.05em", textTransform: "uppercase" }}>
+                          {e.amountNote}
+                        </span>
                       </div>
                     ) : (
                       <span style={{ color: C.dim, fontSize: 11 }}>—</span>
@@ -3033,6 +3051,69 @@ function resolvePositionPrice(p, bondPrices) {
  * VALOR TOTAL de la posición (precio × cantidad, ajustado por convención
  * del instrumento).
  */
+/* ─────────────── Modelo financiero de futuros ───────────────
+ *
+ * Los futuros (DLR, etc.) NO pagan capital upfront. Vos solo poneés una
+ * garantía (que ya está en otra posición tuya, p.ej. el bono ARS). Por
+ * eso:
+ *
+ *   - "Costo" del futuro = 0 (no pagaste nada al abrir)
+ *   - "Valor a mercado" del futuro = P&L mark-to-market acumulado
+ *     = (precio_actual − entry_price) × qty × multiplicador  (si compra)
+ *     = (entry_price − precio_actual) × qty × multiplicador  (si venta)
+ *
+ * El **notional** (qty × multiplicador × precio) es la EXPOSICIÓN, no el
+ * valor de cartera. Se muestra aparte como métrica informativa.
+ *
+ * Multiplicador DLR típico = 1000 (1 contrato = USD 1.000).
+ */
+
+const FUTURE_MULTIPLIER_DEFAULT = 1000;
+
+function getFutureMultiplier(p) {
+  // Hook para futuro: si en metadata viene un multiplicador específico
+  // (ej. otros futuros que no son DLR), lo usamos. Por ahora todos 1000.
+  return FUTURE_MULTIPLIER_DEFAULT;
+}
+
+/**
+ * Notional de un futuro: exposición nominal (no es el costo ni el valor).
+ *   notional = qty × multiplicador × precio
+ *
+ * Usar el precio actual si lo tenemos (p.current_price o data912 en el
+ * caso de futuros lo manejamos manualmente vía current_price).
+ */
+function positionFutureNotional(p, bondPrices) {
+  if (p.instrument_type !== "future") return null;
+  const qty = Math.abs(Number(p.quantity) || 0);
+  const resolved = resolvePositionPrice(p, bondPrices);
+  if (!resolved) return null;
+  return qty * getFutureMultiplier(p) * resolved.price;
+}
+
+/**
+ * P&L mark-to-market de un futuro. Devuelve:
+ *   - Para COMPRA (long):  (precio_actual − entry_price) × qty × multiplicador
+ *   - Para VENTA (short):  (entry_price − precio_actual) × qty × multiplicador
+ *
+ * Si todavía no hay precio actual (current_price null y no hay data912
+ * para futuros), el P&L es 0 (vos no perdiste ni ganaste nada todavía).
+ */
+function positionFuturePnL(p, bondPrices) {
+  if (p.instrument_type !== "future") return { value: 0, source: "cost" };
+  const qty = Number(p.quantity) || 0;
+  if (qty === 0 || p.entry_price == null) return { value: 0, source: "cost" };
+
+  const resolved = resolvePositionPrice(p, bondPrices);
+  // Si no hay precio actual, asumimos que el contrato sigue valuado a entry
+  // → P&L = 0.
+  if (!resolved) return { value: 0, source: "cost" };
+
+  const direction = p.operation_type === "sell" ? -1 : 1;
+  const pnl = direction * qty * getFutureMultiplier(p) * (resolved.price - Number(p.entry_price));
+  return { value: pnl, source: resolved.source };
+}
+
 function applyPriceToPosition(p, price) {
   const qty = Number(p.quantity) || 0;
   // Bonos / ONs: precio cada 100 VN
@@ -3043,9 +3124,11 @@ function applyPriceToPosition(p, price) {
   ) {
     return (qty * price) / 100;
   }
-  // Futuros: contrato * multiplicador * precio. DLR multiplicador típico = 1000.
+  // Futuros: ya NO se valúan multiplicando qty × mult × precio (ese es el
+  // notional). El "valor de cartera" del futuro es solo su P&L. Se maneja
+  // en positionValueAtMarket directamente, no debería caer acá.
   if (p.instrument_type === "future") {
-    return qty * 1000 * price;
+    return qty * getFutureMultiplier(p) * price; // legacy: solo para notional
   }
   // Opciones: contrato * 100 * prima
   if (p.instrument_type === "option") {
@@ -3056,16 +3139,24 @@ function applyPriceToPosition(p, price) {
 }
 
 /**
- * Valor de la posición a mercado actual (usa precio actualizado si está
- * disponible; sino fallback a entry_price).
+ * Valor de la posición a mercado actual (impacta en wealth/cartera).
  *
- * Retorna también la `source` ('market' | 'manual' | 'cost') para que la
- * UI pueda mostrar badges contextuales.
+ *   - Cauciones: cantidad (es plata, sin precio).
+ *   - Bonos / ONs / Acciones / CEDEARs / FCI: cantidad × precio actual.
+ *   - Futuros: solo el P&L mark-to-market (NO el notional).
+ *   - Opciones: cantidad × 100 × prima.
+ *
+ * Retorna `{ value, source }` o null si no se puede valuar.
  */
 function positionValueAtMarket(p, bondPrices) {
-  // Cauciones: el valor es directamente la cantidad (es plata, no hay precio)
+  // Cauciones: el valor es directamente la cantidad (es plata)
   if (p.instrument_type === "caucion") {
     return { value: Number(p.quantity) || 0, source: "cost" };
+  }
+  // Futuros: el "valor" que impacta en cartera es el P&L mark-to-market.
+  // El notional NO se incluye (es exposición, no wealth real).
+  if (p.instrument_type === "future") {
+    return positionFuturePnL(p, bondPrices);
   }
   const resolved = resolvePositionPrice(p, bondPrices);
   if (!resolved) return null;
@@ -3077,10 +3168,13 @@ function positionValueAtMarket(p, bondPrices) {
 
 /**
  * Valor de la posición a costo histórico (al entry_price exclusivamente).
- * Sirve para calcular P&L = market - cost.
+ * Para futuros, el costo es 0 (no pagaste nada al abrir).
  */
 function positionValueAtCost(p) {
   if (p.instrument_type === "caucion") return Number(p.quantity) || 0;
+  // Futuros: no pagaste capital al abrir, solo garantía (que ya está en
+  // otra posición). El costo a efectos de P&L es 0.
+  if (p.instrument_type === "future") return 0;
   if (p.entry_price == null) return null;
   return applyPriceToPosition(p, Number(p.entry_price));
 }
@@ -3153,6 +3247,11 @@ function computePortfolioTotals(positions, fx, valuationCurrency, bondPrices) {
 function groupByCategory(positions, fx, valuationCurrency, bondPrices) {
   const result = {};
   for (const p of positions) {
+    // Futuros se excluyen del donut de distribución: su "valor" es solo
+    // el P&L mark-to-market (no son wealth nominal). Los mostramos como
+    // exposición separada, no como categoría de cartera.
+    if (p.instrument_type === "future") continue;
+
     const m = positionValueAtMarket(p, bondPrices);
     if (m == null) continue;
     const v = convertValue(m.value, p.entry_currency || "ARS", valuationCurrency, fx);
@@ -3166,6 +3265,9 @@ function groupByCategory(positions, fx, valuationCurrency, bondPrices) {
 function groupByCurrency(positions, fx, valuationCurrency, bondPrices) {
   const result = {};
   for (const p of positions) {
+    // Mismo criterio: futuros excluidos del breakdown por moneda.
+    if (p.instrument_type === "future") continue;
+
     const m = positionValueAtMarket(p, bondPrices);
     if (m == null) continue;
     const v = convertValue(m.value, p.entry_currency || "ARS", valuationCurrency, fx);
@@ -3225,6 +3327,11 @@ function computeLiquidityBreakdown(positions, fx, valuationCurrency, windowKey, 
   const result = { ARS: 0, "USD-MEP": 0, "USD-CCL": 0 };
 
   for (const p of positions) {
+    // Futuros excluidos: al vencimiento solo se libera la garantía (que
+    // ya está en otra posición) y se realiza el P&L. No es un "ingreso"
+    // típico ni predecible — depende del precio final del subyacente.
+    if (p.instrument_type === "future") continue;
+
     const matDate = getPositionMaturity(p);
     if (!matDate) continue;
     const md = new Date(matDate);
@@ -3390,22 +3497,57 @@ function consolidatePositions(positions, bondPrices) {
       priceSource = "cost";
     }
 
-    // Valuación con la convención del instrumento (cada 100 VN para bonos,
-    // ×1000 para futuros, ×100 para opciones, ×1 para el resto).
-    const valueAtMarket = currentPrice != null
-      ? applyConventionToValue(g.instrument_type, netQty, currentPrice)
-      : null;
-    const valueAtCost = ppp != null
-      ? applyConventionToValue(g.instrument_type, netQty, ppp)
-      : null;
-
+    // Valuación con la convención del instrumento.
+    //
+    // CASO ESPECIAL — Futuros:
+    //   - valueAtMarket = P&L mark-to-market = qty_dirigida × mult × (price - PPP)
+    //   - valueAtCost   = 0  (no pagás capital al abrir un futuro)
+    //   - pnl           = valueAtMarket - valueAtCost = el P&L mismo
+    //   - notional      = |qty_neta| × mult × precio_actual  (exposición, NO valor de cartera)
+    //
+    // Para una compra (long) de futuros, qty_neta es positiva → PnL positivo si
+    // el precio sube. Para una venta (short), qty_neta es negativa → PnL
+    // positivo si el precio baja. La fórmula `netQty × mult × (price - PPP)`
+    // captura ambos signos correctamente.
+    let valueAtMarket = null;
+    let valueAtCost = null;
     let pnl = null;
     let pnlPct = null;
-    if (valueAtMarket != null && valueAtCost != null) {
-      pnl = valueAtMarket - valueAtCost;
-      pnlPct = Math.abs(valueAtCost) > 0
-        ? (pnl / Math.abs(valueAtCost)) * 100
+    let notional = null;
+
+    if (g.instrument_type === "future") {
+      const mult = FUTURE_MULTIPLIER_DEFAULT;
+      // Notional: exposición nominal usando precio actual o PPP de fallback
+      if (currentPrice != null) {
+        notional = Math.abs(netQty) * mult * currentPrice;
+      }
+      // P&L mark-to-market: si todavía no tenemos precio actual distinto al
+      // costo (priceSource === "cost"), el P&L es 0.
+      if (currentPrice != null && ppp != null && priceSource !== "cost") {
+        pnl = netQty * mult * (currentPrice - ppp);
+      } else {
+        pnl = 0;
+      }
+      valueAtMarket = pnl; // el "valor de cartera" del futuro ES el P&L
+      valueAtCost = 0;
+      // P&L % de un futuro lo computamos sobre el notional (es el patrón
+      // estándar; tener 1% de movimiento sobre 1M de notional = 10k de PnL).
+      if (notional && notional > 0) {
+        pnlPct = (pnl / notional) * 100;
+      }
+    } else {
+      valueAtMarket = currentPrice != null
+        ? applyConventionToValue(g.instrument_type, netQty, currentPrice)
         : null;
+      valueAtCost = ppp != null
+        ? applyConventionToValue(g.instrument_type, netQty, ppp)
+        : null;
+      if (valueAtMarket != null && valueAtCost != null) {
+        pnl = valueAtMarket - valueAtCost;
+        pnlPct = Math.abs(valueAtCost) > 0
+          ? (pnl / Math.abs(valueAtCost)) * 100
+          : null;
+      }
     }
 
     result.push({
@@ -3426,6 +3568,7 @@ function consolidatePositions(positions, bondPrices) {
       valueAtCost,
       pnl,
       pnlPct,
+      notional, // null para todo lo que no sea futuro
       firstDate: g.firstDate,
       lastDate: g.lastDate,
       notesAggregated: g.notesAggregated,
@@ -4117,12 +4260,36 @@ function ConsolidatedRow({ group, expanded, onToggle, onEdit, onDelete, onUpdate
           </div>
         </PTd>
         <PTd align="right">
-          <span
-            className="eco-mono"
-            style={{ color: group.isShort ? C.red : C.text }}
-          >
-            {fmtNumber(group.netQty, { maxDecimals: 8 })}
-          </span>
+          {group.instrument_type === "future" ? (
+            <div className="flex flex-col items-end" style={{ gap: 2 }}>
+              <span
+                className="eco-mono"
+                style={{ color: group.isShort ? C.red : C.text }}
+              >
+                {fmtNumber(group.netQty, { maxDecimals: 0 })}
+              </span>
+              {group.notional != null && (
+                <span
+                  style={{
+                    fontSize: 9,
+                    color: C.dim,
+                    fontFamily: "'JetBrains Mono', monospace",
+                    letterSpacing: "0.02em",
+                  }}
+                  title="Notional: exposición nominal del contrato (no es valor de cartera)"
+                >
+                  Notional {fmtNumber(group.notional, { maxDecimals: 0 })}
+                </span>
+              )}
+            </div>
+          ) : (
+            <span
+              className="eco-mono"
+              style={{ color: group.isShort ? C.red : C.text }}
+            >
+              {fmtNumber(group.netQty, { maxDecimals: 8 })}
+            </span>
+          )}
         </PTd>
         <PTd align="right">
           <span className="eco-mono">
