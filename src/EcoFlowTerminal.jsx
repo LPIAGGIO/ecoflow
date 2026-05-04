@@ -3374,12 +3374,12 @@ function FlowsSection({ positions, bondPrices, fx }) {
 function flowsThStyle(align) {
   return {
     textAlign: align,
-    padding: "6px 8px 8px",
+    padding: "5px 14px",
     fontSize: 9,
     fontWeight: 600,
     color: C.dim,
     textTransform: "uppercase",
-    letterSpacing: "0.08em",
+    letterSpacing: "0.14em",
     fontFamily: "'Roboto', sans-serif",
     borderBottom: `1px solid ${C.border}`,
   };
@@ -3388,7 +3388,7 @@ function flowsThStyle(align) {
 function flowsTdStyle(align) {
   return {
     textAlign: align,
-    padding: "8px",
+    padding: "4px 14px",
     verticalAlign: "middle",
   };
 }
@@ -4993,16 +4993,16 @@ function ConsolidatedTable({ consolidated, onEdit, onDelete, onUpdatePrice }) {
         <table style={{ width: "100%", borderCollapse: "collapse", fontFamily: "'Roboto', sans-serif" }}>
           <thead>
             <tr style={{ borderBottom: `1px solid ${C.border}` }}>
-              <PTh style={{ width: 28 }}>{""}</PTh>
-              <PTh>Tipo</PTh>
-              <PTh>Ticker</PTh>
-              <PTh align="right">Cantidad neta</PTh>
-              <PTh align="right">PPP</PTh>
-              <PTh align="right">Precio actual</PTh>
-              <PTh align="right">P&amp;L</PTh>
-              <PTh align="right">Total</PTh>
-              <PTh>Moneda</PTh>
-              <PTh align="right">Ops</PTh>
+              <PTh dense style={{ width: 28 }}>{""}</PTh>
+              <PTh dense>Tipo</PTh>
+              <PTh dense>Ticker</PTh>
+              <PTh dense align="right">Cantidad neta</PTh>
+              <PTh dense align="right">PPP</PTh>
+              <PTh dense align="right">Precio actual</PTh>
+              <PTh dense align="right">P&amp;L</PTh>
+              <PTh dense align="right">Total</PTh>
+              <PTh dense>Moneda</PTh>
+              <PTh dense align="right">Ops</PTh>
             </tr>
           </thead>
           <tbody>
@@ -5075,18 +5075,18 @@ function ConsolidatedRow({ group, expanded, onToggle, onEdit, onDelete, onUpdate
           if (!expanded) e.currentTarget.style.backgroundColor = "transparent";
         }}
       >
-        <PTd>
+        <PTd dense>
           <span style={{ color: C.dim, display: "inline-flex" }}>
             {expanded ? <ChevronDown size={13} strokeWidth={1.8} /> : <ChevronRight size={13} strokeWidth={1.8} />}
           </span>
         </PTd>
-        <PTd>
+        <PTd dense>
           <div className="flex items-center gap-2">
             <TypeIcon size={13} color={typeColor} strokeWidth={1.7} />
             <span style={{ fontSize: 11.5, color: C.muted }}>{displayLabel}</span>
           </div>
         </PTd>
-        <PTd>
+        <PTd dense>
           <div className="flex items-center gap-2">
             <span className="eco-mono" style={{ fontWeight: 600, fontSize: 12.5 }}>
               {group.ticker}
@@ -5109,7 +5109,7 @@ function ConsolidatedRow({ group, expanded, onToggle, onEdit, onDelete, onUpdate
             )}
           </div>
         </PTd>
-        <PTd align="right">
+        <PTd dense align="right">
           {group.instrument_type === "future" ? (
             <div className="flex flex-col items-end" style={{ gap: 2 }}>
               <span
@@ -5141,12 +5141,12 @@ function ConsolidatedRow({ group, expanded, onToggle, onEdit, onDelete, onUpdate
             </span>
           )}
         </PTd>
-        <PTd align="right">
+        <PTd dense align="right">
           <span className="eco-mono">
             {group.ppp != null ? fmtNumber(group.ppp, { maxDecimals: 4 }) : "—"}
           </span>
         </PTd>
-        <PTd align="right" onClick={(e) => e.stopPropagation()}>
+        <PTd dense align="right" onClick={(e) => e.stopPropagation()}>
           <EditablePriceCell
             position={sampleForCell}
             resolved={resolvedForCell}
@@ -5156,7 +5156,7 @@ function ConsolidatedRow({ group, expanded, onToggle, onEdit, onDelete, onUpdate
             }}
           />
         </PTd>
-        <PTd align="right">
+        <PTd dense align="right">
           {group.pnl != null ? (
             <div className="flex flex-col items-end" style={{ gap: 1 }}>
               <span
@@ -5182,7 +5182,7 @@ function ConsolidatedRow({ group, expanded, onToggle, onEdit, onDelete, onUpdate
             <span style={{ color: C.dim }}>—</span>
           )}
         </PTd>
-        <PTd align="right">
+        <PTd dense align="right">
           {group.valueAtMarket != null ? (
             <span className="eco-mono" style={{ fontWeight: 500 }}>
               {fmtNumber(group.valueAtMarket, { maxDecimals: 2 })}
@@ -5200,10 +5200,10 @@ function ConsolidatedRow({ group, expanded, onToggle, onEdit, onDelete, onUpdate
             <span style={{ color: C.dim }}>—</span>
           )}
         </PTd>
-        <PTd>
+        <PTd dense>
           <span style={{ fontSize: 11.5, color: C.muted }}>{group.currency}</span>
         </PTd>
-        <PTd align="right">
+        <PTd dense align="right">
           <span
             style={{
               fontSize: 11,
