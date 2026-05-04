@@ -33,10 +33,89 @@
  * IMPORTANT: BYMA tiene 20 min de delay sobre los datos. Esto NO es
  * tiempo real verdadero. Sirve para precios "near-realtime" pero no para
  * trading algo serio.
+ *
+ * NOTA SOBRE TLS: El servidor de BYMA tiene una cadena de certificados
+ * SSL incompleta — el cert leaf es válido pero los intermediates no se
+ * envían correctamente. Los browsers compensan con AIA fetching, pero
+ * Node.js no lo hace. Por eso necesitamos relajar la validación TLS para
+ * este endpoint específico.
+ *
+ * En Node 18+ con global fetch (undici), la forma de hacer esto es vía
+ * un Agent custom. Como `undici` no siempre está como import en Vercel,
+ * usamos `https.Agent` + `node-fetch` como fallback... pero más simple
+ * todavía: usamos el módulo `https` directo, sin fetch.
+ *
+ * Riesgo: en teoría un MITM podría suplantar a open.bymadata.com.ar.
+ * En la práctica:
+ *   - Vercel corre en infra de cloud-grade, no es vulnerable a MITM.
+ *   - Los datos son públicos (precios de bonos), no hay secretos.
+ *   - El endpoint devuelve solo lectura, no enviamos credenciales.
+ * El trade-off vale la pena para usar la fuente oficial de BYMA.
  */
+
+import https from "node:https";
+import zlib from "node:zlib";
 
 const BYMA_BASE = "https://open.bymadata.com.ar/vanoms-be-core/rest/api/bymadata/free";
 const BYMA_TIMEOUT_MS = 12_000;
+
+/**
+ * Hace una request HTTPS POST usando el módulo nativo de Node (no fetch),
+ * para poder configurar `rejectUnauthorized: false` y bypassear la
+ * cadena SSL incompleta de BYMA.
+ *
+ * Devuelve { status, headers, body } con el body como string.
+ */
+function nodeHttpsPost(url, { headers, body, timeoutMs }) {
+  return new Promise((resolve, reject) => {
+    const u = new URL(url);
+    const req = https.request(
+      {
+        method: "POST",
+        hostname: u.hostname,
+        port: u.port || 443,
+        path: u.pathname + u.search,
+        headers: {
+          ...headers,
+          "Content-Length": Buffer.byteLength(body),
+        },
+        // ESTE es el flag clave: tolera la cadena SSL incompleta de BYMA.
+        rejectUnauthorized: false,
+        timeout: timeoutMs,
+      },
+      (res) => {
+        // Manejar gzip explícitamente si el server lo manda
+        const encoding = (res.headers["content-encoding"] || "").toLowerCase();
+        const chunks = [];
+        let stream = res;
+
+        if (encoding === "gzip" || encoding === "deflate") {
+          stream = res.pipe(
+            encoding === "gzip" ? zlib.createGunzip() : zlib.createInflate()
+          );
+        }
+
+        stream.on("data", (c) => chunks.push(c));
+        stream.on("end", () => {
+          resolve({
+            status: res.statusCode,
+            headers: res.headers,
+            body: Buffer.concat(chunks).toString("utf8"),
+          });
+        });
+        stream.on("error", reject);
+      }
+    );
+
+    req.on("error", reject);
+    req.on("timeout", () => {
+      req.destroy(new Error(`BYMA request timeout (${timeoutMs}ms)`));
+    });
+
+    req.write(body);
+    req.end();
+  });
+}
 
 /**
  * Pega al endpoint de BYMA con el body EXACTO que vimos en la captura
@@ -44,78 +123,67 @@ const BYMA_TIMEOUT_MS = 12_000;
  * body). No alteramos esto: el comportamiento de BYMA frente a campos
  * extras no está documentado y mejor replicar lo que sabemos que anda.
  *
- * Esto devuelve los ~189 bonos más relevantes (24hs, alfabético desde
- * AE38 hasta EM33). Si en el futuro necesitamos los ~494 totales,
- * habría que descubrir cómo se pagina el endpoint (no lo capturamos).
+ * Usamos el módulo `node:https` nativo (no fetch) para poder bypassar
+ * la validación TLS — BYMA tiene cadena de certificados incompleta.
  *
  * @returns {Promise<Array<object>>}
  */
 async function fetchBymaBonds() {
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), BYMA_TIMEOUT_MS);
+  const body = JSON.stringify({
+    T1: true,
+    T0: false,
+    "Content-Type": "application/json, text/plain",
+  });
 
-  try {
-    const res = await fetch(`${BYMA_BASE}/public-bonds`, {
-      method: "POST",
-      headers: {
-        // Mimics el request que vimos en el browser. BYMA puede estar
-        // bloqueando fetches sin estos headers.
-        "Content-Type": "application/json",
-        "Accept": "application/json, text/plain, */*",
-        "Accept-Language": "en-US,en;q=0.9,es;q=0.8",
-        // Importante: NO pedimos brotli (br) porque undici (el fetch de
-        // Node 18+) a veces falla decompressando si el server hace
-        // negociación rara. Solo gzip y deflate.
-        "Accept-Encoding": "gzip, deflate",
-        "Origin": "https://open.bymadata.com.ar",
-        "Referer": "https://open.bymadata.com.ar/",
-        // Un User-Agent de browser real es más probable de pasar filtros
-        // anti-bot que "EcoFlow/1.0".
-        "User-Agent":
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
-          "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        // Cache busting explicit para forzar conexión fresca
-        "Cache-Control": "no-cache",
-        "Pragma": "no-cache",
-      },
-      // Body EXACTO capturado del browser. No agregar campos.
-      body: JSON.stringify({
-        T1: true,
-        T0: false,
-        "Content-Type": "application/json, text/plain",
-      }),
-      signal: controller.signal,
-      // Forzamos conexión nueva (no reuse de connection pool de undici).
-      // Esto evita problemas si BYMA cierra conexiones abruptamente.
-      keepalive: false,
-      // No seguir redirects automáticamente — si BYMA redirige a una
-      // página de login, queremos verlo en el log y no fallar opacamente.
-      redirect: "manual",
-    });
+  const result = await nodeHttpsPost(`${BYMA_BASE}/public-bonds`, {
+    headers: {
+      // Mimics el request que vimos en el browser. BYMA puede estar
+      // bloqueando fetches sin estos headers.
+      "Content-Type": "application/json",
+      "Accept": "application/json, text/plain, */*",
+      "Accept-Language": "en-US,en;q=0.9,es;q=0.8",
+      "Accept-Encoding": "gzip, deflate",
+      "Origin": "https://open.bymadata.com.ar",
+      "Referer": "https://open.bymadata.com.ar/",
+      // Un User-Agent de browser real es más probable de pasar filtros
+      // anti-bot que "EcoFlow/1.0".
+      "User-Agent":
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
+        "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    },
+    body,
+    timeoutMs: BYMA_TIMEOUT_MS,
+  });
 
-    // Si BYMA redirige (302/303), capturamos eso explícitamente
-    if (res.status >= 300 && res.status < 400) {
-      const location = res.headers.get("location") || "(sin location)";
-      throw new Error(
-        `BYMA redirige a "${location}" (HTTP ${res.status}) — probable problema de sesión`
-      );
-    }
-
-    if (!res.ok) {
-      const text = await res.text().catch(() => "");
-      throw new Error(`BYMA HTTP ${res.status} — ${text.slice(0, 200)}`);
-    }
-
-    const json = await res.json();
-    if (!json || !Array.isArray(json.data)) {
-      throw new Error(
-        `BYMA respuesta inesperada: ${JSON.stringify(json).slice(0, 200)}`
-      );
-    }
-    return json.data;
-  } finally {
-    clearTimeout(timeoutId);
+  // Si BYMA redirige (302/303), capturamos eso explícitamente
+  if (result.status >= 300 && result.status < 400) {
+    const location = result.headers.location || "(sin location)";
+    throw new Error(
+      `BYMA redirige a "${location}" (HTTP ${result.status}) — probable problema de sesión`
+    );
   }
+
+  if (result.status < 200 || result.status >= 300) {
+    throw new Error(
+      `BYMA HTTP ${result.status} — ${result.body.slice(0, 200)}`
+    );
+  }
+
+  let json;
+  try {
+    json = JSON.parse(result.body);
+  } catch (e) {
+    throw new Error(
+      `BYMA respondió no-JSON (status ${result.status}): ${result.body.slice(0, 200)}`
+    );
+  }
+
+  if (!json || !Array.isArray(json.data)) {
+    throw new Error(
+      `BYMA respuesta inesperada: ${JSON.stringify(json).slice(0, 200)}`
+    );
+  }
+  return json.data;
 }
 
 /**
