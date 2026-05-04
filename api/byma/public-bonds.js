@@ -58,9 +58,19 @@ async function fetchBymaBonds() {
     const res = await fetch(`${BYMA_BASE}/public-bonds`, {
       method: "POST",
       headers: {
+        // Mimics el request que vimos en el browser. BYMA puede estar
+        // bloqueando fetches sin estos headers.
         "Content-Type": "application/json",
-        "User-Agent": "EcoFlow/1.0 (Vercel function)",
-        "Accept": "application/json",
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "en-US,en;q=0.9,es;q=0.8",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Origin": "https://open.bymadata.com.ar",
+        "Referer": "https://open.bymadata.com.ar/",
+        // Un User-Agent de browser real es más probable de pasar filtros
+        // anti-bot que "EcoFlow/1.0".
+        "User-Agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
+          "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
       },
       // Body EXACTO capturado del browser. No agregar campos.
       body: JSON.stringify({
@@ -200,10 +210,26 @@ export default async function handler(req, res) {
     });
   } catch (err) {
     const durationMs = Date.now() - startedAt;
-    const message = err instanceof Error ? err.message : String(err);
 
-    // Log para debugging desde Vercel logs
-    console.error("[byma/public-bonds] error:", message, { durationMs });
+    // `fetch failed` es genérico — el detalle real está en err.cause.
+    // Lo extraemos y exponemos para diagnosticar problemas de red,
+    // TLS, DNS, etc.
+    const message = err instanceof Error ? err.message : String(err);
+    const cause = err?.cause;
+    const causeMessage = cause instanceof Error ? cause.message : (cause ? String(cause) : null);
+    const causeCode = cause?.code || null;
+    const errno = err?.errno || cause?.errno || null;
+
+    // Log para debugging desde Vercel logs (incluimos todo lo que
+    // pueda ayudar a diagnosticar)
+    console.error("[byma/public-bonds] error:", {
+      message,
+      causeMessage,
+      causeCode,
+      errno,
+      stack: err?.stack?.split("\n").slice(0, 5).join("\n"),
+      durationMs,
+    });
 
     // Distinguir timeout de otros errores para el cliente
     const isTimeout =
@@ -214,6 +240,11 @@ export default async function handler(req, res) {
     return res.status(isTimeout ? 504 : 502).json({
       ok: false,
       error: message,
+      // Estos campos extra ayudan a diagnosticar desde el browser sin
+      // necesidad de mirar logs de Vercel.
+      cause: causeMessage,
+      causeCode,
+      errno,
       meta: { durationMs, source: "open.bymadata.com.ar" },
     });
   }
