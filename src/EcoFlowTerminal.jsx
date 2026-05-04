@@ -4222,12 +4222,12 @@ function ConsolidatedRow({ group, expanded, onToggle, onEdit, onDelete, onUpdate
               <table style={{ width: "100%", borderCollapse: "collapse" }}>
                 <thead>
                   <tr>
-                    <th style={subThStyle("left")}>Op.</th>
-                    <th style={subThStyle("right")}>Cantidad</th>
-                    <th style={subThStyle("right")}>Precio compra</th>
-                    <th style={subThStyle("left")}>Fecha</th>
+                    <th style={{ ...subThStyle("left"), width: 90 }}>Op.</th>
+                    <th style={{ ...subThStyle("right"), width: 160 }}>Cantidad</th>
+                    <th style={{ ...subThStyle("right"), width: 140 }}>Precio compra</th>
+                    <th style={{ ...subThStyle("right"), width: 130 }}>Fecha</th>
                     <th style={subThStyle("left")}>Notas</th>
-                    <th style={subThStyle("right")}>{""}</th>
+                    <th style={{ ...subThStyle("right"), width: 80 }}>{""}</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -4261,7 +4261,7 @@ function ConsolidatedRow({ group, expanded, onToggle, onEdit, onDelete, onUpdate
                             {p.entry_price != null ? fmtNumber(p.entry_price, { maxDecimals: 4 }) : "—"}
                           </span>
                         </td>
-                        <td style={subTdStyle("left")}>
+                        <td style={subTdStyle("right")}>
                           <span style={{ fontSize: 11, color: C.muted }}>
                             {fmtDateShort(p.entry_date)}
                           </span>
@@ -4341,21 +4341,23 @@ function ConsolidatedRow({ group, expanded, onToggle, onEdit, onDelete, onUpdate
 function subThStyle(align) {
   return {
     textAlign: align,
-    padding: "5px 8px 6px",
+    padding: "5px 16px 6px",
     fontSize: 9,
     fontWeight: 600,
     color: C.dim,
     textTransform: "uppercase",
     letterSpacing: "0.06em",
     fontFamily: "'Roboto', sans-serif",
+    whiteSpace: "nowrap",
   };
 }
 
 function subTdStyle(align) {
   return {
     textAlign: align,
-    padding: "6px 8px",
+    padding: "6px 16px",
     verticalAlign: "middle",
+    whiteSpace: "nowrap",
   };
 }
 
