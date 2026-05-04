@@ -1701,17 +1701,41 @@ function useInstrumentCatalog() {
 
     (async () => {
       try {
-        const { data: rows, error: err } = await supabase
-          .from("instruments")
-          .select("ticker, instrument_type, description, metadata")
-          .in("instrument_type", INSTRUMENT_CATALOG_TYPES)
-          .order("ticker", { ascending: true });
+        // Supabase tiene un default de 1000 filas por consulta. Como
+        // tenemos ~2000 instrumentos en total (cedears + acciones + ONs +
+        // bonos USD), hay que paginar manualmente con .range() hasta
+        // agotar. Sin esto, los CEDEARs se cortan alrededor de la M.
+        const PAGE_SIZE = 1000;
+        let allRows = [];
+        let from = 0;
 
-        if (err) throw err;
+        while (true) {
+          const { data: page, error: err } = await supabase
+            .from("instruments")
+            .select("ticker, instrument_type, description, metadata")
+            .in("instrument_type", INSTRUMENT_CATALOG_TYPES)
+            .order("ticker", { ascending: true })
+            .range(from, from + PAGE_SIZE - 1);
+
+          if (err) throw err;
+          if (!page || page.length === 0) break;
+
+          allRows = allRows.concat(page);
+
+          // Si esta página vino con menos del page size, ya estamos al final
+          if (page.length < PAGE_SIZE) break;
+          from += PAGE_SIZE;
+
+          // Safety cap: si por algún motivo la BD tiene un volumen muy
+          // grande, no queremos colgar la app. 10k es muchísimo más de
+          // lo razonable para nuestro catálogo.
+          if (allRows.length >= 10000) break;
+        }
+
         if (!mounted) return;
 
         const grouped = { stock: [], cedear: [], bond_usd: [], on: [] };
-        for (const row of rows || []) {
+        for (const row of allRows) {
           if (grouped[row.instrument_type]) {
             grouped[row.instrument_type].push(row);
           }
