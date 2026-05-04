@@ -1970,7 +1970,17 @@ function ensureCurrentInOptions(opts, currentTicker, mode) {
  * El usuario puede cambiarla después si su broker convierte internamente
  * (ej. comprar AL30 contra USD-MEP en algunos brokers).
  *
- * Reglas según mercado argentino (BYMA / Matba-Rofex):
+ * **Fuente de verdad — BYMA (cuando disponible):**
+ * Si pasamos `bondPrices` y el ticker está cargado, usamos el campo
+ * `currency` de BYMA como fuente primaria — es lo que el mercado
+ * efectivamente reporta (ARS/USD/EXT mapean a ARS/USD-MEP/USD-CCL).
+ * Esto cubre casos que la heurística por sufijo no detecta bien:
+ *   - AL30Y termina en "Y", BYMA dice USD → USD-MEP ✅ (heurística fallaba)
+ *   - AL30X termina en "X", BYMA dice ARS → ARS ✅ (heurística fallaba)
+ *
+ * **Heurística — fallback:**
+ * Si BYMA no está disponible o el ticker no matchea, caemos a las
+ * reglas tradicionales por sufijo del ticker:
  *   - Bonos ARS (lecaps, boncaps, etc.)        → ARS
  *   - Bono USD puro (AL30, GD30, etc.)         → ARS
  *   - Bono USD sufijo D (AL30D, GD30D, etc.)   → USD-MEP
@@ -1979,9 +1989,14 @@ function ensureCurrentInOptions(opts, currentTicker, mode) {
  *   - Futuros DLR                               → ARS
  *   - Cauciones / Opciones / FCI                → sin sugerencia
  *
+ * @param {string} instrumentType — tipo del instrumento
+ * @param {string} ticker — código del título
+ * @param {object} [bondPrices] — opcional: map de bondPrices del hook
+ *   useBondPrices, donde cada entry tiene un campo `currency` cuando viene
+ *   de BYMA ("ARS"|"USD"|"EXT").
  * @returns {{ currency: string|null, suggested: boolean }}
  */
-function resolveCurrencyFromTicker(instrumentType, ticker) {
+function resolveCurrencyFromTicker(instrumentType, ticker, bondPrices) {
   // Tipos donde no podemos inferir moneda — el user elige libre, sin hint
   if (
     instrumentType === "caucion" ||
@@ -1993,12 +2008,37 @@ function resolveCurrencyFromTicker(instrumentType, ticker) {
 
   // Tipos siempre en ARS (sin importar el ticker)
   if (
-    instrumentType === "bond_ars" ||
     instrumentType === "stock" ||
     instrumentType === "cedear" ||
-    instrumentType === "on" ||
     instrumentType === "future"
   ) {
+    return { currency: "ARS", suggested: true };
+  }
+
+  // Para bonos y ONs: priorizamos BYMA si tenemos data fresca para el
+  // ticker. Es la fuente más confiable porque viene del propio mercado.
+  if (
+    (instrumentType === "bond_ars" ||
+      instrumentType === "bond_usd" ||
+      instrumentType === "bond" ||
+      instrumentType === "on") &&
+    bondPrices &&
+    ticker
+  ) {
+    const tk = ticker.trim().toUpperCase();
+    const bymaEntry = bondPrices[tk];
+    // Solo usamos la moneda si realmente vino de BYMA — data912 no setea
+    // este campo. Para entries data912 caemos a heurística como antes.
+    if (bymaEntry?.source === "byma" && bymaEntry?.currency) {
+      const mapped = mapBymaCurrencyToApp(bymaEntry.currency);
+      if (mapped) return { currency: mapped, suggested: true };
+    }
+  }
+
+  // bond_ars: siempre ARS (lecaps, boncaps, etc., sin sufijo de plaza).
+  // Lo movemos acá DESPUÉS del lookup BYMA porque ya validamos con la
+  // fuente cuando estaba disponible.
+  if (instrumentType === "bond_ars" || instrumentType === "on") {
     return { currency: "ARS", suggested: true };
   }
 
@@ -2018,7 +2058,7 @@ function resolveCurrencyFromTicker(instrumentType, ticker) {
       return { currency: "ARS", suggested: true };
     }
 
-    // Sufijos de plaza
+    // Sufijos de plaza (heurística clásica, fallback cuando no hay BYMA)
     const lastChar = ticker.charAt(ticker.length - 1);
     if (lastChar === "C") return { currency: "USD-CCL", suggested: true };
     if (lastChar === "D") return { currency: "USD-MEP", suggested: true };
@@ -2029,6 +2069,26 @@ function resolveCurrencyFromTicker(instrumentType, ticker) {
 
   // Tipo desconocido — fallback editable sin sugerencia
   return { currency: null, suggested: false };
+}
+
+/**
+ * Mapea el código de moneda de BYMA al modelo interno de la app.
+ *
+ * BYMA reporta:
+ *   "ARS" → pesos argentinos
+ *   "USD" → USD MEP / contado con liqui local
+ *   "EXT" → USD CCL / cable / contado con liqui exterior
+ *
+ * Devuelve null si el código es inesperado (defensivo: si BYMA cambia
+ * el modelo, no rompemos sino que caemos al fallback heurístico).
+ */
+function mapBymaCurrencyToApp(bymaCurrency) {
+  switch (bymaCurrency) {
+    case "ARS": return "ARS";
+    case "USD": return "USD-MEP";
+    case "EXT": return "USD-CCL";
+    default:    return null;
+  }
 }
 
 /**
@@ -6100,6 +6160,13 @@ function AddPositionDrawer({ editingPosition, onClose, onSubmit }) {
   // existe, así que el dropdown raramente queda en estado "loading".
   const { catalog: instrumentCatalog } = useInstrumentCatalog();
 
+  // Precios actualizados de bonos (BYMA + data912) — los usamos para
+  // mejorar la sugerencia de moneda al cambiar de ticker. Si BYMA tiene
+  // el ticker, su campo `currency` es la fuente de verdad. El hook
+  // cachea en sessionStorage 5 min, así que abrir el drawer no dispara
+  // un fetch adicional en el caso común.
+  const { prices: bondPrices } = useBondPrices();
+
   // Estado del form. Si editamos, prellenamos con los valores existentes.
   const [form, setForm] = useState(() => {
     if (editingPosition) {
@@ -6223,7 +6290,8 @@ function AddPositionDrawer({ editingPosition, onClose, onSubmit }) {
     setForm((f) => {
       const { currency, suggested } = resolveCurrencyFromTicker(
         f.instrument_type,
-        newTicker
+        newTicker,
+        bondPrices
       );
       return {
         ...f,
@@ -6568,7 +6636,8 @@ function AddPositionDrawer({ editingPosition, onClose, onSubmit }) {
           {(() => {
             const { suggested: currencySuggested } = resolveCurrencyFromTicker(
               form.instrument_type,
-              form.ticker
+              form.ticker,
+              bondPrices
             );
             return (
               <div className="grid grid-cols-2 gap-3">
