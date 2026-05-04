@@ -4805,6 +4805,7 @@ function ClosedPositionsSection({ closed, onEdit, onDelete, onUpdatePrice }) {
             onEdit={onEdit}
             onDelete={onDelete}
             onUpdatePrice={onUpdatePrice}
+            variant="closed"
           />
         </div>
       )}
@@ -4969,8 +4970,9 @@ function OperationsHistorySection({ positions, bondPrices, onEdit, onDelete, onU
  * Las acciones (editar, borrar, cambiar precio) operan sobre las ops
  * individuales y delegan al callback del padre.
  */
-function ConsolidatedTable({ consolidated, onEdit, onDelete, onUpdatePrice }) {
+function ConsolidatedTable({ consolidated, onEdit, onDelete, onUpdatePrice, variant = "open" }) {
   const [expanded, setExpanded] = useState(new Set());
+  const isClosed = variant === "closed";
 
   const toggle = (key) => {
     setExpanded((prev) => {
@@ -4998,7 +5000,7 @@ function ConsolidatedTable({ consolidated, onEdit, onDelete, onUpdatePrice }) {
               <PTh dense>Ticker</PTh>
               <PTh dense align="right">Cantidad neta</PTh>
               <PTh dense align="right">PPP</PTh>
-              <PTh dense align="right">Precio actual</PTh>
+              <PTh dense align="right">{isClosed ? "Último precio" : "Precio actual"}</PTh>
               <PTh dense align="right">P&amp;L</PTh>
               <PTh dense align="right">Total</PTh>
               <PTh dense>Moneda</PTh>
@@ -5015,6 +5017,7 @@ function ConsolidatedTable({ consolidated, onEdit, onDelete, onUpdatePrice }) {
                 onEdit={onEdit}
                 onDelete={onDelete}
                 onUpdatePrice={onUpdatePrice}
+                readOnlyPrice={isClosed}
               />
             ))}
           </tbody>
@@ -5025,7 +5028,7 @@ function ConsolidatedTable({ consolidated, onEdit, onDelete, onUpdatePrice }) {
 }
 
 
-function ConsolidatedRow({ group, expanded, onToggle, onEdit, onDelete, onUpdatePrice }) {
+function ConsolidatedRow({ group, expanded, onToggle, onEdit, onDelete, onUpdatePrice, readOnlyPrice = false }) {
   const meta = INSTRUMENT_TYPES[group.instrument_type] || {};
   const TypeIcon = meta.icon || Activity;
   const typeColor = meta.color ? C.cat[meta.color] : C.muted;
@@ -5147,14 +5150,44 @@ function ConsolidatedRow({ group, expanded, onToggle, onEdit, onDelete, onUpdate
           </span>
         </PTd>
         <PTd dense align="right" onClick={(e) => e.stopPropagation()}>
-          <EditablePriceCell
-            position={sampleForCell}
-            resolved={resolvedForCell}
-            onSave={(newPrice) => {
-              if (!anchorPositionId) return;
-              onUpdatePrice(anchorPositionId, newPrice);
-            }}
-          />
+          {readOnlyPrice ? (
+            // Posición cerrada: mostramos el precio del último cierre
+            // como dato fijo, sin lápiz de edición. Es info histórica.
+            resolvedForCell?.price != null ? (
+              <div className="flex items-center justify-end gap-2">
+                <span className="eco-mono">
+                  {fmtNumber(resolvedForCell.price, { maxDecimals: 4 })}
+                </span>
+                {resolvedForCell.source === "close" && (
+                  <span
+                    style={{
+                      fontSize: 9,
+                      fontWeight: 500,
+                      letterSpacing: "0.05em",
+                      padding: "1px 5px",
+                      borderRadius: 2,
+                      color: C.green,
+                      backgroundColor: "rgba(74,222,128,0.10)",
+                      textTransform: "uppercase",
+                    }}
+                  >
+                    cierre
+                  </span>
+                )}
+              </div>
+            ) : (
+              <span style={{ color: C.dim }}>—</span>
+            )
+          ) : (
+            <EditablePriceCell
+              position={sampleForCell}
+              resolved={resolvedForCell}
+              onSave={(newPrice) => {
+                if (!anchorPositionId) return;
+                onUpdatePrice(anchorPositionId, newPrice);
+              }}
+            />
+          )}
         </PTd>
         <PTd dense align="right">
           {group.pnl != null ? (
