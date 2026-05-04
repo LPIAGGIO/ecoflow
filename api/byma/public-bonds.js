@@ -2,55 +2,50 @@
  * /api/byma/public-bonds — proxy de Open BYMAdata (Bolsas y Mercados
  * Argentinos S.A.) para títulos públicos.
  *
- * BYMA expone un endpoint POST sin autenticación en
- *   https://open.bymadata.com.ar/vanoms-be-core/rest/api/bymadata/free/public-bonds
+ * BYMA expone DOS endpoints sin autenticación que nos interesan:
+ *   POST .../bymadata/free/public-bonds  → bonos largos (AL30, GD30, AE38, ...)
+ *   POST .../bymadata/free/lebacs        → letras corto plazo (Lecaps, Boncaps)
  *
- * Pero el header CORS está restringido a su propio dominio
- * (Access-Control-Allow-Origin: https://open.bymadata.com.ar), por lo que
- * no podemos llamarlo directo desde el browser. Esta function de Vercel
- * actúa como proxy: el browser le pega a /api/byma/public-bonds (mismo
- * origen, sin CORS) y la function le pega a BYMA del lado del server.
+ * Esta function de Vercel actúa como proxy: pega a AMBOS endpoints en
+ * paralelo y devuelve un único array deduplicado, así el cliente recibe
+ * el universo completo de renta fija pública argentina en una sola call.
  *
- * Devuelve ~189 títulos públicos (los más operados, plazo 24hs).
+ * (El nombre "public-bonds" en la URL de la function es legacy del primer
+ *  release que solo cubría bonos largos. Mantenemos el path para no romper
+ *  el cliente — pero internamente trae ambos.)
  *
  * Response shape:
  *   {
  *     ok: true,
  *     data: BymaBond[],
- *     meta: { totalRecords, fetchedAt, durationMs, source, delayMinutes }
+ *     meta: {
+ *       totalRecords, rawTotal,
+ *       byMarket: { publicBonds: N, lebacs: M },
+ *       fetchedAt, durationMs, source, delayMinutes
+ *     }
  *   }
  *
  * En caso de error:
- *   { ok: false, error: string, statusCode?: number }
+ *   { ok: false, error: string, cause?: string, ... }
  *
- * Caching: este endpoint NO cachea internamente (cada call hace el fetch
- * a BYMA). El cache lo manejamos del lado del cliente con sessionStorage
- * 5 min, igual que data912. Adicionalmente seteamos Cache-Control para
- * que el CDN de Vercel cachee 60s entre múltiples usuarios.
+ * Política de errores: si UNO de los dos endpoints falla, todavía
+ * devolvemos lo que vino del otro (con un warning en `meta.partialFailure`).
+ * Solo si AMBOS fallan, devolvemos error 502.
  *
- * Latencia esperada: ~200-400ms (BYMA suele responder rápido).
+ * Caching: este endpoint NO cachea internamente. El cache lo maneja el
+ * cliente con sessionStorage 5 min. CDN de Vercel cachea 60s entre
+ * múltiples usuarios.
  *
- * IMPORTANT: BYMA tiene 20 min de delay sobre los datos. Esto NO es
- * tiempo real verdadero. Sirve para precios "near-realtime" pero no para
- * trading algo serio.
+ * Latencia esperada: ~300-500ms (dos fetches en paralelo a BYMA).
  *
- * NOTA SOBRE TLS: El servidor de BYMA tiene una cadena de certificados
- * SSL incompleta — el cert leaf es válido pero los intermediates no se
- * envían correctamente. Los browsers compensan con AIA fetching, pero
- * Node.js no lo hace. Por eso necesitamos relajar la validación TLS para
- * este endpoint específico.
+ * IMPORTANT: BYMA tiene 20 min de delay. Sirve para "near-realtime",
+ * NO para trading algo serio.
  *
- * En Node 18+ con global fetch (undici), la forma de hacer esto es vía
- * un Agent custom. Como `undici` no siempre está como import en Vercel,
- * usamos `https.Agent` + `node-fetch` como fallback... pero más simple
- * todavía: usamos el módulo `https` directo, sin fetch.
- *
- * Riesgo: en teoría un MITM podría suplantar a open.bymadata.com.ar.
- * En la práctica:
- *   - Vercel corre en infra de cloud-grade, no es vulnerable a MITM.
- *   - Los datos son públicos (precios de bonos), no hay secretos.
- *   - El endpoint devuelve solo lectura, no enviamos credenciales.
- * El trade-off vale la pena para usar la fuente oficial de BYMA.
+ * NOTA SOBRE TLS: El servidor de BYMA tiene cadena SSL incompleta —
+ * el cert leaf es válido pero los intermediates no se envían
+ * correctamente. Por eso usamos `node:https` con
+ * rejectUnauthorized:false. Riesgo aceptable: datos públicos,
+ * solo lectura, infra de Vercel no es vulnerable a MITM.
  */
 
 import https from "node:https";
@@ -118,24 +113,27 @@ function nodeHttpsPost(url, { headers, body, timeoutMs }) {
 }
 
 /**
- * Pega al endpoint de BYMA con el body EXACTO que vimos en la captura
- * del browser (T1=true, T0=false, "Content-Type" como campo dentro del
- * body). No alteramos esto: el comportamiento de BYMA frente a campos
- * extras no está documentado y mejor replicar lo que sabemos que anda.
+ * Pega a un endpoint específico de BYMA. Genérica para soportar tanto
+ * `/public-bonds` (bonos largos) como `/lebacs` (letras corto plazo)
+ * y futuras adiciones (ej. `/negociable-obligations` para ONs).
+ *
+ * Cada endpoint puede requerir un body ligeramente distinto — no
+ * alteramos lo que sabemos que anda. Los bodies vienen de:
+ *   - `public-bonds`: capturado del browser via DevTools.
+ *   - `lebacs`: tomado de carvalab/openbymadata (Go, MIT licence,
+ *     en uso productivo).
  *
  * Usamos el módulo `node:https` nativo (no fetch) para poder bypassar
  * la validación TLS — BYMA tiene cadena de certificados incompleta.
  *
- * @returns {Promise<Array<object>>}
+ * @param {string} endpoint — nombre del endpoint relativo (sin slash inicial)
+ * @param {object} bodyObj — objeto que se serializa a JSON como body
+ * @returns {Promise<Array<object>>} array de bonos crudos de BYMA
  */
-async function fetchBymaBonds() {
-  const body = JSON.stringify({
-    T1: true,
-    T0: false,
-    "Content-Type": "application/json, text/plain",
-  });
+async function fetchBymaEndpoint(endpoint, bodyObj) {
+  const body = JSON.stringify(bodyObj);
 
-  const result = await nodeHttpsPost(`${BYMA_BASE}/public-bonds`, {
+  const result = await nodeHttpsPost(`${BYMA_BASE}/${endpoint}`, {
     headers: {
       // Mimics el request que vimos en el browser. BYMA puede estar
       // bloqueando fetches sin estos headers.
@@ -159,13 +157,13 @@ async function fetchBymaBonds() {
   if (result.status >= 300 && result.status < 400) {
     const location = result.headers.location || "(sin location)";
     throw new Error(
-      `BYMA redirige a "${location}" (HTTP ${result.status}) — probable problema de sesión`
+      `BYMA ${endpoint} redirige a "${location}" (HTTP ${result.status}) — probable problema de sesión`
     );
   }
 
   if (result.status < 200 || result.status >= 300) {
     throw new Error(
-      `BYMA HTTP ${result.status} — ${result.body.slice(0, 200)}`
+      `BYMA ${endpoint} HTTP ${result.status} — ${result.body.slice(0, 200)}`
     );
   }
 
@@ -174,16 +172,45 @@ async function fetchBymaBonds() {
     json = JSON.parse(result.body);
   } catch (e) {
     throw new Error(
-      `BYMA respondió no-JSON (status ${result.status}): ${result.body.slice(0, 200)}`
+      `BYMA ${endpoint} respondió no-JSON (status ${result.status}): ${result.body.slice(0, 200)}`
     );
   }
 
   if (!json || !Array.isArray(json.data)) {
     throw new Error(
-      `BYMA respuesta inesperada: ${JSON.stringify(json).slice(0, 200)}`
+      `BYMA ${endpoint} respuesta inesperada: ${JSON.stringify(json).slice(0, 200)}`
     );
   }
   return json.data;
+}
+
+/**
+ * Pega a `/public-bonds` (bonos largos: AL30, GD30, AE38, etc.).
+ * Body original capturado del browser, mantenido tal cual.
+ */
+function fetchPublicBonds() {
+  return fetchBymaEndpoint("public-bonds", {
+    T1: true,
+    T0: false,
+    "Content-Type": "application/json, text/plain",
+  });
+}
+
+/**
+ * Pega a `/lebacs` (letras corto plazo: Lecaps, Boncaps).
+ * El nombre del endpoint es legacy — antes traía LEBACs, hoy trae
+ * Lecaps/Boncaps/Letras del Tesoro. Body distinto al de public-bonds:
+ * tiene `excludeZeroPxAndQty:false` y `T2:false` extra. Tomado de
+ * carvalab/openbymadata, que lo tiene en producción.
+ */
+function fetchLebacs() {
+  return fetchBymaEndpoint("lebacs", {
+    excludeZeroPxAndQty: false,
+    T2: false,
+    T1: true,
+    T0: false,
+    "Content-Type": "application/json",
+  });
 }
 
 /**
@@ -259,81 +286,124 @@ export default async function handler(req, res) {
 
   const startedAt = Date.now();
 
-  try {
-    const allRaw = await fetchBymaBonds();
+  // ── Pegamos a AMBOS endpoints en paralelo ──────────────────────────
+  // Usamos Promise.allSettled (no Promise.all) para que si UNO falla, no
+  // aborte la operación entera. Preferimos devolver datos parciales con
+  // un warning antes que devolver error completo cuando uno solo de los
+  // dos endpoints está roto.
+  const [publicBondsResult, lebacsResult] = await Promise.allSettled([
+    fetchPublicBonds(),
+    fetchLebacs(),
+  ]);
 
-    // Deduplicamos por símbolo (defensive — la API puede devolver
-    // duplicados según los flags). Mantenemos el primero que aparece.
-    const seen = new Set();
-    const deduped = [];
-    for (const bond of allRaw) {
-      if (!bond || !bond.symbol) continue;
-      if (seen.has(bond.symbol)) continue;
-      seen.add(bond.symbol);
-      deduped.push(normalizeBond(bond));
-    }
+  const durationMs = Date.now() - startedAt;
 
-    // Ordenamos alfabéticamente por símbolo (más predecible que el orden
-    // crudo, que puede variar entre llamadas).
-    deduped.sort((a, b) => a.symbol.localeCompare(b.symbol));
+  // Si los DOS fallaron → error real, devolvemos 502
+  if (
+    publicBondsResult.status === "rejected" &&
+    lebacsResult.status === "rejected"
+  ) {
+    const pbErr = publicBondsResult.reason;
+    const lbErr = lebacsResult.reason;
 
-    const durationMs = Date.now() - startedAt;
-
-    // Cache HTTP: que el CDN de Vercel cachee 60 segundos como mucho.
-    // El cliente igual cachea 5 min en sessionStorage, así que esto es
-    // una segunda capa por si varios usuarios consultan en simultáneo.
-    res.setHeader("Cache-Control", "public, s-maxage=60, stale-while-revalidate=120");
-
-    return res.status(200).json({
-      ok: true,
-      data: deduped,
-      meta: {
-        totalRecords: deduped.length,
-        rawTotal: allRaw.length,
-        fetchedAt: new Date().toISOString(),
-        durationMs,
-        source: "open.bymadata.com.ar",
-        delayMinutes: 20,
-      },
-    });
-  } catch (err) {
-    const durationMs = Date.now() - startedAt;
-
-    // `fetch failed` es genérico — el detalle real está en err.cause.
-    // Lo extraemos y exponemos para diagnosticar problemas de red,
-    // TLS, DNS, etc.
-    const message = err instanceof Error ? err.message : String(err);
-    const cause = err?.cause;
+    // Extraemos detalle del primer error (el de public-bonds, más crítico)
+    const message = pbErr instanceof Error ? pbErr.message : String(pbErr);
+    const cause = pbErr?.cause;
     const causeMessage = cause instanceof Error ? cause.message : (cause ? String(cause) : null);
     const causeCode = cause?.code || null;
-    const errno = err?.errno || cause?.errno || null;
+    const errno = pbErr?.errno || cause?.errno || null;
 
-    // Log para debugging desde Vercel logs (incluimos todo lo que
-    // pueda ayudar a diagnosticar)
-    console.error("[byma/public-bonds] error:", {
-      message,
+    console.error("[byma/public-bonds] AMBOS endpoints fallaron:", {
+      publicBondsError: message,
+      lebacsError: lbErr instanceof Error ? lbErr.message : String(lbErr),
       causeMessage,
       causeCode,
       errno,
-      stack: err?.stack?.split("\n").slice(0, 5).join("\n"),
+      stack: pbErr?.stack?.split("\n").slice(0, 5).join("\n"),
       durationMs,
     });
 
-    // Distinguir timeout de otros errores para el cliente
     const isTimeout =
       message.includes("aborted") ||
       message.includes("timeout") ||
-      err?.name === "AbortError";
+      pbErr?.name === "AbortError";
 
     return res.status(isTimeout ? 504 : 502).json({
       ok: false,
       error: message,
-      // Estos campos extra ayudan a diagnosticar desde el browser sin
-      // necesidad de mirar logs de Vercel.
       cause: causeMessage,
       causeCode,
       errno,
-      meta: { durationMs, source: "open.bymadata.com.ar" },
+      meta: {
+        durationMs,
+        source: "open.bymadata.com.ar",
+        publicBondsError: pbErr instanceof Error ? pbErr.message : String(pbErr),
+        lebacsError: lbErr instanceof Error ? lbErr.message : String(lbErr),
+      },
     });
   }
+
+  // Al menos uno funcionó. Combinamos lo que tengamos.
+  const publicBondsRaw = publicBondsResult.status === "fulfilled" ? publicBondsResult.value : [];
+  const lebacsRaw = lebacsResult.status === "fulfilled" ? lebacsResult.value : [];
+
+  // Deduplicamos por símbolo. Si un ticker viene en ambos endpoints
+  // (no debería pasar normalmente — son universos disjuntos — pero por
+  // las dudas), gana public-bonds porque tiene datos más completos.
+  const seen = new Set();
+  const deduped = [];
+  for (const bond of [...publicBondsRaw, ...lebacsRaw]) {
+    if (!bond || !bond.symbol) continue;
+    if (seen.has(bond.symbol)) continue;
+    seen.add(bond.symbol);
+    deduped.push(normalizeBond(bond));
+  }
+
+  // Ordenamos alfabéticamente por símbolo (más predecible que el orden
+  // crudo, que puede variar entre llamadas).
+  deduped.sort((a, b) => a.symbol.localeCompare(b.symbol));
+
+  // Si uno de los dos falló, lo logueamos como warning (queda en logs
+  // de Vercel para que veas que algo está degradado, pero no bloquea
+  // la respuesta).
+  const partialFailure = {};
+  if (publicBondsResult.status === "rejected") {
+    partialFailure.publicBonds = publicBondsResult.reason instanceof Error
+      ? publicBondsResult.reason.message
+      : String(publicBondsResult.reason);
+    console.warn("[byma/public-bonds] /public-bonds falló:", partialFailure.publicBonds);
+  }
+  if (lebacsResult.status === "rejected") {
+    partialFailure.lebacs = lebacsResult.reason instanceof Error
+      ? lebacsResult.reason.message
+      : String(lebacsResult.reason);
+    console.warn("[byma/public-bonds] /lebacs falló:", partialFailure.lebacs);
+  }
+
+  // Cache HTTP: que el CDN de Vercel cachee 60 segundos como mucho.
+  // El cliente igual cachea 5 min en sessionStorage, así que esto es
+  // una segunda capa por si varios usuarios consultan en simultáneo.
+  res.setHeader("Cache-Control", "public, s-maxage=60, stale-while-revalidate=120");
+
+  const meta = {
+    totalRecords: deduped.length,
+    rawTotal: publicBondsRaw.length + lebacsRaw.length,
+    byMarket: {
+      publicBonds: publicBondsRaw.length,
+      lebacs: lebacsRaw.length,
+    },
+    fetchedAt: new Date().toISOString(),
+    durationMs,
+    source: "open.bymadata.com.ar",
+    delayMinutes: 20,
+  };
+  if (Object.keys(partialFailure).length > 0) {
+    meta.partialFailure = partialFailure;
+  }
+
+  return res.status(200).json({
+    ok: true,
+    data: deduped,
+    meta,
+  });
 }
