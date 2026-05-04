@@ -44,6 +44,8 @@ import {
   Tag,
   Repeat,
   BadgePercent,
+  FileText,
+  BookOpen,
   Activity,
   RefreshCw,
   AlertTriangle,
@@ -210,12 +212,21 @@ const NAV = [
       { id: "calc-comisiones", label: "Comisiones", icon: BadgePercent },
     ],
   },
+  {
+    id: "reportes",
+    label: "Reportes",
+    icon: FileText,
+    type: "group",
+    children: [
+      { id: "libro-operaciones", label: "Libro de operaciones", icon: BookOpen },
+    ],
+  },
 ];
 
 export default function EcoFlowTerminal() {
   const [collapsed, setCollapsed] = useState(false);
   const [now, setNow] = useState(new Date());
-  const [open, setOpen] = useState({ bcra: false, mercado: false, analizadores: false, calculadoras: false });
+  const [open, setOpen] = useState({ bcra: false, mercado: false, analizadores: false, calculadoras: false, reportes: false });
   const [active, setActive] = useState("dashboard");
 
   useEffect(() => {
@@ -684,7 +695,9 @@ export default function EcoFlowTerminal() {
             ) : active === "futuros-caucion" ? (
               <FuturosVsCaucionModule />
             ) : active === "portfolio-ia" ? (
-              <PortfolioIAModule />
+              <PortfolioIAModule onNavigate={setActive} />
+            ) : active === "libro-operaciones" ? (
+              <LibroOperacionesModule />
             ) : (
               <EmptyWorkspace key={active} active={active} />
             )}
@@ -1017,7 +1030,7 @@ function timeAgo(date, now) {
  *   · V3 — Dashboard inteligente (header con totales, distribución, liquidez)
  *   · V4 — Sistema de alertas de oportunidades cruzando cartera + datos mercado
  */
-function PortfolioIAModule() {
+function PortfolioIAModule({ onNavigate }) {
   const { user, loading } = useAuth();
 
   if (loading) {
@@ -1032,7 +1045,419 @@ function PortfolioIAModule() {
     return <PortfolioAuthWall />;
   }
 
-  return <PortfolioDashboard />;
+  return <PortfolioDashboard onNavigate={onNavigate} />;
+}
+
+
+/* ─────────────── LibroOperacionesModule ───────────────
+ *
+ * Pantalla "Libro de operaciones" — el registro completo de TODOS los
+ * movimientos del usuario, con filtros básicos y paginación.
+ *
+ * Filtros (F2 — opción B):
+ *   - Tipo de instrumento (chips: Todos / Bono / Stock / Cedear / Futuro / etc.)
+ *   - Compra / Venta / Ambas
+ *   - Rango de fechas (desde / hasta — opcional)
+ *
+ * Paginación: 50 ops por página, ordenadas por fecha desc.
+ *
+ * Para auditoría: muestra cada operación tal cual se cargó (sin
+ * consolidar). Es la vista "fuente de verdad" del Modelo A.
+ */
+function LibroOperacionesModule() {
+  const { user, loading } = useAuth();
+
+  if (loading) {
+    return (
+      <div className="absolute inset-0 flex items-center justify-center">
+        <Loader2 size={28} color={C.muted} className="eco-spin" strokeWidth={1.5} />
+      </div>
+    );
+  }
+
+  if (!user) return <PortfolioAuthWall />;
+
+  return <LibroOperacionesView />;
+}
+
+function LibroOperacionesView() {
+  const { positions, loading, error, updatePosition, deletePosition } = useUserPositions();
+  const bondPricesState = useBondPrices();
+
+  // Filtros UI
+  const [filterType, setFilterType] = useState("all");        // "all" | instrument_type
+  const [filterOperation, setFilterOperation] = useState("all"); // "all" | "buy" | "sell"
+  const [dateFrom, setDateFrom] = useState("");
+  const [dateTo, setDateTo] = useState("");
+  const [page, setPage] = useState(1);
+  const PAGE_SIZE = 50;
+
+  // Estado de edición / borrado (igual que PortfolioDashboard, en stub)
+  const [editingPosition, setEditingPosition] = useState(null);
+  const [confirmingDelete, setConfirmingDelete] = useState(null);
+
+  const handleUpdateCurrentPrice = useCallback(async (positionId, newPrice) => {
+    const patch = {
+      current_price: newPrice,
+      current_price_updated_at: newPrice == null ? null : new Date().toISOString(),
+    };
+    try {
+      await updatePosition(positionId, patch);
+    } catch (e) {
+      console.error("Error actualizando precio:", e);
+    }
+  }, [updatePosition]);
+
+  // Reseteamos página cuando cambia un filtro
+  useEffect(() => { setPage(1); }, [filterType, filterOperation, dateFrom, dateTo]);
+
+  // Aplicamos filtros + sort
+  const filtered = useMemo(() => {
+    let rows = [...(positions || [])];
+
+    // Filtro tipo
+    if (filterType !== "all") {
+      if (filterType === "bond") {
+        rows = rows.filter((p) =>
+          p.instrument_type === "bond_ars" || p.instrument_type === "bond_usd"
+        );
+      } else {
+        rows = rows.filter((p) => p.instrument_type === filterType);
+      }
+    }
+    // Filtro op
+    if (filterOperation !== "all") {
+      if (filterOperation === "buy") {
+        rows = rows.filter((p) => p.operation_type !== "sell");
+      } else {
+        rows = rows.filter((p) => p.operation_type === "sell");
+      }
+    }
+    // Filtro fecha desde
+    if (dateFrom) {
+      rows = rows.filter((p) => p.entry_date >= dateFrom);
+    }
+    // Filtro fecha hasta
+    if (dateTo) {
+      rows = rows.filter((p) => p.entry_date <= dateTo);
+    }
+    // Sort por fecha desc, luego created_at desc
+    rows.sort((a, b) => {
+      const da = a.entry_date || "";
+      const db = b.entry_date || "";
+      if (da !== db) return db.localeCompare(da);
+      return (b.created_at || "").localeCompare(a.created_at || "");
+    });
+    return rows;
+  }, [positions, filterType, filterOperation, dateFrom, dateTo]);
+
+  const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
+  const pagedRows = useMemo(() => {
+    const start = (page - 1) * PAGE_SIZE;
+    return filtered.slice(start, start + PAGE_SIZE);
+  }, [filtered, page]);
+
+  // Tipos presentes para chips dinámicos
+  const presentTypes = useMemo(() => {
+    const set = new Set();
+    for (const p of (positions || [])) {
+      if (p.instrument_type === "bond_ars" || p.instrument_type === "bond_usd") {
+        set.add("bond");
+      } else {
+        set.add(p.instrument_type);
+      }
+    }
+    return Array.from(set);
+  }, [positions]);
+
+  if (loading) {
+    return (
+      <div className="absolute inset-0 flex items-center justify-center">
+        <Loader2 size={28} color={C.muted} className="eco-spin" strokeWidth={1.5} />
+      </div>
+    );
+  }
+  if (error) {
+    return (
+      <div style={{ padding: 32, color: C.red, fontSize: 13 }}>
+        Error cargando operaciones: {error}
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ padding: "32px 36px 80px", maxWidth: 1400, margin: "0 auto" }}>
+      {/* Header */}
+      <div style={{ marginBottom: 8 }}>
+        <span style={{
+          fontSize: 9,
+          letterSpacing: "0.22em",
+          color: C.dim,
+          textTransform: "uppercase",
+          fontWeight: 600,
+        }}>
+          Reportes · Beta
+        </span>
+      </div>
+      <h1 style={{
+        fontFamily: "'Raleway', sans-serif",
+        fontWeight: 700,
+        fontSize: 32,
+        color: C.text,
+        margin: 0,
+        marginBottom: 6,
+      }}>
+        Libro de operaciones
+      </h1>
+      <p style={{ fontSize: 13, color: C.muted, marginTop: 0, marginBottom: 24 }}>
+        Registro completo de todos tus movimientos — {positions?.length || 0} operaciones en total.
+      </p>
+
+      {/* Filtros */}
+      <div style={{
+        backgroundColor: C.panel,
+        border: `1px solid ${C.border}`,
+        padding: "16px 18px",
+        marginBottom: 16,
+      }}>
+        <div style={{
+          fontSize: 9,
+          letterSpacing: "0.22em",
+          color: C.dim,
+          textTransform: "uppercase",
+          fontWeight: 600,
+          marginBottom: 12,
+        }}>
+          Filtros
+        </div>
+
+        {/* Chips por tipo */}
+        <div style={{ marginBottom: 12 }}>
+          <div style={{ fontSize: 10, color: C.dim, marginBottom: 6, textTransform: "uppercase", letterSpacing: "0.05em" }}>
+            Instrumento
+          </div>
+          <div className="flex items-center gap-2 flex-wrap">
+            <FilterChip
+              active={filterType === "all"}
+              onClick={() => setFilterType("all")}
+              label={`Todos (${positions?.length || 0})`}
+            />
+            {presentTypes.map((type) => {
+              const meta = INSTRUMENT_TYPES[type];
+              if (!meta) return null;
+              const count =
+                type === "bond"
+                  ? positions.filter(
+                      (p) => p.instrument_type === "bond_ars" || p.instrument_type === "bond_usd"
+                    ).length
+                  : positions.filter((p) => p.instrument_type === type).length;
+              return (
+                <FilterChip
+                  key={type}
+                  active={filterType === type}
+                  onClick={() => setFilterType(type)}
+                  label={`${meta.label} (${count})`}
+                  color={meta.color}
+                />
+              );
+            })}
+          </div>
+        </div>
+
+        {/* Chips por op */}
+        <div style={{ marginBottom: 12 }}>
+          <div style={{ fontSize: 10, color: C.dim, marginBottom: 6, textTransform: "uppercase", letterSpacing: "0.05em" }}>
+            Tipo de operación
+          </div>
+          <div className="flex items-center gap-2">
+            <FilterChip
+              active={filterOperation === "all"}
+              onClick={() => setFilterOperation("all")}
+              label="Todas"
+            />
+            <FilterChip
+              active={filterOperation === "buy"}
+              onClick={() => setFilterOperation("buy")}
+              label="Compras"
+            />
+            <FilterChip
+              active={filterOperation === "sell"}
+              onClick={() => setFilterOperation("sell")}
+              label="Ventas"
+            />
+          </div>
+        </div>
+
+        {/* Rango de fechas */}
+        <div className="flex items-center gap-3 flex-wrap">
+          <div>
+            <div style={{ fontSize: 10, color: C.dim, marginBottom: 4, textTransform: "uppercase", letterSpacing: "0.05em" }}>
+              Desde
+            </div>
+            <input
+              type="date"
+              value={dateFrom}
+              onChange={(e) => setDateFrom(e.target.value)}
+              style={{
+                backgroundColor: C.deep,
+                border: `1px solid ${C.border}`,
+                color: C.text,
+                padding: "6px 10px",
+                fontSize: 12,
+                fontFamily: "'JetBrains Mono', monospace",
+                outline: "none",
+              }}
+            />
+          </div>
+          <div>
+            <div style={{ fontSize: 10, color: C.dim, marginBottom: 4, textTransform: "uppercase", letterSpacing: "0.05em" }}>
+              Hasta
+            </div>
+            <input
+              type="date"
+              value={dateTo}
+              onChange={(e) => setDateTo(e.target.value)}
+              style={{
+                backgroundColor: C.deep,
+                border: `1px solid ${C.border}`,
+                color: C.text,
+                padding: "6px 10px",
+                fontSize: 12,
+                fontFamily: "'JetBrains Mono', monospace",
+                outline: "none",
+              }}
+            />
+          </div>
+          {(dateFrom || dateTo) && (
+            <button
+              onClick={() => { setDateFrom(""); setDateTo(""); }}
+              style={{
+                marginTop: 18,
+                fontSize: 11,
+                color: C.dim,
+                backgroundColor: "transparent",
+                border: "none",
+                cursor: "pointer",
+              }}
+              onMouseEnter={(e) => (e.currentTarget.style.color = C.accent)}
+              onMouseLeave={(e) => (e.currentTarget.style.color = C.dim)}
+            >
+              Limpiar fechas
+            </button>
+          )}
+        </div>
+      </div>
+
+      {/* Resultados header */}
+      <div className="flex items-center justify-between" style={{ marginBottom: 8 }}>
+        <span style={{
+          fontSize: 9,
+          letterSpacing: "0.22em",
+          color: C.dim,
+          textTransform: "uppercase",
+          fontWeight: 600,
+        }}>
+          Resultados ({filtered.length})
+        </span>
+        {totalPages > 1 && (
+          <span style={{ fontSize: 10, color: C.dim }}>
+            Página {page} de {totalPages}
+          </span>
+        )}
+      </div>
+
+      {/* Tabla */}
+      {filtered.length === 0 ? (
+        <div
+          style={{
+            backgroundColor: C.panel,
+            border: `1px solid ${C.border}`,
+            padding: "32px",
+            textAlign: "center",
+            fontSize: 13,
+            color: C.dim,
+          }}
+        >
+          {positions?.length === 0
+            ? "Todavía no cargaste ninguna operación."
+            : "No hay operaciones que coincidan con los filtros aplicados."}
+        </div>
+      ) : (
+        <PositionsTable
+          positions={pagedRows}
+          bondPrices={bondPricesState.prices}
+          onEdit={(p) => setEditingPosition(p)}
+          onDelete={(p) => setConfirmingDelete(p)}
+          onUpdatePrice={handleUpdateCurrentPrice}
+        />
+      )}
+
+      {/* Paginación */}
+      {totalPages > 1 && (
+        <div className="flex items-center justify-center gap-2" style={{ marginTop: 16 }}>
+          <button
+            onClick={() => setPage(1)}
+            disabled={page === 1}
+            style={paginationBtnStyle(page === 1)}
+          >
+            ‹‹
+          </button>
+          <button
+            onClick={() => setPage((p) => Math.max(1, p - 1))}
+            disabled={page === 1}
+            style={paginationBtnStyle(page === 1)}
+          >
+            ‹
+          </button>
+          <span style={{ fontSize: 11, color: C.muted, padding: "0 12px" }}>
+            {page} / {totalPages}
+          </span>
+          <button
+            onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+            disabled={page === totalPages}
+            style={paginationBtnStyle(page === totalPages)}
+          >
+            ›
+          </button>
+          <button
+            onClick={() => setPage(totalPages)}
+            disabled={page === totalPages}
+            style={paginationBtnStyle(page === totalPages)}
+          >
+            ››
+          </button>
+        </div>
+      )}
+
+      {/* Modales (reusados del dashboard) */}
+      {confirmingDelete && (
+        <DeleteConfirmModal
+          position={confirmingDelete}
+          onCancel={() => setConfirmingDelete(null)}
+          onConfirm={async () => {
+            try {
+              await deletePosition(confirmingDelete.id);
+            } finally {
+              setConfirmingDelete(null);
+            }
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+function paginationBtnStyle(disabled) {
+  return {
+    backgroundColor: C.panel,
+    border: `1px solid ${C.border}`,
+    color: disabled ? C.dim : C.muted,
+    padding: "5px 10px",
+    fontSize: 12,
+    cursor: disabled ? "not-allowed" : "pointer",
+    fontFamily: "'JetBrains Mono', monospace",
+    minWidth: 32,
+  };
 }
 
 /**
@@ -3871,7 +4296,7 @@ function applyConventionToValue(instrumentType, qty, price) {
  *
  * El dashboard "tipo Balanz" con KPIs arriba viene en el Sub-paso 3.
  */
-function PortfolioDashboard() {
+function PortfolioDashboard({ onNavigate }) {
   const { user } = useAuth();
   const { positions, loading, error, addPosition, updatePosition, deletePosition } = useUserPositions();
 
@@ -4084,6 +4509,7 @@ function PortfolioDashboard() {
             onEdit={openEdit}
             onDelete={(p) => setConfirmingDelete(p)}
             onUpdatePrice={handleUpdateCurrentPrice}
+            onNavigateToLibro={onNavigate ? () => onNavigate("libro-operaciones") : null}
           />
         </>
       )}
@@ -4394,8 +4820,59 @@ function ClosedPositionsSection({ closed, onEdit, onDelete, onUpdatePrice }) {
  * colapsada — el usuario la abre cuando necesita ver detalle de cada
  * compra/venta.
  */
-function OperationsHistorySection({ positions, bondPrices, onEdit, onDelete, onUpdatePrice }) {
+/* ─────────────── OperationsHistorySection ───────────────
+ *
+ * Muestra "Últimas operaciones" del usuario con la siguiente lógica:
+ *   - Si hubo operaciones HOY → muestra solo las de hoy.
+ *   - Si no hubo nada hoy → muestra las del último día con actividad.
+ *   - Tope máximo: 10 operaciones (las más recientes).
+ *
+ * Para ver el histórico completo, hay un link "Ver libro completo →"
+ * que navega a Reportes → Libro de operaciones.
+ *
+ * El padding de filas es muy compacto (densidad estilo Bloomberg) porque
+ * con el tiempo van a acumularse muchas operaciones día a día.
+ */
+function OperationsHistorySection({ positions, bondPrices, onEdit, onDelete, onUpdatePrice, onNavigateToLibro }) {
   const [open, setOpen] = useState(false);
+
+  // Filtramos las posiciones a mostrar: las del día más reciente con
+  // actividad. Si HOY hubo operaciones, son las de hoy; si no, las del
+  // último día que sí tuvo. Limitamos a las 10 más recientes.
+  const recentOps = useMemo(() => {
+    if (!positions?.length) return [];
+
+    // Ordenar por entry_date desc (created_at como tiebreaker si está)
+    const sorted = [...positions].sort((a, b) => {
+      const da = a.entry_date || "";
+      const db = b.entry_date || "";
+      if (da !== db) return db.localeCompare(da);
+      const ca = a.created_at || "";
+      const cb = b.created_at || "";
+      return cb.localeCompare(ca);
+    });
+
+    const today = new Date().toISOString().slice(0, 10);
+    const todayOps = sorted.filter((p) => p.entry_date === today);
+
+    // Si hay operaciones hoy → mostrar solo las de hoy (hasta 10)
+    if (todayOps.length > 0) return todayOps.slice(0, 10);
+
+    // Sino, mostrar las del último día con actividad (hasta 10)
+    const lastDate = sorted[0]?.entry_date;
+    if (!lastDate) return [];
+    return sorted.filter((p) => p.entry_date === lastDate).slice(0, 10);
+  }, [positions]);
+
+  // Header label: "Operaciones de hoy" o "Operaciones del DD/MMM" según el
+  // día que estemos mostrando.
+  const headerLabel = useMemo(() => {
+    if (recentOps.length === 0) return "Últimas operaciones";
+    const today = new Date().toISOString().slice(0, 10);
+    const showingDate = recentOps[0].entry_date;
+    if (showingDate === today) return "Operaciones de hoy";
+    return `Operaciones del ${fmtDateShort(showingDate)}`;
+  }, [recentOps]);
 
   return (
     <div style={{ marginBottom: 24 }}>
@@ -4411,7 +4888,6 @@ function OperationsHistorySection({ positions, bondPrices, onEdit, onDelete, onU
           padding: "10px 14px",
           cursor: "pointer",
           fontFamily: "'Roboto', sans-serif",
-          marginBottom: open ? 0 : 0,
           borderBottom: open ? "none" : `1px solid ${C.border}`,
           transition: "background-color 100ms ease",
         }}
@@ -4427,17 +4903,50 @@ function OperationsHistorySection({ positions, bondPrices, onEdit, onDelete, onU
             textTransform: "uppercase",
             fontWeight: 600,
           }}>
-            Historial de operaciones ({positions.length})
+            Últimas operaciones ({recentOps.length})
+          </span>
+          {recentOps.length > 0 && (
+            <span style={{
+              fontSize: 9.5,
+              color: C.dim,
+              letterSpacing: "0.04em",
+              marginLeft: 8,
+              textTransform: "uppercase",
+            }}>
+              · {headerLabel}
+            </span>
+          )}
+        </div>
+        <div className="flex items-center gap-3">
+          {onNavigateToLibro && (
+            <span
+              role="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                onNavigateToLibro();
+              }}
+              style={{
+                fontSize: 10,
+                color: C.accent,
+                cursor: "pointer",
+                fontWeight: 500,
+                letterSpacing: "0.02em",
+              }}
+              onMouseEnter={(e) => (e.currentTarget.style.textDecoration = "underline")}
+              onMouseLeave={(e) => (e.currentTarget.style.textDecoration = "none")}
+            >
+              Ver libro completo →
+            </span>
+          )}
+          <span style={{ fontSize: 10, color: C.dim }}>
+            {open ? "Click para ocultar" : "Click para ver detalle"}
           </span>
         </div>
-        <span style={{ fontSize: 10, color: C.dim }}>
-          {open ? "Click para ocultar" : "Click para ver detalle"}
-        </span>
       </button>
 
       {open && (
         <PositionsTable
-          positions={positions}
+          positions={recentOps}
           bondPrices={bondPrices}
           onEdit={onEdit}
           onDelete={onDelete}
@@ -4906,16 +5415,17 @@ function PositionsTable({ positions, bondPrices, onEdit, onDelete, onUpdatePrice
         <table style={{ width: "100%", borderCollapse: "collapse", fontFamily: "'Roboto', sans-serif" }}>
           <thead>
             <tr style={{ borderBottom: `1px solid ${C.border}` }}>
-              <PTh>Tipo</PTh>
-              <PTh>Op.</PTh>
-              <PTh>Ticker</PTh>
-              <PTh align="right">Cantidad</PTh>
-              <PTh align="right">Precio compra</PTh>
-              <PTh align="right">Precio venta</PTh>
-              <PTh>Moneda</PTh>
-              <PTh>Fecha</PTh>
-              <PTh>Notas</PTh>
-              <PTh align="right" style={{ width: 90 }}>{""}</PTh>
+              <PTh dense>Tipo</PTh>
+              <PTh dense>Op.</PTh>
+              <PTh dense>Ticker</PTh>
+              <PTh dense align="right">Cantidad</PTh>
+              <PTh dense align="right">Precio compra</PTh>
+              <PTh dense align="right">Precio venta</PTh>
+              <PTh dense align="right">Total</PTh>
+              <PTh dense>Moneda</PTh>
+              <PTh dense>Fecha</PTh>
+              <PTh dense>Notas</PTh>
+              <PTh dense align="right" style={{ width: 70 }}>{""}</PTh>
             </tr>
           </thead>
           <tbody>
@@ -4936,12 +5446,12 @@ function PositionsTable({ positions, bondPrices, onEdit, onDelete, onUpdatePrice
   );
 }
 
-function PTh({ children, align = "left", style = {} }) {
+function PTh({ children, align = "left", style = {}, dense = false }) {
   return (
     <th
       style={{
         textAlign: align,
-        padding: "11px 14px",
+        padding: dense ? "5px 14px" : "11px 14px",
         fontSize: 9,
         fontWeight: 600,
         color: C.dim,
@@ -4955,13 +5465,13 @@ function PTh({ children, align = "left", style = {} }) {
   );
 }
 
-function PTd({ children, align = "left", style = {} }) {
+function PTd({ children, align = "left", style = {}, dense = false }) {
   return (
     <td
       style={{
         textAlign: align,
-        padding: "12px 14px",
-        fontSize: 12.5,
+        padding: dense ? "4px 14px" : "12px 14px",
+        fontSize: dense ? 12 : 12.5,
         color: C.text,
         verticalAlign: "middle",
         ...style,
@@ -4988,6 +5498,22 @@ function PositionRow({ position, bondPrices, onEdit, onDelete, onUpdatePrice }) 
       ? "Bono"
       : (meta.label || position.instrument_type);
 
+  // Total operado en esta operación (NO es el total a mercado actual).
+  // Es la plata que movió la operación cuando ocurrió:
+  //   - Bonos: cantidad × precio / 100
+  //   - Futuros: cantidad × 1000 × precio (notional movido)
+  //   - Opciones: cantidad × 100 × prima
+  //   - Resto: cantidad × precio
+  // Para ventas, lo mostramos en negativo (saliste de la posición → te
+  // entró plata, pero a efectos de "delta de posición" es negativo).
+  const operationTotal = position.entry_price != null
+    ? applyConventionToValue(
+        position.instrument_type,
+        Math.abs(Number(position.quantity) || 0),
+        Number(position.entry_price)
+      )
+    : null;
+
   return (
     <tr
       style={{
@@ -4997,19 +5523,19 @@ function PositionRow({ position, bondPrices, onEdit, onDelete, onUpdatePrice }) 
       onMouseEnter={(e) => (e.currentTarget.style.backgroundColor = "rgba(255,255,255,0.015)")}
       onMouseLeave={(e) => (e.currentTarget.style.backgroundColor = "transparent")}
     >
-      <PTd>
+      <PTd dense>
         <div className="flex items-center gap-2">
-          <TypeIcon size={13} color={typeColor} strokeWidth={1.7} />
-          <span style={{ fontSize: 11.5, color: C.muted }}>{displayLabel}</span>
+          <TypeIcon size={12} color={typeColor} strokeWidth={1.7} />
+          <span style={{ fontSize: 11, color: C.muted }}>{displayLabel}</span>
         </div>
       </PTd>
-      <PTd>
+      <PTd dense>
         <span
           style={{
-            fontSize: 9.5,
+            fontSize: 9,
             fontWeight: 700,
             letterSpacing: "0.14em",
-            padding: "2px 7px",
+            padding: "1px 6px",
             borderRadius: 3,
             color: isSell ? C.red : C.green,
             backgroundColor: isSell ? "rgba(248,113,113,0.10)" : "rgba(74,222,128,0.10)",
@@ -5019,12 +5545,12 @@ function PositionRow({ position, bondPrices, onEdit, onDelete, onUpdatePrice }) 
           {isSell ? "VENTA" : "COMPRA"}
         </span>
       </PTd>
-      <PTd>
-        <span className="eco-mono" style={{ fontWeight: 600, fontSize: 12.5 }}>
+      <PTd dense>
+        <span className="eco-mono" style={{ fontWeight: 600, fontSize: 12 }}>
           {position.ticker}
         </span>
       </PTd>
-      <PTd align="right">
+      <PTd dense align="right">
         <span
           className="eco-mono"
           style={{ color: isSell ? C.red : C.text }}
@@ -5038,7 +5564,7 @@ function PositionRow({ position, bondPrices, onEdit, onDelete, onUpdatePrice }) 
         </span>
       </PTd>
       {/* Precio compra: solo poblada si la operación es de compra. */}
-      <PTd align="right">
+      <PTd dense align="right">
         <span className="eco-mono">
           {!isSell && position.entry_price != null
             ? fmtNumber(position.entry_price, { maxDecimals: 4 })
@@ -5046,26 +5572,42 @@ function PositionRow({ position, bondPrices, onEdit, onDelete, onUpdatePrice }) 
         </span>
       </PTd>
       {/* Precio venta: solo poblada si la operación es de venta. */}
-      <PTd align="right">
+      <PTd dense align="right">
         <span className="eco-mono">
           {isSell && position.entry_price != null
             ? fmtNumber(position.entry_price, { maxDecimals: 4 })
             : <span style={{ color: C.dim }}>—</span>}
         </span>
       </PTd>
-
-      <PTd>
-        <span style={{ fontSize: 11.5, color: C.muted }}>{position.entry_currency}</span>
+      {/* Total operado: cantidad × precio (con convención del instrumento).
+          Para ventas, en negativo y rojo. Es la plata movida en ESTA op. */}
+      <PTd dense align="right">
+        {operationTotal != null ? (
+          <span
+            className="eco-mono"
+            style={{ color: isSell ? C.red : C.text, fontWeight: 500 }}
+          >
+            {fmtNumber(
+              isSell ? -operationTotal : operationTotal,
+              { maxDecimals: 2 }
+            )}
+          </span>
+        ) : (
+          <span style={{ color: C.dim }}>—</span>
+        )}
       </PTd>
-      <PTd>
-        <span style={{ fontSize: 11.5, color: C.muted }}>{fmtDateShort(position.entry_date)}</span>
+      <PTd dense>
+        <span style={{ fontSize: 11, color: C.muted }}>{position.entry_currency}</span>
       </PTd>
-      <PTd>
-        <span style={{ fontSize: 11, color: C.dim, maxWidth: 200, display: "inline-block", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={position.notes || ""}>
+      <PTd dense>
+        <span style={{ fontSize: 11, color: C.muted }}>{fmtDateShort(position.entry_date)}</span>
+      </PTd>
+      <PTd dense>
+        <span style={{ fontSize: 10.5, color: C.dim, maxWidth: 180, display: "inline-block", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={position.notes || ""}>
           {position.notes || "—"}
         </span>
       </PTd>
-      <PTd align="right">
+      <PTd dense align="right">
         <div className="flex items-center justify-end gap-1">
           <button
             onClick={onEdit}
