@@ -3560,15 +3560,19 @@ function consolidatePositions(positions, bondPrices) {
     // El "precio actual" se autoupdate al precio de la última venta.
     // Esto refleja el modelo donde cerrar una posición de futuro fija
     // el precio efectivo al que saliste, y el P&L queda calculado contra
-    // ese precio. Tiene prioridad sobre el override manual? NO — si el
-    // user explícitamente cargó un precio manual, eso gana.
+    // ese precio.
+    //
+    // PRIORIDAD: si hay ventas, el precio de la última venta SIEMPRE
+    // gana — incluso por encima del current_price manual cargado antes
+    // de cerrar (ese ya no aplica, la posición se cerró a otro precio).
+    // El user puede después editar el precio manualmente si quiere
+    // (vía el lápiz), pero por default el cierre manda.
     if (
       g.instrument_type === "future" &&
-      g.lastSellPrice != null &&
-      manualOverride == null
+      g.lastSellPrice != null
     ) {
       currentPrice = g.lastSellPrice;
-      priceSource = "close"; // nueva fuente para badge "CIERRE"
+      priceSource = "close"; // badge "CIERRE"
     } else if (manualOverride != null) {
       currentPrice = manualOverride;
       priceSource = "manual";
