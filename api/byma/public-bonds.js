@@ -63,7 +63,10 @@ async function fetchBymaBonds() {
         "Content-Type": "application/json",
         "Accept": "application/json, text/plain, */*",
         "Accept-Language": "en-US,en;q=0.9,es;q=0.8",
-        "Accept-Encoding": "gzip, deflate, br",
+        // Importante: NO pedimos brotli (br) porque undici (el fetch de
+        // Node 18+) a veces falla decompressando si el server hace
+        // negociación rara. Solo gzip y deflate.
+        "Accept-Encoding": "gzip, deflate",
         "Origin": "https://open.bymadata.com.ar",
         "Referer": "https://open.bymadata.com.ar/",
         // Un User-Agent de browser real es más probable de pasar filtros
@@ -71,6 +74,9 @@ async function fetchBymaBonds() {
         "User-Agent":
           "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
           "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        // Cache busting explicit para forzar conexión fresca
+        "Cache-Control": "no-cache",
+        "Pragma": "no-cache",
       },
       // Body EXACTO capturado del browser. No agregar campos.
       body: JSON.stringify({
@@ -79,7 +85,21 @@ async function fetchBymaBonds() {
         "Content-Type": "application/json, text/plain",
       }),
       signal: controller.signal,
+      // Forzamos conexión nueva (no reuse de connection pool de undici).
+      // Esto evita problemas si BYMA cierra conexiones abruptamente.
+      keepalive: false,
+      // No seguir redirects automáticamente — si BYMA redirige a una
+      // página de login, queremos verlo en el log y no fallar opacamente.
+      redirect: "manual",
     });
+
+    // Si BYMA redirige (302/303), capturamos eso explícitamente
+    if (res.status >= 300 && res.status < 400) {
+      const location = res.headers.get("location") || "(sin location)";
+      throw new Error(
+        `BYMA redirige a "${location}" (HTTP ${res.status}) — probable problema de sesión`
+      );
+    }
 
     if (!res.ok) {
       const text = await res.text().catch(() => "");
