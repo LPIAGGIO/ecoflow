@@ -2362,7 +2362,7 @@ function useDashboardFx() {
  * bonos (consistente con el módulo Carry Trade existente).
  */
 
-const BOND_PRICES_CACHE_KEY = "ecoflow_bond_prices_v1";
+const BOND_PRICES_CACHE_KEY = "ecoflow_bond_prices_v2";
 const BOND_PRICES_TTL_MS = 5 * 60 * 1000; // 5 minutos
 
 function readBondPricesCache() {
@@ -2415,6 +2415,62 @@ function useBondPrices() {
         // Cache buster en refresh manual para forzar revalidación CDN
         const bust = refreshKey > 0 ? `?t=${Date.now()}` : "";
         const fetchOpts = refreshKey > 0 ? { cache: "no-store" } : undefined;
+
+        // ── PASO 1: Intentar BYMA (fuente primaria) ──────────────────
+        // BYMA Open Data es la fuente directa (data912 también pega ahí).
+        // Ventajas: más completo (~494 bonos), incluye fechas de vto,
+        // currency tagging explícito (ARS/USD/EXT), bid/ask separados.
+        // Si BYMA falla por cualquier razón (timeout, mantenimiento,
+        // rate limit), caemos a data912 como antes.
+        let map = {};
+        let primarySource = "byma";
+        let bymaFailed = false;
+
+        try {
+          const bymaRes = await fetch(`/api/byma/public-bonds${bust}`, fetchOpts);
+          if (!bymaRes.ok) throw new Error(`BYMA HTTP ${bymaRes.status}`);
+          const bymaJson = await bymaRes.json();
+          if (!bymaJson?.ok || !Array.isArray(bymaJson.data)) {
+            throw new Error("BYMA respuesta inválida");
+          }
+
+          for (const bond of bymaJson.data) {
+            if (!bond?.symbol) continue;
+            const ticker = String(bond.symbol).trim().toUpperCase();
+            // Preferimos last (último operado), luego settlement, luego
+            // ask. Si nada, descartamos.
+            const price = bond.last ?? bond.settlementPrice ?? bond.ask ?? null;
+            if (price == null || price <= 0) continue;
+            map[ticker] = {
+              price: Number(price),
+              bid: bond.bid,
+              ask: bond.ask,
+              volume: bond.volume,
+              source: "byma",
+              // Metadata extra de BYMA que data912 no tiene
+              maturityDate: bond.maturityDate,
+              daysToMaturity: bond.daysToMaturity,
+              currency: bond.currency, // "ARS" | "USD" | "EXT"
+              changePct: bond.changePct,
+              previousClose: bond.previousClose,
+              tradeHour: bond.tradeHour,
+            };
+          }
+        } catch (bymaErr) {
+          // No tiramos error: simplemente caemos al fallback.
+          bymaFailed = true;
+          console.warn("[useBondPrices] BYMA falló, usando data912:", bymaErr.message);
+        }
+
+        // ── PASO 2: Fallback a data912 ──────────────────────────────
+        // Lo usamos en 2 escenarios:
+        //   (a) BYMA falló completamente → data912 es nuestra única fuente
+        //   (b) BYMA andvuó pero le falta algún ticker → llenamos huecos
+        // En ambos casos no pisamos lo que ya tenemos de BYMA.
+        if (bymaFailed || Object.keys(map).length === 0) {
+          primarySource = "data912";
+        }
+
         const [bondsRes, letrasRes] = await Promise.all([
           fetch(`/api/bonos${bust}`, fetchOpts),
           fetch(`/api/letras${bust}`, fetchOpts),
@@ -2423,14 +2479,13 @@ function useBondPrices() {
         const bondsArr = bondsRes.ok ? await bondsRes.json() : [];
         const letrasArr = letrasRes.ok ? await letrasRes.json() : [];
 
-        // Merge: priorizamos letras si hay duplicados (su data es más
+        // Priorizamos letras si hay duplicados (su data es más
         // específica). El campo `c` es el último precio operado; si no
         // hay, usamos `px_ask` como fallback (consistente con CarryTrade).
-        const map = {};
         for (const item of [...letrasArr, ...bondsArr]) {
           if (!item?.symbol) continue;
           const ticker = String(item.symbol).trim().toUpperCase();
-          if (map[ticker]) continue; // primer match gana
+          if (map[ticker]) continue; // BYMA gana si ya estaba
           const price = item.c ?? item.px_ask ?? null;
           if (price == null || price <= 0) continue;
           map[ticker] = {
@@ -2438,6 +2493,7 @@ function useBondPrices() {
             bid: item.px_bid != null ? Number(item.px_bid) : null,
             ask: item.px_ask != null ? Number(item.px_ask) : null,
             volume: item.q_op != null ? Number(item.q_op) : null,
+            source: "data912",
           };
         }
 
@@ -2447,6 +2503,14 @@ function useBondPrices() {
         setLastFetch(now);
         setLoading(false);
         writeBondPricesCache({ prices: map, lastFetch: now });
+
+        // Log informativo (visible en DevTools de quien sea curioso)
+        const bymaCount = Object.values(map).filter(v => v.source === "byma").length;
+        const d912Count = Object.values(map).filter(v => v.source === "data912").length;
+        console.info(
+          `[useBondPrices] ${Object.keys(map).length} tickers cargados ` +
+          `(BYMA: ${bymaCount}, data912: ${d912Count})`
+        );
       } catch (e) {
         if (!mounted) return;
         setError(e.message || "Error cargando precios");
@@ -3461,14 +3525,17 @@ function convertValue(amount, fromCurrency, toCurrency, fx) {
  *
  * Si nada está disponible, devuelve null.
  *
- * @returns {{ price: number, source: 'manual'|'market'|'cost' } | null}
+ * @returns {{ price: number, source: 'manual'|'byma'|'data912'|'market'|'cost' } | null}
  */
 function resolvePositionPrice(p, bondPrices) {
   if (p.current_price != null) {
     return { price: Number(p.current_price), source: "manual" };
   }
 
-  // Para bonos / ONs intentamos data912
+  // Para bonos / ONs leemos del cache de precios (BYMA primero, data912
+  // como fallback — el merge ya está hecho en useBondPrices). Acá el
+  // source refleja CUÁL fuente terminó proveyendo el precio para que el
+  // badge UI lo muestre con honestidad.
   const ticker = (p.ticker || "").trim().toUpperCase();
   if (
     bondPrices &&
@@ -3478,7 +3545,13 @@ function resolvePositionPrice(p, bondPrices) {
       p.instrument_type === "on")
   ) {
     const m = bondPrices[ticker];
-    if (m?.price > 0) return { price: m.price, source: "market" };
+    if (m?.price > 0) {
+      // Mantenemos retrocompatibilidad: si por alguna razón m.source no
+      // viene definido (cache viejo en sessionStorage de antes del
+      // upgrade), usamos "market" como antes.
+      const src = m.source === "byma" || m.source === "data912" ? m.source : "market";
+      return { price: m.price, source: src };
+    }
   }
 
   if (p.entry_price != null) {
@@ -3692,7 +3765,15 @@ function computePortfolioTotals(positions, fx, valuationCurrency, bondPrices) {
       if (convertedCost != null) totalCost += convertedCost;
     }
 
-    if (marketRes.source === "market" || marketRes.source === "manual") {
+    // Considerar como "from market" cualquier fuente real de mercado
+    // (BYMA, data912, market legacy) o manual (override del usuario).
+    // Solo "cost" cae a pricesFromCost.
+    const fromMarket =
+      marketRes.source === "byma" ||
+      marketRes.source === "data912" ||
+      marketRes.source === "market" || // legacy
+      marketRes.source === "manual";
+    if (fromMarket) {
       pricesFromMarket++;
     } else {
       pricesFromCost++;
@@ -5827,9 +5908,11 @@ function EditablePriceCell({ position, resolved, onSave }) {
   // Modo display
   const source = resolved?.source;
   const sourceBadge =
-    source === "manual" ? { label: "manual", color: C.muted, bg: "rgba(246,247,246,0.06)" } :
-    source === "market" ? { label: "data912", color: C.accent, bg: C.accentSoft } :
-    source === "close"  ? { label: "cierre", color: C.green, bg: "rgba(74,222,128,0.10)" } :
+    source === "manual"  ? { label: "manual",  color: C.muted,  bg: "rgba(246,247,246,0.06)" } :
+    source === "byma"    ? { label: "byma",    color: C.accent, bg: C.accentSoft } :
+    source === "data912" ? { label: "data912", color: C.accent, bg: C.accentSoft } :
+    source === "market"  ? { label: "data912", color: C.accent, bg: C.accentSoft } : // legacy fallback
+    source === "close"   ? { label: "cierre",  color: C.green,  bg: "rgba(74,222,128,0.10)" } :
     null; // cost: no badge, solo "—"
 
   return (
@@ -5863,8 +5946,10 @@ function EditablePriceCell({ position, resolved, onSave }) {
         onClick={startEdit}
         aria-label="Editar precio actual"
         title={
-          source === "manual" ? "Editar precio manual" :
-          source === "market" ? "Override manual del precio" :
+          source === "manual"  ? "Editar precio manual" :
+          source === "byma"    ? "Override del precio (BYMA)" :
+          source === "data912" ? "Override del precio (data912)" :
+          source === "market"  ? "Override manual del precio" :
           "Cargar precio actual"
         }
         style={{
