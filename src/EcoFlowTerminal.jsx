@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useCallback } from "react";
+import { useState, useEffect, useMemo, useCallback, useRef } from "react";
 import { useAuth } from "./auth/AuthContext.jsx";
 import { supabase } from "./lib/supabase.js";
 import { resolveBond, daysToMaturity, shouldIgnoreTicker, BOND_REGISTRY } from "./bondMaturities.js";
@@ -60,6 +60,7 @@ import {
   ShieldCheck,
   Plus,
   X,
+  Check,
   Trash2,
   Filter,
   TrendingDown,
@@ -2162,9 +2163,9 @@ function fmtDateShort(iso) {
  * y los números reales los conectamos al final.
  */
 
-function DashboardOverview({ positions }) {
-  const { fx, loading: fxLoading, error: fxError, lastUpdated: fxLastUpdated, refresh: refreshFx } = useDashboardFx();
-  const { prices: bondPrices, loading: pricesLoading, error: pricesError, lastFetch: pricesLastFetch, refresh: refreshBondPrices } = useBondPrices();
+function DashboardOverview({ positions, fxState, bondPricesState }) {
+  const { fx, loading: fxLoading, error: fxError, lastUpdated: fxLastUpdated, refresh: refreshFx } = fxState;
+  const { prices: bondPrices, loading: pricesLoading, error: pricesError, lastFetch: pricesLastFetch, refresh: refreshBondPrices } = bondPricesState;
 
   // Toggle de moneda de valuación: ARS / USD-MEP / USD-CCL
   const [valuationCurrency, setValuationCurrency] = useState("ARS");
@@ -2242,7 +2243,7 @@ function DashboardOverview({ positions }) {
       </div>
 
       {/* 4. Flujos proyectados (V1: lista simple) */}
-      <FlowsSection positions={positions} />
+      <FlowsSection positions={positions} bondPrices={bondPrices} fx={fx} />
     </div>
   );
 }
@@ -2755,54 +2756,57 @@ function LiquidityCard({ positions, fx, bondPrices, valuationCurrency, window: w
 
 /* ─────────────── Sección Flujos Proyectados (V1: placeholder) ─────────────── */
 
-function FlowsSection({ positions }) {
+function FlowsSection({ positions, bondPrices, fx }) {
   const upcomingMaturities = useMemo(() => {
     const now = new Date();
     const events = [];
     for (const p of positions) {
       const t = p.instrument_type;
       const ticker = (p.ticker || "").toUpperCase();
-      // Bonos ARS — vencimientos del registry
+      // Para cada evento adjuntamos la posición original así calculamos
+      // el monto estimado al vencimiento usando precio actual o costo.
+      let date = null;
+      let typeLabel = null;
       if (t === "bond_ars" && BOND_REGISTRY[ticker]?.maturityDate) {
-        events.push({
-          ticker,
-          type: "Bono ARS",
-          date: BOND_REGISTRY[ticker].maturityDate,
-          quantity: p.quantity,
-          currency: p.entry_currency,
-        });
-      }
-      // Cauciones — vencimiento = entry_date + plazo
-      if (t === "caucion" && p.entry_date && p.extra?.term_days) {
+        date = BOND_REGISTRY[ticker].maturityDate;
+        typeLabel = "Bono ARS";
+      } else if (t === "caucion" && p.entry_date && p.extra?.term_days) {
         const start = new Date(p.entry_date);
-        const end = new Date(start.getTime() + Number(p.extra.term_days) * 86400000);
-        events.push({
-          ticker: p.ticker || "Caución",
-          type: "Caución",
-          date: end.toISOString().slice(0, 10),
-          quantity: p.quantity,
-          currency: p.entry_currency,
-        });
-      }
-      // Futuros DLR — fecha de vencimiento del registry
-      if (t === "future") {
+        date = new Date(start.getTime() + Number(p.extra.term_days) * 86400000)
+          .toISOString().slice(0, 10);
+        typeLabel = "Caución";
+      } else if (t === "future") {
         const contract = DLR_REGISTRY.find((c) => c.ticker === ticker);
         if (contract?.maturityDate) {
-          events.push({
-            ticker,
-            type: "Futuro",
-            date: contract.maturityDate,
-            quantity: p.quantity,
-            currency: p.entry_currency,
-          });
+          date = contract.maturityDate;
+          typeLabel = "Futuro DLR";
         }
       }
+      // NOTA: bond_usd queda fuera de Flujos por ahora — sus fechas de
+      // vencimiento están en el catálogo dinámico (Supabase) que no
+      // recibe FlowsSection. Se agregará cuando levantemos el catálogo
+      // al PortfolioDashboard. Para tu cartera actual (lecaps + DLR)
+      // esto no afecta nada.
+      if (!date) continue;
+
+      // Monto estimado al vencimiento: cantidad × precio efectivo
+      // (ajustado por convención del instrumento: /100 para bonos, etc.)
+      const m = positionValueAtMarket(p, bondPrices);
+      events.push({
+        ticker: p.ticker || "—",
+        type: typeLabel,
+        date,
+        quantity: Number(p.quantity) || 0,
+        amount: m?.value ?? null,
+        amountSource: m?.source ?? null,
+        currency: p.entry_currency || "ARS",
+      });
     }
     return events
       .filter((e) => new Date(e.date) >= now)
       .sort((a, b) => a.date.localeCompare(b.date))
       .slice(0, 5);
-  }, [positions]);
+  }, [positions, bondPrices]);
 
   return (
     <div style={cardBaseStyle()}>
@@ -2818,35 +2822,98 @@ function FlowsSection({ positions }) {
           No hay vencimientos próximos en tu cartera
         </div>
       ) : (
-        <div className="flex flex-col">
-          {upcomingMaturities.map((e, idx) => (
-            <div
-              key={`${e.ticker}-${idx}`}
-              className="flex items-center justify-between"
-              style={{
-                padding: "8px 0",
-                borderBottom: idx < upcomingMaturities.length - 1 ? `1px solid ${C.border}` : "none",
-              }}
-            >
-              <div className="flex items-center gap-3" style={{ minWidth: 0, flex: 1 }}>
-                <span style={{ fontSize: 12, color: C.text, fontFamily: "'JetBrains Mono', monospace", fontWeight: 600, minWidth: 70 }}>
-                  {e.ticker}
-                </span>
-                <span style={{ fontSize: 11, color: C.muted, fontFamily: "'Roboto', sans-serif" }}>
-                  {e.type}
-                </span>
-              </div>
-              <div className="flex items-center gap-4">
-                <span style={{ fontSize: 11, color: C.muted, fontFamily: "'JetBrains Mono', monospace" }}>
-                  {fmtMaturityShort(e.date)}
-                </span>
-              </div>
-            </div>
-          ))}
-        </div>
+        <table style={{ width: "100%", borderCollapse: "collapse" }}>
+          <thead>
+            <tr>
+              <th style={flowsThStyle("left")}>Ticker</th>
+              <th style={flowsThStyle("left")}>Tipo</th>
+              <th style={flowsThStyle("right")}>Cantidad</th>
+              <th style={flowsThStyle("right")}>Monto estimado</th>
+              <th style={flowsThStyle("center")}>Moneda</th>
+              <th style={flowsThStyle("right")}>Vencimiento</th>
+            </tr>
+          </thead>
+          <tbody>
+            {upcomingMaturities.map((e, idx) => {
+              const isLast = idx === upcomingMaturities.length - 1;
+              return (
+                <tr
+                  key={`${e.ticker}-${idx}`}
+                  style={{
+                    borderBottom: isLast ? "none" : `1px solid ${C.border}`,
+                  }}
+                >
+                  <td style={flowsTdStyle("left")}>
+                    <span style={{ fontSize: 12, color: C.text, fontFamily: "'JetBrains Mono', monospace", fontWeight: 600 }}>
+                      {e.ticker}
+                    </span>
+                  </td>
+                  <td style={flowsTdStyle("left")}>
+                    <span style={{ fontSize: 11, color: C.muted, fontFamily: "'Roboto', sans-serif" }}>
+                      {e.type}
+                    </span>
+                  </td>
+                  <td style={flowsTdStyle("right")}>
+                    <span style={{ fontSize: 11, color: C.muted, fontFamily: "'JetBrains Mono', monospace" }}>
+                      {fmtNumber(e.quantity, { maxDecimals: 0 })}
+                    </span>
+                  </td>
+                  <td style={flowsTdStyle("right")}>
+                    {e.amount != null ? (
+                      <div className="flex flex-col items-end" style={{ gap: 1 }}>
+                        <span style={{ fontSize: 11.5, color: C.text, fontFamily: "'JetBrains Mono', monospace", fontWeight: 500 }}>
+                          {fmtNumber(e.amount, { maxDecimals: 2 })}
+                        </span>
+                        {e.amountSource === "cost" && (
+                          <span style={{ fontSize: 8.5, color: C.dim, letterSpacing: "0.05em", textTransform: "uppercase" }}>
+                            a costo
+                          </span>
+                        )}
+                      </div>
+                    ) : (
+                      <span style={{ color: C.dim, fontSize: 11 }}>—</span>
+                    )}
+                  </td>
+                  <td style={flowsTdStyle("center")}>
+                    <span style={{ fontSize: 10, color: C.muted, fontFamily: "'Roboto', sans-serif" }}>
+                      {e.currency}
+                    </span>
+                  </td>
+                  <td style={flowsTdStyle("right")}>
+                    <span style={{ fontSize: 11, color: C.muted, fontFamily: "'JetBrains Mono', monospace" }}>
+                      {fmtMaturityShort(e.date)}
+                    </span>
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
       )}
     </div>
   );
+}
+
+function flowsThStyle(align) {
+  return {
+    textAlign: align,
+    padding: "6px 8px 8px",
+    fontSize: 9,
+    fontWeight: 600,
+    color: C.dim,
+    textTransform: "uppercase",
+    letterSpacing: "0.08em",
+    fontFamily: "'Roboto', sans-serif",
+    borderBottom: `1px solid ${C.border}`,
+  };
+}
+
+function flowsTdStyle(align) {
+  return {
+    textAlign: align,
+    padding: "8px",
+    verticalAlign: "middle",
+  };
 }
 
 
@@ -3195,11 +3262,32 @@ function PortfolioDashboard() {
   const { user } = useAuth();
   const { positions, loading, error, addPosition, updatePosition, deletePosition } = useUserPositions();
 
+  // Levantamos los hooks de FX y precios de bonos al nivel del Dashboard,
+  // así DashboardOverview Y PositionsTable comparten la misma instancia
+  // (un solo fetch en lugar de duplicarlo).
+  const fxState = useDashboardFx();
+  const bondPricesState = useBondPrices();
+
   // Estados UI
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [editingPosition, setEditingPosition] = useState(null);
   const [filter, setFilter] = useState("all");
   const [confirmingDelete, setConfirmingDelete] = useState(null);
+
+  // Handler para edición inline de current_price desde la tabla de
+  // posiciones. Acepta `null` para limpiar el override y volver al
+  // precio de mercado o costo según corresponda.
+  const handleUpdateCurrentPrice = useCallback(async (positionId, newPrice) => {
+    const patch = {
+      current_price: newPrice,
+      current_price_updated_at: newPrice == null ? null : new Date().toISOString(),
+    };
+    try {
+      await updatePosition(positionId, patch);
+    } catch (e) {
+      console.error("Error actualizando precio:", e);
+    }
+  }, [updatePosition]);
 
   const displayName =
     user?.user_metadata?.full_name ||
@@ -3355,7 +3443,11 @@ function PortfolioDashboard() {
       ) : (
         <>
           {/* Sub-paso 3: Dashboard tipo Balanz */}
-          <DashboardOverview positions={positions} />
+          <DashboardOverview
+            positions={positions}
+            fxState={fxState}
+            bondPricesState={bondPricesState}
+          />
 
           {/* Tabla de posiciones (heredada del Sub-paso 2) */}
           <div style={{ marginBottom: 8, fontSize: 9, letterSpacing: "0.22em", color: C.dim, textTransform: "uppercase", fontWeight: 600 }}>
@@ -3393,8 +3485,10 @@ function PortfolioDashboard() {
           {/* Tabla de posiciones */}
           <PositionsTable
             positions={filteredPositions}
+            bondPrices={bondPricesState.prices}
             onEdit={openEdit}
             onDelete={(p) => setConfirmingDelete(p)}
+            onUpdatePrice={handleUpdateCurrentPrice}
           />
         </>
       )}
@@ -3512,7 +3606,7 @@ function FilterChip({ active, onClick, label, color }) {
 
 
 /* ─────────────── Tabla de posiciones ─────────────── */
-function PositionsTable({ positions, onEdit, onDelete }) {
+function PositionsTable({ positions, bondPrices, onEdit, onDelete, onUpdatePrice }) {
   return (
     <div
       style={{
@@ -3529,7 +3623,9 @@ function PositionsTable({ positions, onEdit, onDelete }) {
               <PTh>Op.</PTh>
               <PTh>Ticker</PTh>
               <PTh align="right">Cantidad</PTh>
-              <PTh align="right">Precio</PTh>
+              <PTh align="right">Precio compra</PTh>
+              <PTh align="right">Precio actual</PTh>
+              <PTh align="right">Total</PTh>
               <PTh>Moneda</PTh>
               <PTh>Fecha</PTh>
               <PTh>Notas</PTh>
@@ -3541,8 +3637,10 @@ function PositionsTable({ positions, onEdit, onDelete }) {
               <PositionRow
                 key={p.id}
                 position={p}
+                bondPrices={bondPrices}
                 onEdit={() => onEdit(p)}
                 onDelete={() => onDelete(p)}
+                onUpdatePrice={(newPrice) => onUpdatePrice(p.id, newPrice)}
               />
             ))}
           </tbody>
@@ -3590,7 +3688,7 @@ function PTd({ children, align = "left", style = {} }) {
 
 
 /* ─────────────── Fila de posición ─────────────── */
-function PositionRow({ position, onEdit, onDelete }) {
+function PositionRow({ position, bondPrices, onEdit, onDelete, onUpdatePrice }) {
   const meta = INSTRUMENT_TYPES[position.instrument_type] || {};
   const TypeIcon = meta.icon || Activity;
   const typeColor = meta.color ? C.cat[meta.color] : C.muted;
@@ -3603,6 +3701,13 @@ function PositionRow({ position, onEdit, onDelete }) {
     position.instrument_type === "bond_ars" || position.instrument_type === "bond_usd"
       ? "Bono"
       : (meta.label || position.instrument_type);
+
+  // Precio efectivo para mostrar en "Precio actual" y para calcular el Total.
+  // Prioridad: current_price (manual) > bondPrices (data912) > fallback null.
+  // OJO: para "Precio actual" la celda muestra null/—, pero en "Total"
+  // caemos a entry_price cuando no hay nada para no quedar en blanco.
+  const resolved = resolvePositionPrice(position, bondPrices);
+  const totalRes = positionValueAtMarket(position, bondPrices);
 
   return (
     <tr
@@ -3648,6 +3753,37 @@ function PositionRow({ position, onEdit, onDelete }) {
           {position.entry_price != null ? fmtNumber(position.entry_price, { maxDecimals: 4 }) : "—"}
         </span>
       </PTd>
+
+      {/* Precio actual: editable inline. Auto-pobla con data912 para bonos
+          si el user no override-eó manualmente. Para acciones, CEDEARs,
+          futuros, etc. arranca vacío y el user lo carga. */}
+      <PTd align="right">
+        <EditablePriceCell
+          position={position}
+          resolved={resolved}
+          onSave={onUpdatePrice}
+        />
+      </PTd>
+
+      {/* Total: cantidad × precio efectivo, ajustado por convención del
+          instrumento (cada 100 VN para bonos, ×1000 para futuros, etc.) */}
+      <PTd align="right">
+        {totalRes ? (
+          <div className="flex flex-col items-end" style={{ gap: 2 }}>
+            <span className="eco-mono" style={{ fontWeight: 500 }}>
+              {fmtNumber(totalRes.value, { maxDecimals: 2 })}
+            </span>
+            {totalRes.source === "cost" && (
+              <span style={{ fontSize: 9, color: C.dim, letterSpacing: "0.05em", textTransform: "uppercase" }}>
+                a costo
+              </span>
+            )}
+          </div>
+        ) : (
+          <span style={{ color: C.dim }}>—</span>
+        )}
+      </PTd>
+
       <PTd>
         <span style={{ fontSize: 11.5, color: C.muted }}>{position.entry_currency}</span>
       </PTd>
@@ -3708,6 +3844,203 @@ function PositionRow({ position, onEdit, onDelete }) {
         </div>
       </PTd>
     </tr>
+  );
+}
+
+
+/* ─────────────── EditablePriceCell ───────────────
+ *
+ * Celda de precio con edición inline. Muestra el precio efectivo de la
+ * posición con un badge de su fuente:
+ *
+ *   - 'manual':  precio cargado por el user (override del current_price).
+ *                Badge gris "manual" + lapicito visible.
+ *   - 'market':  precio actual de data912 (solo bonos / ONs).
+ *                Badge azul "data912" + lapicito visible (override permitido).
+ *   - 'cost':    no hay precio actualizado. Aparece como "—" + lapicito
+ *                con tooltip "Cargar precio actual".
+ *
+ * Click en el lápiz → input numérico inline + botones save / cancel.
+ * Enter guarda, Esc cancela. Si se guarda vacío, limpia el override
+ * (current_price = null) y vuelve a la fuente automática.
+ */
+
+function EditablePriceCell({ position, resolved, onSave }) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState("");
+  const [saving, setSaving] = useState(false);
+  const inputRef = useRef(null);
+
+  const startEdit = () => {
+    // Pre-poblamos el input con el precio actual (el que ve el user)
+    setDraft(resolved?.price != null ? String(resolved.price) : "");
+    setEditing(true);
+  };
+
+  useEffect(() => {
+    if (editing && inputRef.current) {
+      inputRef.current.focus();
+      inputRef.current.select();
+    }
+  }, [editing]);
+
+  const cancel = () => {
+    setEditing(false);
+    setDraft("");
+  };
+
+  const save = async () => {
+    if (saving) return;
+    setSaving(true);
+    try {
+      const trimmed = draft.trim();
+      // Vacío = limpiar override (current_price = null)
+      if (trimmed === "") {
+        await onSave(null);
+      } else {
+        const num = Number(trimmed.replace(",", "."));
+        if (!isFinite(num) || num <= 0) {
+          // Inválido: cancelamos sin guardar
+          cancel();
+          return;
+        }
+        await onSave(num);
+      }
+      setEditing(false);
+      setDraft("");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleKey = (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      save();
+    } else if (e.key === "Escape") {
+      e.preventDefault();
+      cancel();
+    }
+  };
+
+  if (editing) {
+    return (
+      <div className="flex items-center justify-end gap-1">
+        <input
+          ref={inputRef}
+          type="text"
+          inputMode="decimal"
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={handleKey}
+          disabled={saving}
+          placeholder="0,00"
+          style={{
+            width: 90,
+            backgroundColor: C.deep,
+            border: `1px solid ${C.accent}`,
+            color: C.text,
+            padding: "4px 8px",
+            fontSize: 12,
+            textAlign: "right",
+            fontFamily: "'JetBrains Mono', monospace",
+            outline: "none",
+          }}
+        />
+        <button
+          onClick={save}
+          disabled={saving}
+          aria-label="Guardar"
+          style={{
+            backgroundColor: "transparent",
+            border: "1px solid transparent",
+            color: C.green,
+            padding: 4,
+            cursor: saving ? "wait" : "pointer",
+          }}
+        >
+          <Check size={11} strokeWidth={2} />
+        </button>
+        <button
+          onClick={cancel}
+          disabled={saving}
+          aria-label="Cancelar"
+          style={{
+            backgroundColor: "transparent",
+            border: "1px solid transparent",
+            color: C.dim,
+            padding: 4,
+            cursor: "pointer",
+          }}
+        >
+          <X size={11} strokeWidth={2} />
+        </button>
+      </div>
+    );
+  }
+
+  // Modo display
+  const source = resolved?.source;
+  const sourceBadge =
+    source === "manual" ? { label: "manual", color: C.muted, bg: "rgba(246,247,246,0.06)" } :
+    source === "market" ? { label: "data912", color: C.accent, bg: C.accentSoft } :
+    null; // cost: no badge, solo "—"
+
+  return (
+    <div className="flex items-center justify-end gap-2">
+      {source === "cost" || resolved == null ? (
+        <span style={{ color: C.dim, fontSize: 12 }}>—</span>
+      ) : (
+        <div className="flex items-center gap-2">
+          <span className="eco-mono">
+            {fmtNumber(resolved.price, { maxDecimals: 4 })}
+          </span>
+          {sourceBadge && (
+            <span
+              style={{
+                fontSize: 9,
+                fontWeight: 500,
+                letterSpacing: "0.05em",
+                padding: "1px 5px",
+                borderRadius: 2,
+                color: sourceBadge.color,
+                backgroundColor: sourceBadge.bg,
+                textTransform: "uppercase",
+              }}
+            >
+              {sourceBadge.label}
+            </span>
+          )}
+        </div>
+      )}
+      <button
+        onClick={startEdit}
+        aria-label="Editar precio actual"
+        title={
+          source === "manual" ? "Editar precio manual" :
+          source === "market" ? "Override manual del precio" :
+          "Cargar precio actual"
+        }
+        style={{
+          backgroundColor: "transparent",
+          border: "1px solid transparent",
+          color: C.dim,
+          padding: 4,
+          cursor: "pointer",
+          transition: "all 100ms ease",
+        }}
+        onMouseEnter={(e) => {
+          e.currentTarget.style.color = C.accent;
+          e.currentTarget.style.borderColor = C.accentBorder;
+        }}
+        onMouseLeave={(e) => {
+          e.currentTarget.style.color = C.dim;
+          e.currentTarget.style.borderColor = "transparent";
+        }}
+      >
+        <Pencil size={10} strokeWidth={1.8} />
+      </button>
+    </div>
   );
 }
 
