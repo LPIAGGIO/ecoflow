@@ -2778,21 +2778,38 @@ function FlowsSection({ positions, bondPrices, fx }) {
   const upcomingMaturities = useMemo(() => {
     const now = new Date();
     const events = [];
-    for (const p of positions) {
-      const t = p.instrument_type;
-      const ticker = (p.ticker || "").toUpperCase();
-      // Para cada evento adjuntamos la posición original así calculamos
-      // el monto estimado al vencimiento usando precio actual o costo.
+
+    // Para evitar duplicados (ej: una compra y una venta del mismo
+    // futuro generaban DOS filas en Flujos antes), iteramos sobre el
+    // consolidado en lugar de las operaciones crudas.
+    const consolidated = consolidatePositions(positions, bondPrices);
+
+    for (const g of consolidated) {
+      // Saltamos posiciones cerradas (cantidad neta = 0): ya no hay
+      // flujo futuro sobre ellas, el P&L está realizado.
+      if (g.isClosed) continue;
+      // Las posiciones short de futuros tampoco generan flujo proyectado
+      // típico (es un derivado vendido).
+      if (g.netQty === 0) continue;
+
+      const t = g.instrument_type;
+      const ticker = (g.ticker || "").toUpperCase();
       let date = null;
       let typeLabel = null;
+
       if (t === "bond_ars" && BOND_REGISTRY[ticker]?.maturityDate) {
         date = BOND_REGISTRY[ticker].maturityDate;
         typeLabel = "Bono ARS";
-      } else if (t === "caucion" && p.entry_date && p.extra?.term_days) {
-        const start = new Date(p.entry_date);
-        date = new Date(start.getTime() + Number(p.extra.term_days) * 86400000)
-          .toISOString().slice(0, 10);
-        typeLabel = "Caución";
+      } else if (t === "caucion") {
+        // Cauciones son no-consolidables: usamos la operación específica.
+        // (groupKey incluye el id, así que cada caución sigue siendo única)
+        const op = g.operations[0];
+        if (op?.entry_date && op.extra?.term_days) {
+          const start = new Date(op.entry_date);
+          date = new Date(start.getTime() + Number(op.extra.term_days) * 86400000)
+            .toISOString().slice(0, 10);
+          typeLabel = "Caución";
+        }
       } else if (t === "future") {
         const contract = DLR_REGISTRY.find((c) => c.ticker === ticker);
         if (contract?.maturityDate) {
@@ -2809,26 +2826,25 @@ function FlowsSection({ positions, bondPrices, fx }) {
 
       // Para futuros, el "monto al vencimiento" no es predecible: depende
       // del precio final del subyacente. Mostramos "—" con una nota.
-      // Para todo lo demás, calculamos cantidad × precio efectivo.
+      // Para todo lo demás, calculamos cantidad neta × precio efectivo.
       let amount = null;
       let amountSource = null;
       let amountNote = null;
       if (t === "future") {
         amountNote = "se realiza al vto";
-      } else {
-        const m = positionValueAtMarket(p, bondPrices);
-        amount = m?.value ?? null;
-        amountSource = m?.source ?? null;
+      } else if (g.valueAtMarket != null) {
+        amount = g.valueAtMarket;
+        amountSource = g.priceSource;
       }
       events.push({
-        ticker: p.ticker || "—",
+        ticker: g.ticker || "—",
         type: typeLabel,
         date,
-        quantity: Number(p.quantity) || 0,
+        quantity: g.netQty,
         amount,
         amountSource,
         amountNote,
-        currency: p.entry_currency || "ARS",
+        currency: g.currency || "ARS",
       });
     }
     return events
@@ -3196,7 +3212,36 @@ function computePortfolioTotals(positions, fx, valuationCurrency, bondPrices) {
   let pricesFromMarket = 0; // posiciones con precio data912 / manual
   let pricesFromCost = 0;   // posiciones que cayeron al fallback
 
-  for (const p of positions) {
+  // Para futuros usamos la vista consolidada: solo así podemos calcular
+  // correctamente el P&L realizado de posiciones cerradas (compra + venta
+  // del mismo ticker). La función positionValueAtMarket a nivel individual
+  // no tiene visibilidad del grupo y subestimaría el P&L de cierres.
+  const futurePositions = positions.filter((p) => p.instrument_type === "future");
+  const nonFuturePositions = positions.filter((p) => p.instrument_type !== "future");
+
+  if (futurePositions.length > 0) {
+    const futureGroups = consolidatePositions(futurePositions, bondPrices);
+    for (const g of futureGroups) {
+      // El "valor de mercado" de un futuro consolidado es su P&L total
+      // (realizado + no realizado). El costo es 0.
+      if (g.pnl == null) continue;
+      const converted = convertValue(g.pnl, g.currency || "ARS", valuationCurrency, fx);
+      if (converted == null) {
+        unvalued++;
+        continue;
+      }
+      valuedAny = true;
+      totalMarket += converted;
+      // costo de futuros = 0, no suma a totalCost
+      if (g.priceSource === "market" || g.priceSource === "manual" || g.priceSource === "close") {
+        pricesFromMarket++;
+      } else {
+        pricesFromCost++;
+      }
+    }
+  }
+
+  for (const p of nonFuturePositions) {
     const marketRes = positionValueAtMarket(p, bondPrices);
     const cost = positionValueAtCost(p);
 
@@ -3434,6 +3479,9 @@ function consolidatePositions(positions, bondPrices) {
         totalBuyQty: 0,
         totalSellQty: 0,
         weightedBuyPriceNumerator: 0, // suma(qty × price) de compras
+        weightedSellPriceNumerator: 0, // suma(qty × price) de ventas
+        lastSellPrice: null, // precio de la última venta (por fecha)
+        lastSellDate: null,  // fecha de la última venta
         firstDate: p.entry_date,
         lastDate: p.entry_date,
         notesAggregated: [],
@@ -3448,6 +3496,18 @@ function consolidatePositions(positions, bondPrices) {
 
     if (p.operation_type === "sell") {
       g.totalSellQty += qty;
+      g.weightedSellPriceNumerator += qty * price;
+      // Guardamos el precio de la última venta cronológica para que en
+      // futuros con cierre (parcial o total) el "precio actual" se
+      // pueda autoupdate al precio del cierre — como un override manual
+      // implícito.
+      if (
+        price > 0 &&
+        (g.lastSellDate == null || (p.entry_date && p.entry_date >= g.lastSellDate))
+      ) {
+        g.lastSellPrice = price;
+        g.lastSellDate = p.entry_date;
+      }
     } else {
       // Default es compra (incluye cauciones colocadas)
       g.totalBuyQty += qty;
@@ -3466,6 +3526,19 @@ function consolidatePositions(positions, bondPrices) {
     const ppp = g.totalBuyQty > 0
       ? g.weightedBuyPriceNumerator / g.totalBuyQty
       : null;
+    const ppv = g.totalSellQty > 0
+      ? g.weightedSellPriceNumerator / g.totalSellQty
+      : null;
+
+    // Posición cerrada: la cantidad neta es exactamente 0 (compras y
+    // ventas se calzaron). Se separa de la consolidada principal en una
+    // sección "Posiciones cerradas" porque el PnL ya es realizado y no
+    // es información de cartera viva.
+    //
+    // Solo aplica a tipos donde "cerrada" tiene sentido (futuros, bonos,
+    // acciones). Para cauciones/opciones/FCI ya van separadas vía
+    // NO_CONSOLIDATE.
+    const isClosed = netQty === 0 && g.totalBuyQty > 0 && g.totalSellQty > 0;
 
     // Resolución de precio actual: usamos el resolvePositionPrice de
     // cualquier operación del grupo (todas comparten ticker), pero
@@ -3482,7 +3555,21 @@ function consolidatePositions(positions, bondPrices) {
 
     let currentPrice = null;
     let priceSource = "cost";
-    if (manualOverride != null) {
+
+    // CASO ESPECIAL — Futuros con ventas (cierre total o parcial):
+    // El "precio actual" se autoupdate al precio de la última venta.
+    // Esto refleja el modelo donde cerrar una posición de futuro fija
+    // el precio efectivo al que saliste, y el P&L queda calculado contra
+    // ese precio. Tiene prioridad sobre el override manual? NO — si el
+    // user explícitamente cargó un precio manual, eso gana.
+    if (
+      g.instrument_type === "future" &&
+      g.lastSellPrice != null &&
+      manualOverride == null
+    ) {
+      currentPrice = g.lastSellPrice;
+      priceSource = "close"; // nueva fuente para badge "CIERRE"
+    } else if (manualOverride != null) {
       currentPrice = manualOverride;
       priceSource = "manual";
     } else if (
@@ -3514,26 +3601,52 @@ function consolidatePositions(positions, bondPrices) {
     let pnl = null;
     let pnlPct = null;
     let notional = null;
+    let realizedPnl = null;     // P&L realizado por ventas/cierres
+    let unrealizedPnl = null;   // P&L mark-to-market sobre la posición abierta
 
     if (g.instrument_type === "future") {
       const mult = FUTURE_MULTIPLIER_DEFAULT;
-      // Notional: exposición nominal usando precio actual o PPP de fallback
-      if (currentPrice != null) {
-        notional = Math.abs(netQty) * mult * currentPrice;
-      }
-      // P&L mark-to-market: si todavía no tenemos precio actual distinto al
-      // costo (priceSource === "cost"), el P&L es 0.
-      if (currentPrice != null && ppp != null && priceSource !== "cost") {
-        pnl = netQty * mult * (currentPrice - ppp);
+
+      // P&L REALIZADO (de ventas/cierres):
+      // = qty_vendida × mult × (PPV − PPP)
+      // Es lo que efectivamente ganaste/perdiste al cerrar contratos
+      // contra el precio promedio de compra. Aplica tanto a cierres
+      // totales (qty neta = 0) como parciales.
+      if (g.totalSellQty > 0 && ppp != null && ppv != null) {
+        realizedPnl = g.totalSellQty * mult * (ppv - ppp);
       } else {
-        pnl = 0;
+        realizedPnl = 0;
       }
+
+      // P&L NO REALIZADO (mark-to-market sobre la posición abierta):
+      // = netQty × mult × (precio_actual − PPP)
+      // Si netQty = 0 (cerrada), no hay nada abierto → 0.
+      if (netQty !== 0 && currentPrice != null && ppp != null && priceSource !== "cost") {
+        unrealizedPnl = netQty * mult * (currentPrice - ppp);
+      } else {
+        unrealizedPnl = 0;
+      }
+
+      pnl = realizedPnl + unrealizedPnl;
+
+      // Notional: solo aplica si hay posición abierta. Para cerradas = 0.
+      if (netQty !== 0 && currentPrice != null) {
+        notional = Math.abs(netQty) * mult * currentPrice;
+      } else {
+        notional = 0;
+      }
+
       valueAtMarket = pnl; // el "valor de cartera" del futuro ES el P&L
       valueAtCost = 0;
-      // P&L % de un futuro lo computamos sobre el notional (es el patrón
-      // estándar; tener 1% de movimiento sobre 1M de notional = 10k de PnL).
+
+      // P&L % de un futuro:
+      //   - posición abierta: sobre el notional actual.
+      //   - cerrada: sobre lo que era el notional cuando la abriste (PPP × qty_total).
       if (notional && notional > 0) {
         pnlPct = (pnl / notional) * 100;
+      } else if (isClosed && ppp != null && g.totalBuyQty > 0) {
+        const initialNotional = g.totalBuyQty * mult * ppp;
+        if (initialNotional > 0) pnlPct = (pnl / initialNotional) * 100;
       }
     } else {
       valueAtMarket = currentPrice != null
@@ -3561,14 +3674,18 @@ function consolidatePositions(positions, bondPrices) {
       sellOpsCount: g.operations.filter((o) => o.operation_type === "sell").length,
       netQty,
       isShort: netQty < 0,
+      isClosed,
       ppp,
+      ppv,
       currentPrice,
       priceSource,
       valueAtMarket,
       valueAtCost,
       pnl,
       pnlPct,
-      notional, // null para todo lo que no sea futuro
+      realizedPnl,
+      unrealizedPnl,
+      notional,
       firstDate: g.firstDate,
       lastDate: g.lastDate,
       notesAggregated: g.notesAggregated,
@@ -3973,10 +4090,16 @@ function ConsolidatedSection({
   onDelete,
   onUpdatePrice,
 }) {
-  const consolidated = useMemo(
+  // Consolidamos sobre TODAS las positions filtradas (incluyendo cerradas).
+  // Después separamos en `open` y `closed` para que cada una vaya a su
+  // propia sección.
+  const allConsolidated = useMemo(
     () => consolidatePositions(filteredPositions, bondPrices),
     [filteredPositions, bondPrices]
   );
+
+  const open = allConsolidated.filter((g) => !g.isClosed);
+  const closed = allConsolidated.filter((g) => g.isClosed);
 
   return (
     <div style={{ marginBottom: 24 }}>
@@ -3988,7 +4111,7 @@ function ConsolidatedSection({
           textTransform: "uppercase",
           fontWeight: 600,
         }}>
-          Posiciones consolidadas ({consolidated.length})
+          Posiciones consolidadas ({open.length})
         </span>
       </div>
 
@@ -4020,7 +4143,7 @@ function ConsolidatedSection({
         })}
       </div>
 
-      {consolidated.length === 0 ? (
+      {open.length === 0 ? (
         <div
           style={{
             backgroundColor: C.panel,
@@ -4031,15 +4154,108 @@ function ConsolidatedSection({
             color: C.dim,
           }}
         >
-          No hay posiciones consolidadas en este filtro
+          No hay posiciones abiertas en este filtro
         </div>
       ) : (
         <ConsolidatedTable
-          consolidated={consolidated}
+          consolidated={open}
           onEdit={onEdit}
           onDelete={onDelete}
           onUpdatePrice={onUpdatePrice}
         />
+      )}
+
+      {/* Sección de posiciones cerradas (colapsable) */}
+      {closed.length > 0 && (
+        <ClosedPositionsSection
+          closed={closed}
+          onEdit={onEdit}
+          onDelete={onDelete}
+          onUpdatePrice={onUpdatePrice}
+        />
+      )}
+    </div>
+  );
+}
+
+
+/* ─────────────── ClosedPositionsSection ───────────────
+ *
+ * Sección colapsable con las posiciones que ya cerraste (cantidad neta
+ * = 0). Útil para ver el P&L realizado de tus trades cerrados sin que
+ * ensucien la consolidada principal.
+ *
+ * El P&L acá ya es REALIZADO (efectivo en tu comitente, no mark-to-market).
+ */
+
+function ClosedPositionsSection({ closed, onEdit, onDelete, onUpdatePrice }) {
+  const [open, setOpen] = useState(false);
+
+  // Sumamos el P&L total de las cerradas para mostrarlo en el header
+  const totalRealizedPnl = closed.reduce(
+    (acc, g) => acc + (g.pnl || 0),
+    0
+  );
+
+  return (
+    <div style={{ marginTop: 16 }}>
+      <button
+        onClick={() => setOpen((v) => !v)}
+        style={{
+          width: "100%",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          backgroundColor: C.panel,
+          border: `1px solid ${C.border}`,
+          padding: "10px 14px",
+          cursor: "pointer",
+          textAlign: "left",
+          fontFamily: "'Roboto', sans-serif",
+        }}
+      >
+        <div className="flex items-center gap-2">
+          {open
+            ? <ChevronDown size={13} strokeWidth={1.8} color={C.dim} />
+            : <ChevronRight size={13} strokeWidth={1.8} color={C.dim} />}
+          <span style={{
+            fontSize: 9,
+            letterSpacing: "0.22em",
+            color: C.dim,
+            textTransform: "uppercase",
+            fontWeight: 600,
+          }}>
+            Posiciones cerradas ({closed.length})
+          </span>
+          <span
+            className="eco-mono"
+            style={{
+              fontSize: 10.5,
+              fontWeight: 600,
+              color: totalRealizedPnl >= 0 ? C.green : C.red,
+              marginLeft: 12,
+            }}
+          >
+            {totalRealizedPnl >= 0 ? "+" : ""}{fmtNumber(totalRealizedPnl, { maxDecimals: 2 })}
+          </span>
+          <span style={{ fontSize: 9, color: C.dim, letterSpacing: "0.05em", textTransform: "uppercase" }}>
+            P&L realizado
+          </span>
+        </div>
+        <span style={{ fontSize: 10, color: C.dim }}>
+          {open ? "Click para ocultar" : "Click para ver"}
+        </span>
+      </button>
+
+      {open && (
+        <div style={{ marginTop: 0 }}>
+          <ConsolidatedTable
+            consolidated={closed}
+            onEdit={onEdit}
+            onDelete={onDelete}
+            onUpdatePrice={onUpdatePrice}
+          />
+        </div>
       )}
     </div>
   );
@@ -4390,8 +4606,9 @@ function ConsolidatedRow({ group, expanded, onToggle, onEdit, onDelete, onUpdate
                 <thead>
                   <tr>
                     <th style={{ ...subThStyle("left"), width: 90 }}>Op.</th>
-                    <th style={{ ...subThStyle("right"), width: 160 }}>Cantidad</th>
-                    <th style={{ ...subThStyle("right"), width: 140 }}>Precio compra</th>
+                    <th style={{ ...subThStyle("right"), width: 140 }}>Cantidad</th>
+                    <th style={{ ...subThStyle("right"), width: 130 }}>Precio compra</th>
+                    <th style={{ ...subThStyle("right"), width: 130 }}>Precio venta</th>
                     <th style={{ ...subThStyle("right"), width: 130 }}>Fecha</th>
                     <th style={subThStyle("left")}>Notas</th>
                     <th style={{ ...subThStyle("right"), width: 80 }}>{""}</th>
@@ -4400,6 +4617,12 @@ function ConsolidatedRow({ group, expanded, onToggle, onEdit, onDelete, onUpdate
                 <tbody>
                   {group.operations.map((p) => {
                     const isSell = p.operation_type === "sell";
+                    // Cantidad firmada: ventas en negativo para reflejar que
+                    // restan de la posición. La magnitud absoluta sigue siendo
+                    // el valor cargado (p.quantity es siempre positivo en BD).
+                    const signedQty = isSell
+                      ? -Math.abs(Number(p.quantity) || 0)
+                      : Math.abs(Number(p.quantity) || 0);
                     return (
                       <tr key={p.id} style={{ borderBottom: `1px solid ${C.border}` }}>
                         <td style={subTdStyle("left")}>
@@ -4419,13 +4642,28 @@ function ConsolidatedRow({ group, expanded, onToggle, onEdit, onDelete, onUpdate
                           </span>
                         </td>
                         <td style={subTdStyle("right")}>
-                          <span className="eco-mono" style={{ fontSize: 11.5 }}>
-                            {fmtNumber(p.quantity, { maxDecimals: 8 })}
+                          <span
+                            className="eco-mono"
+                            style={{
+                              fontSize: 11.5,
+                              color: isSell ? C.red : C.text,
+                            }}
+                          >
+                            {fmtNumber(signedQty, { maxDecimals: 8 })}
                           </span>
                         </td>
                         <td style={subTdStyle("right")}>
                           <span className="eco-mono" style={{ fontSize: 11.5 }}>
-                            {p.entry_price != null ? fmtNumber(p.entry_price, { maxDecimals: 4 }) : "—"}
+                            {!isSell && p.entry_price != null
+                              ? fmtNumber(p.entry_price, { maxDecimals: 4 })
+                              : <span style={{ color: C.dim }}>—</span>}
+                          </span>
+                        </td>
+                        <td style={subTdStyle("right")}>
+                          <span className="eco-mono" style={{ fontSize: 11.5 }}>
+                            {isSell && p.entry_price != null
+                              ? fmtNumber(p.entry_price, { maxDecimals: 4 })
+                              : <span style={{ color: C.dim }}>—</span>}
                           </span>
                         </td>
                         <td style={subTdStyle("right")}>
@@ -4548,6 +4786,7 @@ function PositionsTable({ positions, bondPrices, onEdit, onDelete, onUpdatePrice
               <PTh>Ticker</PTh>
               <PTh align="right">Cantidad</PTh>
               <PTh align="right">Precio compra</PTh>
+              <PTh align="right">Precio venta</PTh>
               <PTh align="right">Precio actual</PTh>
               <PTh align="right">Total</PTh>
               <PTh>Moneda</PTh>
@@ -4670,11 +4909,32 @@ function PositionRow({ position, bondPrices, onEdit, onDelete, onUpdatePrice }) 
         </span>
       </PTd>
       <PTd align="right">
-        <span className="eco-mono">{fmtNumber(position.quantity, { maxDecimals: 8 })}</span>
+        <span
+          className="eco-mono"
+          style={{ color: isSell ? C.red : C.text }}
+        >
+          {fmtNumber(
+            isSell
+              ? -Math.abs(Number(position.quantity) || 0)
+              : Math.abs(Number(position.quantity) || 0),
+            { maxDecimals: 8 }
+          )}
+        </span>
       </PTd>
+      {/* Precio compra: solo poblada si la operación es de compra. */}
       <PTd align="right">
         <span className="eco-mono">
-          {position.entry_price != null ? fmtNumber(position.entry_price, { maxDecimals: 4 }) : "—"}
+          {!isSell && position.entry_price != null
+            ? fmtNumber(position.entry_price, { maxDecimals: 4 })
+            : <span style={{ color: C.dim }}>—</span>}
+        </span>
+      </PTd>
+      {/* Precio venta: solo poblada si la operación es de venta. */}
+      <PTd align="right">
+        <span className="eco-mono">
+          {isSell && position.entry_price != null
+            ? fmtNumber(position.entry_price, { maxDecimals: 4 })
+            : <span style={{ color: C.dim }}>—</span>}
         </span>
       </PTd>
 
@@ -4908,6 +5168,7 @@ function EditablePriceCell({ position, resolved, onSave }) {
   const sourceBadge =
     source === "manual" ? { label: "manual", color: C.muted, bg: "rgba(246,247,246,0.06)" } :
     source === "market" ? { label: "data912", color: C.accent, bg: C.accentSoft } :
+    source === "close"  ? { label: "cierre", color: C.green, bg: "rgba(74,222,128,0.10)" } :
     null; // cost: no badge, solo "—"
 
   return (
