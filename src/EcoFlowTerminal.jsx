@@ -1842,9 +1842,19 @@ function useDashboardFx() {
   useEffect(() => {
     let mounted = true;
     setError(null);
+
+    // Cuando es un refresh manual (refreshKey > 0), forzamos el spinner
+    // así el user ve feedback aunque la respuesta sea instantánea por cache.
+    if (refreshKey > 0) setLoading(true);
+
     (async () => {
       try {
-        const r = await fetch("/api/dolares");
+        // Cache buster en refresh manual: agrega ?t=timestamp para que el CDN
+        // de Vercel revalide contra dolarapi. En refresh inicial no hace falta.
+        const url = refreshKey > 0
+          ? `/api/dolares?t=${Date.now()}`
+          : "/api/dolares";
+        const r = await fetch(url, refreshKey > 0 ? { cache: "no-store" } : undefined);
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         const arr = await r.json();
         if (!Array.isArray(arr)) throw new Error("Respuesta inválida");
@@ -1971,11 +1981,18 @@ function useBondPrices() {
     }
 
     setError(null);
+    // Refresh manual: forzamos spinner para feedback visual aunque la
+    // respuesta sea instantánea.
+    if (refreshKey > 0) setLoading(true);
+
     (async () => {
       try {
+        // Cache buster en refresh manual para forzar revalidación CDN
+        const bust = refreshKey > 0 ? `?t=${Date.now()}` : "";
+        const fetchOpts = refreshKey > 0 ? { cache: "no-store" } : undefined;
         const [bondsRes, letrasRes] = await Promise.all([
-          fetch("/api/bonos"),
-          fetch("/api/letras"),
+          fetch(`/api/bonos${bust}`, fetchOpts),
+          fetch(`/api/letras${bust}`, fetchOpts),
         ]);
 
         const bondsArr = bondsRes.ok ? await bondsRes.json() : [];
@@ -2697,8 +2714,9 @@ function LiquidityCard({ positions, fx, bondPrices, valuationCurrency, window: w
         <span style={cardTitleStyle()}>Liquidez proyectada</span>
         <div className="flex" style={{ backgroundColor: C.deep, border: `1px solid ${C.border}`, padding: 2 }}>
           {[
-            { key: "30d", label: "30 días" },
-            { key: "90d", label: "90 días" },
+            { key: "30d", label: "30d" },
+            { key: "60d", label: "60d" },
+            { key: "90d", label: "90d" },
           ].map((opt) => {
             const active = windowKey === opt.key;
             return (
@@ -3199,7 +3217,7 @@ function prettifyGroupKey(key, view) {
  * Suma vencimientos en la ventana elegida y devuelve el total por moneda.
  */
 function computeLiquidityBreakdown(positions, fx, valuationCurrency, windowKey, bondPrices) {
-  const days = windowKey === "30d" ? 30 : 90;
+  const days = windowKey === "30d" ? 30 : windowKey === "60d" ? 60 : 90;
   const now = new Date();
   const cutoff = new Date(now.getTime() + days * 86400000);
 
