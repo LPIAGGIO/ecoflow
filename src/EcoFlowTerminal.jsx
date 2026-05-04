@@ -3149,6 +3149,7 @@ function computePortfolioTotals(positions, fx, valuationCurrency, bondPrices) {
   };
 }
 
+
 function groupByCategory(positions, fx, valuationCurrency, bondPrices) {
   const result = {};
   for (const p of positions) {
@@ -3259,6 +3260,215 @@ function getPositionMaturity(p) {
     return p.extra.expiry;
   }
   return null;
+}
+
+
+/* ─────────────── consolidatePositions ───────────────
+ *
+ * Agrupa las operaciones individuales por (ticker × moneda) y calcula
+ * la "posición consolidada" del usuario sobre cada par.
+ *
+ * Esto es la vista que ven los brokers en su pantalla "Cartera": cuántos
+ * VN tenés netos de cada bono, cuánto capital invertiste, cuánto vale
+ * hoy y cuánto P&L generás.
+ *
+ * Reglas:
+ *   - **Cantidad neta** = suma(compras) - suma(ventas).
+ *   - **PPP (precio promedio ponderado)** = suma(qty_compra × precio_compra)
+ *     dividido por suma(qty_compra). Solo de las compras: las ventas no
+ *     mueven el PPP (Modelo "Cocos/Balanz", FIFO simplificado).
+ *   - **Valor a mercado** = qty_neta × precio_actual (con la convención
+ *     habitual del instrumento: /100 para bonos, ×1000 para futuros).
+ *   - **Costo neto** = qty_neta × PPP (también con la convención del
+ *     instrumento). Si hay short (qty_neta < 0), el costo es negativo y
+ *     el P&L se interpreta al revés.
+ *   - **P&L** = valor a mercado - costo neto.
+ *   - **P&L %** = P&L / |costo neto| × 100.
+ *
+ * Identificadores:
+ *   - groupKey = `${instrument_type}|${ticker}|${entry_currency}` —
+ *     idéntico ticker en distintas monedas (ej. AL30D vs AL30C) son
+ *     posiciones DIFERENTES porque son bonos distintos en BYMA.
+ *
+ * Cauciones, opciones y FCI: cada operación queda como su propio grupo
+ * (consolidar cauciones de distinto plazo o tasa no tiene sentido).
+ *
+ * @param {Array} positions  Filas de la tabla `positions` (Modelo A)
+ * @param {Object} bondPrices  Mapa ticker → { price } de useBondPrices
+ * @returns {Array} grupos consolidados, ordenados por valor de mercado desc
+ */
+function consolidatePositions(positions, bondPrices) {
+  if (!positions?.length) return [];
+
+  // Tipos donde NO consolidamos: cada operación queda individual.
+  // Son instrumentos donde el "ticker" no identifica unívocamente un
+  // activo fungible (ej. distintas cauciones a distinto plazo).
+  const NO_CONSOLIDATE = new Set(["caucion", "option", "fci"]);
+
+  const groups = new Map();
+
+  for (const p of positions) {
+    const ticker = (p.ticker || "").trim().toUpperCase();
+    const cur = p.entry_currency || "ARS";
+    const t = p.instrument_type;
+
+    // Si es no-consolidable, le damos un groupKey único por id
+    const groupKey = NO_CONSOLIDATE.has(t)
+      ? `${t}|${ticker}|${cur}|${p.id}`
+      : `${t}|${ticker}|${cur}`;
+
+    if (!groups.has(groupKey)) {
+      groups.set(groupKey, {
+        groupKey,
+        instrument_type: t,
+        ticker,
+        currency: cur,
+        operations: [],
+        totalBuyQty: 0,
+        totalSellQty: 0,
+        weightedBuyPriceNumerator: 0, // suma(qty × price) de compras
+        firstDate: p.entry_date,
+        lastDate: p.entry_date,
+        notesAggregated: [],
+      });
+    }
+
+    const g = groups.get(groupKey);
+    g.operations.push(p);
+
+    const qty = Number(p.quantity) || 0;
+    const price = Number(p.entry_price) || 0;
+
+    if (p.operation_type === "sell") {
+      g.totalSellQty += qty;
+    } else {
+      // Default es compra (incluye cauciones colocadas)
+      g.totalBuyQty += qty;
+      g.weightedBuyPriceNumerator += qty * price;
+    }
+
+    if (p.entry_date && p.entry_date < g.firstDate) g.firstDate = p.entry_date;
+    if (p.entry_date && p.entry_date > g.lastDate) g.lastDate = p.entry_date;
+    if (p.notes && p.notes.trim()) g.notesAggregated.push(p.notes);
+  }
+
+  // Calcular métricas finales para cada grupo
+  const result = [];
+  for (const g of groups.values()) {
+    const netQty = g.totalBuyQty - g.totalSellQty;
+    const ppp = g.totalBuyQty > 0
+      ? g.weightedBuyPriceNumerator / g.totalBuyQty
+      : null;
+
+    // Resolución de precio actual: usamos el resolvePositionPrice de
+    // cualquier operación del grupo (todas comparten ticker), pero
+    // reemplazamos quantity por la neta y entry_price por el PPP para
+    // que "current_price manual" del modelo individual no se pierda
+    // a nivel grupo.
+    //
+    // Estrategia simple: si CUALQUIERA de las operaciones del grupo
+    // tiene current_price seteado manualmente, lo usamos (último gana).
+    let manualOverride = null;
+    for (const op of g.operations) {
+      if (op.current_price != null) manualOverride = Number(op.current_price);
+    }
+
+    let currentPrice = null;
+    let priceSource = "cost";
+    if (manualOverride != null) {
+      currentPrice = manualOverride;
+      priceSource = "manual";
+    } else if (
+      bondPrices &&
+      ticker_isBondLike(g.instrument_type) &&
+      bondPrices[g.ticker]?.price > 0
+    ) {
+      currentPrice = bondPrices[g.ticker].price;
+      priceSource = "market";
+    } else if (ppp != null) {
+      currentPrice = ppp;
+      priceSource = "cost";
+    }
+
+    // Valuación con la convención del instrumento (cada 100 VN para bonos,
+    // ×1000 para futuros, ×100 para opciones, ×1 para el resto).
+    const valueAtMarket = currentPrice != null
+      ? applyConventionToValue(g.instrument_type, netQty, currentPrice)
+      : null;
+    const valueAtCost = ppp != null
+      ? applyConventionToValue(g.instrument_type, netQty, ppp)
+      : null;
+
+    let pnl = null;
+    let pnlPct = null;
+    if (valueAtMarket != null && valueAtCost != null) {
+      pnl = valueAtMarket - valueAtCost;
+      pnlPct = Math.abs(valueAtCost) > 0
+        ? (pnl / Math.abs(valueAtCost)) * 100
+        : null;
+    }
+
+    result.push({
+      groupKey: g.groupKey,
+      instrument_type: g.instrument_type,
+      ticker: g.ticker,
+      currency: g.currency,
+      operations: g.operations,
+      operationsCount: g.operations.length,
+      buyOpsCount: g.operations.filter((o) => o.operation_type !== "sell").length,
+      sellOpsCount: g.operations.filter((o) => o.operation_type === "sell").length,
+      netQty,
+      isShort: netQty < 0,
+      ppp,
+      currentPrice,
+      priceSource,
+      valueAtMarket,
+      valueAtCost,
+      pnl,
+      pnlPct,
+      firstDate: g.firstDate,
+      lastDate: g.lastDate,
+      notesAggregated: g.notesAggregated,
+    });
+  }
+
+  // Sort: posiciones con valor de mercado mayor primero. Las sin valor
+  // (cauciones sin liquidar, opciones sin precio) van al final.
+  result.sort((a, b) => {
+    const av = a.valueAtMarket ?? -Infinity;
+    const bv = b.valueAtMarket ?? -Infinity;
+    return Math.abs(bv) - Math.abs(av);
+  });
+
+  return result;
+}
+
+function ticker_isBondLike(instrumentType) {
+  return (
+    instrumentType === "bond_ars" ||
+    instrumentType === "bond_usd" ||
+    instrumentType === "on"
+  );
+}
+
+function applyConventionToValue(instrumentType, qty, price) {
+  // Bonos / ONs: precio cada 100 VN
+  if (
+    instrumentType === "bond_ars" ||
+    instrumentType === "bond_usd" ||
+    instrumentType === "on"
+  ) {
+    return (qty * price) / 100;
+  }
+  // Futuros: contrato * 1000 (multiplicador típico DLR)
+  if (instrumentType === "future") {
+    return qty * 1000 * price;
+  }
+  // Opciones: contrato * 100 * prima
+  if (instrumentType === "option") {
+    return qty * 100 * price;
+  }
+  return qty * price;
 }
 
 
@@ -3467,41 +3677,23 @@ function PortfolioDashboard() {
             bondPricesState={bondPricesState}
           />
 
-          {/* Tabla de posiciones (heredada del Sub-paso 2) */}
-          <div style={{ marginBottom: 8, fontSize: 9, letterSpacing: "0.22em", color: C.dim, textTransform: "uppercase", fontWeight: 600 }}>
-            Posiciones cargadas
-          </div>
+          {/* Vista consolidada (Modelo B): agrupa por ticker × moneda × tipo */}
+          <ConsolidatedSection
+            positions={positions}
+            filteredPositions={filteredPositions}
+            bondPrices={bondPricesState.prices}
+            filter={filter}
+            setFilter={setFilter}
+            presentTypes={presentTypes}
+            onEdit={openEdit}
+            onDelete={(p) => setConfirmingDelete(p)}
+            onUpdatePrice={handleUpdateCurrentPrice}
+          />
 
-          {/* Filtros (chips por tipo) */}
-          <div className="flex items-center gap-2 flex-wrap" style={{ marginBottom: 16 }}>
-            <FilterChip
-              active={filter === "all"}
-              onClick={() => setFilter("all")}
-              label={`Todas (${positions.length})`}
-            />
-            {presentTypes.map((type) => {
-              const meta = INSTRUMENT_TYPES[type];
-              if (!meta) return null;
-              const count =
-                type === "bond"
-                  ? positions.filter(
-                      (p) => p.instrument_type === "bond_ars" || p.instrument_type === "bond_usd"
-                    ).length
-                  : positions.filter((p) => p.instrument_type === type).length;
-              return (
-                <FilterChip
-                  key={type}
-                  active={filter === type}
-                  onClick={() => setFilter(type)}
-                  label={`${meta.label} (${count})`}
-                  color={meta.color}
-                />
-              );
-            })}
-          </div>
-
-          {/* Tabla de posiciones */}
-          <PositionsTable
+          {/* Historial de operaciones (Modelo A): lista cruda de cada
+              compra/venta. Va colapsado por default — el usuario lo abre
+              cuando necesita auditar movimientos. */}
+          <OperationsHistorySection
             positions={filteredPositions}
             bondPrices={bondPricesState.prices}
             onEdit={openEdit}
@@ -3619,6 +3811,552 @@ function FilterChip({ active, onClick, label, color }) {
     >
       {label}
     </button>
+  );
+}
+
+
+/* ─────────────── ConsolidatedSection ───────────────
+ * 
+ * Wrapper de la vista consolidada con su cabecera, filtros y tabla.
+ */
+function ConsolidatedSection({
+  positions,
+  filteredPositions,
+  bondPrices,
+  filter,
+  setFilter,
+  presentTypes,
+  onEdit,
+  onDelete,
+  onUpdatePrice,
+}) {
+  const consolidated = useMemo(
+    () => consolidatePositions(filteredPositions, bondPrices),
+    [filteredPositions, bondPrices]
+  );
+
+  return (
+    <div style={{ marginBottom: 24 }}>
+      <div className="flex items-center justify-between" style={{ marginBottom: 8 }}>
+        <span style={{
+          fontSize: 9,
+          letterSpacing: "0.22em",
+          color: C.dim,
+          textTransform: "uppercase",
+          fontWeight: 600,
+        }}>
+          Posiciones consolidadas ({consolidated.length})
+        </span>
+      </div>
+
+      {/* Filtros (chips por tipo) */}
+      <div className="flex items-center gap-2 flex-wrap" style={{ marginBottom: 12 }}>
+        <FilterChip
+          active={filter === "all"}
+          onClick={() => setFilter("all")}
+          label={`Todas (${positions.length})`}
+        />
+        {presentTypes.map((type) => {
+          const meta = INSTRUMENT_TYPES[type];
+          if (!meta) return null;
+          const count =
+            type === "bond"
+              ? positions.filter(
+                  (p) => p.instrument_type === "bond_ars" || p.instrument_type === "bond_usd"
+                ).length
+              : positions.filter((p) => p.instrument_type === type).length;
+          return (
+            <FilterChip
+              key={type}
+              active={filter === type}
+              onClick={() => setFilter(type)}
+              label={`${meta.label} (${count})`}
+              color={meta.color}
+            />
+          );
+        })}
+      </div>
+
+      {consolidated.length === 0 ? (
+        <div
+          style={{
+            backgroundColor: C.panel,
+            border: `1px solid ${C.border}`,
+            padding: "20px",
+            textAlign: "center",
+            fontSize: 12,
+            color: C.dim,
+          }}
+        >
+          No hay posiciones consolidadas en este filtro
+        </div>
+      ) : (
+        <ConsolidatedTable
+          consolidated={consolidated}
+          onEdit={onEdit}
+          onDelete={onDelete}
+          onUpdatePrice={onUpdatePrice}
+        />
+      )}
+    </div>
+  );
+}
+
+
+/* ─────────────── OperationsHistorySection ───────────────
+ *
+ * Sección colapsable que muestra el listado plano de operaciones
+ * individuales (Modelo A — auditoría / movimientos). Por default está
+ * colapsada — el usuario la abre cuando necesita ver detalle de cada
+ * compra/venta.
+ */
+function OperationsHistorySection({ positions, bondPrices, onEdit, onDelete, onUpdatePrice }) {
+  const [open, setOpen] = useState(false);
+
+  return (
+    <div style={{ marginBottom: 24 }}>
+      <button
+        onClick={() => setOpen((v) => !v)}
+        style={{
+          width: "100%",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          backgroundColor: C.panel,
+          border: `1px solid ${C.border}`,
+          padding: "10px 14px",
+          cursor: "pointer",
+          fontFamily: "'Roboto', sans-serif",
+          marginBottom: open ? 0 : 0,
+          borderBottom: open ? "none" : `1px solid ${C.border}`,
+          transition: "background-color 100ms ease",
+        }}
+      >
+        <div className="flex items-center gap-2">
+          {open
+            ? <ChevronDown size={13} strokeWidth={1.8} color={C.muted} />
+            : <ChevronRight size={13} strokeWidth={1.8} color={C.muted} />}
+          <span style={{
+            fontSize: 9,
+            letterSpacing: "0.22em",
+            color: open ? C.text : C.muted,
+            textTransform: "uppercase",
+            fontWeight: 600,
+          }}>
+            Historial de operaciones ({positions.length})
+          </span>
+        </div>
+        <span style={{ fontSize: 10, color: C.dim }}>
+          {open ? "Click para ocultar" : "Click para ver detalle"}
+        </span>
+      </button>
+
+      {open && (
+        <PositionsTable
+          positions={positions}
+          bondPrices={bondPrices}
+          onEdit={onEdit}
+          onDelete={onDelete}
+          onUpdatePrice={onUpdatePrice}
+        />
+      )}
+    </div>
+  );
+}
+
+
+/* ─────────────── ConsolidatedTable (Modelo B) ───────────────
+ *
+ * Vista "cartera": agrupa operaciones por ticker × moneda × tipo.
+ * Cada fila muestra cantidad neta, PPP, precio actual, P&L y total.
+ * Cada fila es expandible para mostrar las operaciones individuales
+ * que conforman ese consolidado (estilo Cocos/Balanz).
+ *
+ * Recibe el array `consolidated` ya calculado por consolidatePositions().
+ * Las acciones (editar, borrar, cambiar precio) operan sobre las ops
+ * individuales y delegan al callback del padre.
+ */
+function ConsolidatedTable({ consolidated, onEdit, onDelete, onUpdatePrice }) {
+  const [expanded, setExpanded] = useState(new Set());
+
+  const toggle = (key) => {
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  };
+
+  return (
+    <div
+      style={{
+        backgroundColor: C.panel,
+        border: `1px solid ${C.border}`,
+        overflow: "hidden",
+      }}
+    >
+      <div style={{ overflowX: "auto" }}>
+        <table style={{ width: "100%", borderCollapse: "collapse", fontFamily: "'Roboto', sans-serif" }}>
+          <thead>
+            <tr style={{ borderBottom: `1px solid ${C.border}` }}>
+              <PTh style={{ width: 28 }}>{""}</PTh>
+              <PTh>Tipo</PTh>
+              <PTh>Ticker</PTh>
+              <PTh align="right">Cantidad neta</PTh>
+              <PTh align="right">PPP</PTh>
+              <PTh align="right">Precio actual</PTh>
+              <PTh align="right">P&amp;L</PTh>
+              <PTh align="right">Total</PTh>
+              <PTh>Moneda</PTh>
+              <PTh align="right">Ops</PTh>
+            </tr>
+          </thead>
+          <tbody>
+            {consolidated.map((g) => (
+              <ConsolidatedRow
+                key={g.groupKey}
+                group={g}
+                expanded={expanded.has(g.groupKey)}
+                onToggle={() => toggle(g.groupKey)}
+                onEdit={onEdit}
+                onDelete={onDelete}
+                onUpdatePrice={onUpdatePrice}
+              />
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+
+function ConsolidatedRow({ group, expanded, onToggle, onEdit, onDelete, onUpdatePrice }) {
+  const meta = INSTRUMENT_TYPES[group.instrument_type] || {};
+  const TypeIcon = meta.icon || Activity;
+  const typeColor = meta.color ? C.cat[meta.color] : C.muted;
+
+  const displayLabel =
+    group.instrument_type === "bond_ars" || group.instrument_type === "bond_usd"
+      ? "Bono"
+      : (meta.label || group.instrument_type);
+
+  const pnlColor = group.pnl == null ? C.dim : group.pnl >= 0 ? C.green : C.red;
+  const pnlSign = group.pnl == null ? "" : group.pnl >= 0 ? "+" : "";
+
+  // Para la celda de precio editable: como el grupo puede tener varias
+  // operaciones, anclamos el current_price a la operación más reciente
+  // (o la primera si no hay manual). Cuando el user guarda, se actualiza
+  // ese current_price en esa op específica.
+  const opWithManualPrice = group.operations.find((op) => op.current_price != null);
+  const anchorPositionId = opWithManualPrice?.id ?? group.operations[0]?.id ?? null;
+
+  const resolvedForCell = {
+    price: group.currentPrice,
+    source: group.priceSource ?? "cost",
+  };
+  const sampleForCell = {
+    id: anchorPositionId,
+    ticker: group.ticker,
+    instrument_type: group.instrument_type,
+    current_price: group.priceSource === "manual" ? group.currentPrice : null,
+    entry_price: group.ppp,
+    quantity: group.netQty,
+  };
+
+  return (
+    <>
+      <tr
+        style={{
+          borderBottom: expanded ? "none" : `1px solid ${C.border}`,
+          transition: "background-color 100ms ease",
+          backgroundColor: expanded ? "rgba(91,141,214,0.04)" : "transparent",
+          cursor: "pointer",
+        }}
+        onClick={onToggle}
+        onMouseEnter={(e) => {
+          if (!expanded) e.currentTarget.style.backgroundColor = "rgba(255,255,255,0.015)";
+        }}
+        onMouseLeave={(e) => {
+          if (!expanded) e.currentTarget.style.backgroundColor = "transparent";
+        }}
+      >
+        <PTd>
+          <span style={{ color: C.dim, display: "inline-flex" }}>
+            {expanded ? <ChevronDown size={13} strokeWidth={1.8} /> : <ChevronRight size={13} strokeWidth={1.8} />}
+          </span>
+        </PTd>
+        <PTd>
+          <div className="flex items-center gap-2">
+            <TypeIcon size={13} color={typeColor} strokeWidth={1.7} />
+            <span style={{ fontSize: 11.5, color: C.muted }}>{displayLabel}</span>
+          </div>
+        </PTd>
+        <PTd>
+          <div className="flex items-center gap-2">
+            <span className="eco-mono" style={{ fontWeight: 600, fontSize: 12.5 }}>
+              {group.ticker}
+            </span>
+            {group.isShort && (
+              <span
+                style={{
+                  fontSize: 9,
+                  fontWeight: 700,
+                  letterSpacing: "0.12em",
+                  padding: "1px 5px",
+                  borderRadius: 2,
+                  color: C.red,
+                  backgroundColor: "rgba(248,113,113,0.10)",
+                  border: `1px solid rgba(248,113,113,0.30)`,
+                }}
+              >
+                SHORT
+              </span>
+            )}
+          </div>
+        </PTd>
+        <PTd align="right">
+          <span
+            className="eco-mono"
+            style={{ color: group.isShort ? C.red : C.text }}
+          >
+            {fmtNumber(group.netQty, { maxDecimals: 8 })}
+          </span>
+        </PTd>
+        <PTd align="right">
+          <span className="eco-mono">
+            {group.ppp != null ? fmtNumber(group.ppp, { maxDecimals: 4 }) : "—"}
+          </span>
+        </PTd>
+        <PTd align="right" onClick={(e) => e.stopPropagation()}>
+          <EditablePriceCell
+            position={sampleForCell}
+            resolved={resolvedForCell}
+            onSave={(newPrice) => {
+              if (!anchorPositionId) return;
+              onUpdatePrice(anchorPositionId, newPrice);
+            }}
+          />
+        </PTd>
+        <PTd align="right">
+          {group.pnl != null ? (
+            <div className="flex flex-col items-end" style={{ gap: 1 }}>
+              <span
+                className="eco-mono"
+                style={{ color: pnlColor, fontWeight: 500 }}
+              >
+                {pnlSign}{fmtNumber(group.pnl, { maxDecimals: 2 })}
+              </span>
+              {group.pnlPct != null && (
+                <span
+                  style={{
+                    fontSize: 9,
+                    fontWeight: 500,
+                    color: pnlColor,
+                    fontFamily: "'JetBrains Mono', monospace",
+                  }}
+                >
+                  {pnlSign}{group.pnlPct.toFixed(2)}%
+                </span>
+              )}
+            </div>
+          ) : (
+            <span style={{ color: C.dim }}>—</span>
+          )}
+        </PTd>
+        <PTd align="right">
+          {group.valueAtMarket != null ? (
+            <span className="eco-mono" style={{ fontWeight: 500 }}>
+              {fmtNumber(group.valueAtMarket, { maxDecimals: 2 })}
+            </span>
+          ) : group.valueAtCost != null ? (
+            <div className="flex flex-col items-end" style={{ gap: 1 }}>
+              <span className="eco-mono" style={{ fontWeight: 500 }}>
+                {fmtNumber(group.valueAtCost, { maxDecimals: 2 })}
+              </span>
+              <span style={{ fontSize: 9, color: C.dim, letterSpacing: "0.05em", textTransform: "uppercase" }}>
+                a costo
+              </span>
+            </div>
+          ) : (
+            <span style={{ color: C.dim }}>—</span>
+          )}
+        </PTd>
+        <PTd>
+          <span style={{ fontSize: 11.5, color: C.muted }}>{group.currency}</span>
+        </PTd>
+        <PTd align="right">
+          <span
+            style={{
+              fontSize: 11,
+              color: C.muted,
+              fontFamily: "'JetBrains Mono', monospace",
+              backgroundColor: C.deep,
+              padding: "1px 7px",
+              borderRadius: 2,
+              border: `1px solid ${C.border}`,
+            }}
+          >
+            {group.operations.length}
+          </span>
+        </PTd>
+      </tr>
+
+      {/* Fila expandida: muestra cada operación individual del grupo */}
+      {expanded && (
+        <tr style={{ borderBottom: `1px solid ${C.border}` }}>
+          <td colSpan={10} style={{ padding: 0, backgroundColor: C.deep }}>
+            <div style={{ padding: "10px 14px 14px" }}>
+              <div style={{
+                fontSize: 9,
+                letterSpacing: "0.18em",
+                color: C.dim,
+                textTransform: "uppercase",
+                fontWeight: 600,
+                marginBottom: 8,
+                fontFamily: "'Roboto', sans-serif",
+              }}>
+                Operaciones agrupadas
+              </div>
+              <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                <thead>
+                  <tr>
+                    <th style={subThStyle("left")}>Op.</th>
+                    <th style={subThStyle("right")}>Cantidad</th>
+                    <th style={subThStyle("right")}>Precio compra</th>
+                    <th style={subThStyle("left")}>Fecha</th>
+                    <th style={subThStyle("left")}>Notas</th>
+                    <th style={subThStyle("right")}>{""}</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {group.operations.map((p) => {
+                    const isSell = p.operation_type === "sell";
+                    return (
+                      <tr key={p.id} style={{ borderBottom: `1px solid ${C.border}` }}>
+                        <td style={subTdStyle("left")}>
+                          <span
+                            style={{
+                              fontSize: 9,
+                              fontWeight: 700,
+                              letterSpacing: "0.14em",
+                              padding: "1px 6px",
+                              borderRadius: 2,
+                              color: isSell ? C.red : C.green,
+                              backgroundColor: isSell ? "rgba(248,113,113,0.10)" : "rgba(74,222,128,0.10)",
+                              border: `1px solid ${isSell ? "rgba(248,113,113,0.25)" : "rgba(74,222,128,0.25)"}`,
+                            }}
+                          >
+                            {isSell ? "VENTA" : "COMPRA"}
+                          </span>
+                        </td>
+                        <td style={subTdStyle("right")}>
+                          <span className="eco-mono" style={{ fontSize: 11.5 }}>
+                            {fmtNumber(p.quantity, { maxDecimals: 8 })}
+                          </span>
+                        </td>
+                        <td style={subTdStyle("right")}>
+                          <span className="eco-mono" style={{ fontSize: 11.5 }}>
+                            {p.entry_price != null ? fmtNumber(p.entry_price, { maxDecimals: 4 }) : "—"}
+                          </span>
+                        </td>
+                        <td style={subTdStyle("left")}>
+                          <span style={{ fontSize: 11, color: C.muted }}>
+                            {fmtDateShort(p.entry_date)}
+                          </span>
+                        </td>
+                        <td style={subTdStyle("left")}>
+                          <span style={{ fontSize: 11, color: C.dim, maxWidth: 240, display: "inline-block", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={p.notes || ""}>
+                            {p.notes || "—"}
+                          </span>
+                        </td>
+                        <td style={subTdStyle("right")}>
+                          <div className="flex items-center justify-end gap-1">
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                onEdit(p);
+                              }}
+                              aria-label="Editar"
+                              style={{
+                                backgroundColor: "transparent",
+                                border: `1px solid transparent`,
+                                color: C.dim,
+                                padding: 4,
+                                cursor: "pointer",
+                                transition: "all 100ms ease",
+                              }}
+                              onMouseEnter={(e) => {
+                                e.currentTarget.style.color = C.accent;
+                                e.currentTarget.style.borderColor = C.accentBorder;
+                              }}
+                              onMouseLeave={(e) => {
+                                e.currentTarget.style.color = C.dim;
+                                e.currentTarget.style.borderColor = "transparent";
+                              }}
+                            >
+                              <Pencil size={11} strokeWidth={1.8} />
+                            </button>
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                onDelete(p);
+                              }}
+                              aria-label="Borrar"
+                              style={{
+                                backgroundColor: "transparent",
+                                border: `1px solid transparent`,
+                                color: C.dim,
+                                padding: 4,
+                                cursor: "pointer",
+                                transition: "all 100ms ease",
+                              }}
+                              onMouseEnter={(e) => {
+                                e.currentTarget.style.color = C.red;
+                                e.currentTarget.style.borderColor = "rgba(248,113,113,0.25)";
+                              }}
+                              onMouseLeave={(e) => {
+                                e.currentTarget.style.color = C.dim;
+                                e.currentTarget.style.borderColor = "transparent";
+                              }}
+                            >
+                              <Trash2 size={11} strokeWidth={1.8} />
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </td>
+        </tr>
+      )}
+    </>
+  );
+}
+
+function subThStyle(align) {
+  return {
+    textAlign: align,
+    padding: "5px 8px 6px",
+    fontSize: 9,
+    fontWeight: 600,
+    color: C.dim,
+    textTransform: "uppercase",
+    letterSpacing: "0.06em",
+    fontFamily: "'Roboto', sans-serif",
+  };
+}
+
+function subTdStyle(align) {
+  return {
+    textAlign: align,
+    padding: "6px 8px",
+    verticalAlign: "middle",
+    </tr>
   );
 }
 
