@@ -4912,8 +4912,6 @@ function PositionsTable({ positions, bondPrices, onEdit, onDelete, onUpdatePrice
               <PTh align="right">Cantidad</PTh>
               <PTh align="right">Precio compra</PTh>
               <PTh align="right">Precio venta</PTh>
-              <PTh align="right">Precio actual</PTh>
-              <PTh align="right">Total</PTh>
               <PTh>Moneda</PTh>
               <PTh>Fecha</PTh>
               <PTh>Notas</PTh>
@@ -4990,13 +4988,6 @@ function PositionRow({ position, bondPrices, onEdit, onDelete, onUpdatePrice }) 
       ? "Bono"
       : (meta.label || position.instrument_type);
 
-  // Precio efectivo para mostrar en "Precio actual" y para calcular el Total.
-  // Prioridad: current_price (manual) > bondPrices (data912) > fallback null.
-  // OJO: para "Precio actual" la celda muestra null/—, pero en "Total"
-  // caemos a entry_price cuando no hay nada para no quedar en blanco.
-  const resolved = resolvePositionPrice(position, bondPrices);
-  const totalRes = positionValueAtMarket(position, bondPrices);
-
   return (
     <tr
       style={{
@@ -5061,36 +5052,6 @@ function PositionRow({ position, bondPrices, onEdit, onDelete, onUpdatePrice }) 
             ? fmtNumber(position.entry_price, { maxDecimals: 4 })
             : <span style={{ color: C.dim }}>—</span>}
         </span>
-      </PTd>
-
-      {/* Precio actual: editable inline. Auto-pobla con data912 para bonos
-          si el user no override-eó manualmente. Para acciones, CEDEARs,
-          futuros, etc. arranca vacío y el user lo carga. */}
-      <PTd align="right">
-        <EditablePriceCell
-          position={position}
-          resolved={resolved}
-          onSave={onUpdatePrice}
-        />
-      </PTd>
-
-      {/* Total: cantidad × precio efectivo, ajustado por convención del
-          instrumento (cada 100 VN para bonos, ×1000 para futuros, etc.) */}
-      <PTd align="right">
-        {totalRes ? (
-          <div className="flex flex-col items-end" style={{ gap: 2 }}>
-            <span className="eco-mono" style={{ fontWeight: 500 }}>
-              {fmtNumber(totalRes.value, { maxDecimals: 2 })}
-            </span>
-            {totalRes.source === "cost" && (
-              <span style={{ fontSize: 9, color: C.dim, letterSpacing: "0.05em", textTransform: "uppercase" }}>
-                a costo
-              </span>
-            )}
-          </div>
-        ) : (
-          <span style={{ color: C.dim }}>—</span>
-        )}
       </PTd>
 
       <PTd>
