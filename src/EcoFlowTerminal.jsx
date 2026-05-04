@@ -1871,6 +1871,131 @@ function useDashboardFx() {
 }
 
 
+/* ─────────────── Hook: useBondPrices ───────────────
+ *
+ * Lee precios actualizados de bonos ARS y USD desde data912 vía:
+ *   - /api/letras (lecaps, boncaps, duales) — endpoint /live/arg_notes
+ *   - /api/bonos  (bonos USD soberanos)     — endpoint /live/arg_bonds
+ *
+ * data912 NO expone histórico ni cierre del día anterior, así que la
+ * variación "día" V1 la calculamos versus entry_price (P&L histórico
+ * acumulado). Cuando implementemos snapshots diarios en Supabase
+ * (pendiente B1), reemplazaremos esto por la variación real del día.
+ *
+ * Cache:
+ *   - sessionStorage con TTL de 5 minutos: si los datos son recientes
+ *     los devolvemos inmediato sin pegarle a la API.
+ *   - Stale-while-revalidate: aunque el cache esté vencido, mostramos
+ *     los datos viejos mientras refrescamos atrás.
+ *
+ * Estructura del retorno:
+ *   {
+ *     prices:    Map<ticker, { price, bid, ask, lastUpdate }>
+ *     loading,
+ *     error,
+ *     lastFetch: ISO string,
+ *     refresh:   () => void,
+ *   }
+ *
+ * Donde `price` es el último precio cotizado (preferimos `c` que es
+ * último, sino caemos a `px_ask`). El precio viene cada 100 VN para
+ * bonos (consistente con el módulo Carry Trade existente).
+ */
+
+const BOND_PRICES_CACHE_KEY = "ecoflow_bond_prices_v1";
+const BOND_PRICES_TTL_MS = 5 * 60 * 1000; // 5 minutos
+
+function readBondPricesCache() {
+  try {
+    const raw = sessionStorage.getItem(BOND_PRICES_CACHE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (!parsed?.lastFetch || !parsed?.prices) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function writeBondPricesCache(payload) {
+  try {
+    sessionStorage.setItem(BOND_PRICES_CACHE_KEY, JSON.stringify(payload));
+  } catch {
+    /* sessionStorage puede fallar en private mode */
+  }
+}
+
+function useBondPrices() {
+  const cached = readBondPricesCache();
+  const [prices, setPrices] = useState(cached?.prices || {});
+  const [lastFetch, setLastFetch] = useState(cached?.lastFetch || null);
+  const [loading, setLoading] = useState(!cached);
+  const [error, setError] = useState(null);
+  const [refreshKey, setRefreshKey] = useState(0);
+
+  useEffect(() => {
+    let mounted = true;
+
+    // Si tenemos cache fresco y no es refresh manual, ni nos molestamos
+    if (cached && refreshKey === 0) {
+      const age = Date.now() - new Date(cached.lastFetch).getTime();
+      if (age < BOND_PRICES_TTL_MS) {
+        setLoading(false);
+        return () => { mounted = false; };
+      }
+    }
+
+    setError(null);
+    (async () => {
+      try {
+        const [bondsRes, letrasRes] = await Promise.all([
+          fetch("/api/bonos"),
+          fetch("/api/letras"),
+        ]);
+
+        const bondsArr = bondsRes.ok ? await bondsRes.json() : [];
+        const letrasArr = letrasRes.ok ? await letrasRes.json() : [];
+
+        // Merge: priorizamos letras si hay duplicados (su data es más
+        // específica). El campo `c` es el último precio operado; si no
+        // hay, usamos `px_ask` como fallback (consistente con CarryTrade).
+        const map = {};
+        for (const item of [...letrasArr, ...bondsArr]) {
+          if (!item?.symbol) continue;
+          const ticker = String(item.symbol).trim().toUpperCase();
+          if (map[ticker]) continue; // primer match gana
+          const price = item.c ?? item.px_ask ?? null;
+          if (price == null || price <= 0) continue;
+          map[ticker] = {
+            price: Number(price),
+            bid: item.px_bid != null ? Number(item.px_bid) : null,
+            ask: item.px_ask != null ? Number(item.px_ask) : null,
+            volume: item.q_op != null ? Number(item.q_op) : null,
+          };
+        }
+
+        if (!mounted) return;
+        const now = new Date().toISOString();
+        setPrices(map);
+        setLastFetch(now);
+        setLoading(false);
+        writeBondPricesCache({ prices: map, lastFetch: now });
+      } catch (e) {
+        if (!mounted) return;
+        setError(e.message || "Error cargando precios");
+        setLoading(false);
+      }
+    })();
+
+    return () => { mounted = false; };
+  }, [refreshKey]);
+
+  const refresh = useCallback(() => setRefreshKey((k) => k + 1), []);
+
+  return { prices, loading, error, lastFetch, refresh };
+}
+
+
 /* ─────────────── Hook: useUserPositions ───────────────
  *
  * Encapsula toda la interacción con la tabla `public.positions` de Supabase.
@@ -2014,7 +2139,8 @@ function fmtDateShort(iso) {
  */
 
 function DashboardOverview({ positions }) {
-  const { fx, loading: fxLoading, error: fxError, lastUpdated, refresh: refreshFx } = useDashboardFx();
+  const { fx, loading: fxLoading, error: fxError, lastUpdated: fxLastUpdated, refresh: refreshFx } = useDashboardFx();
+  const { prices: bondPrices, loading: pricesLoading, error: pricesError, lastFetch: pricesLastFetch, refresh: refreshBondPrices } = useBondPrices();
 
   // Toggle de moneda de valuación: ARS / USD-MEP / USD-CCL
   const [valuationCurrency, setValuationCurrency] = useState("ARS");
@@ -2025,10 +2151,27 @@ function DashboardOverview({ positions }) {
   // Toggle Liquidez Proyectada ventana
   const [liquidityWindow, setLiquidityWindow] = useState("30d");
 
+  // El botón "Actualizar" refresca AMBAS fuentes de datos: FX + precios bonos
+  const handleRefreshAll = useCallback(() => {
+    refreshFx();
+    refreshBondPrices();
+  }, [refreshFx, refreshBondPrices]);
+
+  // Loading combinado: muestra el estado más conservador (loader si ALGO carga)
+  const anyLoading = fxLoading || pricesLoading;
+
   return (
     <div style={{ marginBottom: 32 }}>
       {/* 1. Banda FX */}
-      <FxBand fx={fx} loading={fxLoading} error={fxError} onRefresh={refreshFx} lastUpdated={lastUpdated} />
+      <FxBand
+        fx={fx}
+        loading={anyLoading}
+        error={fxError}
+        onRefresh={handleRefreshAll}
+        lastUpdated={fxLastUpdated}
+        pricesLastFetch={pricesLastFetch}
+        pricesError={pricesError}
+      />
 
       {/* 2. Toggle moneda de valuación */}
       <div className="flex items-center justify-between gap-3" style={{ marginTop: 16, marginBottom: 14 }}>
@@ -2053,11 +2196,13 @@ function DashboardOverview({ positions }) {
         <TotalCard
           positions={positions}
           fx={fx}
+          bondPrices={bondPrices}
           valuationCurrency={valuationCurrency}
         />
         <DistributionCard
           positions={positions}
           fx={fx}
+          bondPrices={bondPrices}
           valuationCurrency={valuationCurrency}
           view={distView}
           onViewChange={setDistView}
@@ -2065,6 +2210,7 @@ function DashboardOverview({ positions }) {
         <LiquidityCard
           positions={positions}
           fx={fx}
+          bondPrices={bondPrices}
           valuationCurrency={valuationCurrency}
           window={liquidityWindow}
           onWindowChange={setLiquidityWindow}
@@ -2225,12 +2371,13 @@ function ValuationToggle({ value, onChange }) {
 
 /* ─────────────── Card 1: Total de cartera ─────────────── */
 
-function TotalCard({ positions, fx, valuationCurrency }) {
-  // V1: valuamos al entry_price (costo). En V2 conectamos data912 para
-  // bonos con precio actualizado y un current_price manual para acciones.
+function TotalCard({ positions, fx, bondPrices, valuationCurrency }) {
+  // V2: ahora usamos precios de mercado de data912 cuando están disponibles.
+  // El P&L se calcula como market - cost. Si no hay precio actualizado para
+  // alguna posición, esa cae al fallback "a costo" y aparece en pricesFromCost.
   const totals = useMemo(
-    () => computePortfolioTotals(positions, fx, valuationCurrency),
-    [positions, fx, valuationCurrency]
+    () => computePortfolioTotals(positions, fx, valuationCurrency, bondPrices),
+    [positions, fx, valuationCurrency, bondPrices]
   );
 
   const tcLine = useMemo(() => {
@@ -2241,33 +2388,28 @@ function TotalCard({ positions, fx, valuationCurrency }) {
     return parts.join(" · ");
   }, [fx]);
 
-  // Mini-stats útiles en V1 (mientras no tenemos current_price para variación día)
-  const stats = useMemo(() => {
-    const distinctTickers = new Set(positions.map((p) => p.ticker)).size;
-    const distinctTypes = new Set(
-      positions.map((p) =>
-        p.instrument_type === "bond_ars" || p.instrument_type === "bond_usd"
-          ? "bond"
-          : p.instrument_type
-      )
-    ).size;
-    return {
-      positionsCount: positions.length,
-      distinctTickers,
-      distinctTypes,
-    };
-  }, [positions]);
+  // Si todas las posiciones cayeron al fallback "a costo" (sin precio de
+  // mercado), mostramos el badge "A costo" porque el total no refleja
+  // mercado real. Si al menos UNA tiene precio, mostramos "A mercado".
+  const allAtCost = totals.pricesFromMarket === 0 && totals.pricesFromCost > 0;
+  const valuationLabel = allAtCost ? "A costo" : "A mercado";
+
+  // P&L visible cuando hay al menos una posición valuada a mercado real
+  const showPnl = totals.pnl != null && totals.pricesFromMarket > 0;
+  const pnlIsPositive = showPnl && totals.pnl >= 0;
+  const pnlColor = !showPnl ? C.dim : pnlIsPositive ? C.green : C.red;
+  const pnlSymbol = !showPnl ? "" : pnlIsPositive ? "+" : "";
 
   return (
     <div style={cardBaseStyle()}>
       <div className="flex items-center justify-between" style={{ marginBottom: 10 }}>
         <span style={cardTitleStyle()}>Total</span>
         <span style={{ fontSize: 9.5, color: C.dim, fontFamily: "'Roboto', sans-serif", letterSpacing: "0.04em" }}>
-          A costo
+          {valuationLabel}
         </span>
       </div>
 
-      <div className="flex items-baseline gap-3" style={{ marginBottom: 12 }}>
+      <div className="flex items-baseline gap-3" style={{ marginBottom: 10 }}>
         <span
           style={{
             fontSize: 28,
@@ -2283,38 +2425,64 @@ function TotalCard({ positions, fx, valuationCurrency }) {
         </span>
       </div>
 
-      {/* Mini-stats informativas: en V2 esto se reemplaza por variación diaria
-          cuando conectemos current_price desde data912 + precios manuales. */}
-      <div className="flex items-center gap-4" style={{ marginBottom: 12 }}>
-        <div className="flex flex-col">
-          <span style={{ fontSize: 10, color: C.dim, fontFamily: "'Roboto', sans-serif", letterSpacing: "0.03em" }}>
-            Posiciones
+      {/* P&L: aparece solo si hay precio de mercado real para al menos
+          una posición. Si no, mostramos las mini-stats de antes. */}
+      {showPnl ? (
+        <div className="flex items-center gap-2" style={{ marginBottom: 12 }}>
+          <span
+            style={{
+              fontSize: 13,
+              fontWeight: 600,
+              color: pnlColor,
+              fontFamily: "'JetBrains Mono', monospace",
+            }}
+          >
+            {pnlSymbol}{fmtCurrencyValue(totals.pnl, valuationCurrency === "ARS" ? "ARS" : "USD")}
           </span>
-          <span style={{ fontSize: 14, color: C.text, fontFamily: "'JetBrains Mono', monospace", fontWeight: 600 }}>
-            {stats.positionsCount}
+          {totals.pnlPct != null && (
+            <span
+              style={{
+                fontSize: 11,
+                fontWeight: 500,
+                color: pnlColor,
+                fontFamily: "'JetBrains Mono', monospace",
+                backgroundColor: pnlIsPositive ? "rgba(74,222,128,0.12)" : "rgba(248,113,113,0.12)",
+                padding: "2px 7px",
+                borderRadius: 2,
+              }}
+            >
+              {pnlSymbol}{totals.pnlPct.toFixed(2)}%
+            </span>
+          )}
+          <span style={{ fontSize: 10, color: C.dim, fontFamily: "'Roboto', sans-serif" }}>
+            vs costo
           </span>
         </div>
-        <div className="flex flex-col">
-          <span style={{ fontSize: 10, color: C.dim, fontFamily: "'Roboto', sans-serif", letterSpacing: "0.03em" }}>
-            Tickers
-          </span>
-          <span style={{ fontSize: 14, color: C.text, fontFamily: "'JetBrains Mono', monospace", fontWeight: 600 }}>
-            {stats.distinctTickers}
-          </span>
+      ) : (
+        <div style={{ fontSize: 11, color: C.dim, marginBottom: 12, fontFamily: "'Roboto', sans-serif" }}>
+          {totals.pricesFromMarket === 0
+            ? "P&L disponible cuando haya precios actualizados"
+            : "—"}
         </div>
-        <div className="flex flex-col">
-          <span style={{ fontSize: 10, color: C.dim, fontFamily: "'Roboto', sans-serif", letterSpacing: "0.03em" }}>
-            Categorías
-          </span>
-          <span style={{ fontSize: 14, color: C.text, fontFamily: "'JetBrains Mono', monospace", fontWeight: 600 }}>
-            {stats.distinctTypes}
-          </span>
-        </div>
-      </div>
+      )}
 
       {tcLine && (
         <div style={{ fontSize: 11, color: C.muted, fontFamily: "'JetBrains Mono', monospace" }}>
           {tcLine}
+        </div>
+      )}
+
+      {totals.pricesFromCost > 0 && totals.pricesFromMarket > 0 && (
+        <div
+          className="flex items-center gap-1"
+          style={{
+            marginTop: 10,
+            fontSize: 10,
+            color: C.dim,
+            fontFamily: "'Roboto', sans-serif",
+          }}
+        >
+          <span>{totals.pricesFromCost} {totals.pricesFromCost === 1 ? "posición" : "posiciones"} a costo · {totals.pricesFromMarket} a mercado</span>
         </div>
       )}
 
@@ -2329,7 +2497,7 @@ function TotalCard({ positions, fx, valuationCurrency }) {
           }}
         >
           <AlertTriangle size={11} strokeWidth={1.8} />
-          <span>{totals.unvalued} {totals.unvalued === 1 ? "posición" : "posiciones"} sin precio actualizado</span>
+          <span>{totals.unvalued} {totals.unvalued === 1 ? "posición sin valuar" : "posiciones sin valuar"}</span>
         </div>
       )}
     </div>
@@ -2339,14 +2507,14 @@ function TotalCard({ positions, fx, valuationCurrency }) {
 
 /* ─────────────── Card 2: Distribución ─────────────── */
 
-function DistributionCard({ positions, fx, valuationCurrency, view, onViewChange }) {
+function DistributionCard({ positions, fx, bondPrices, valuationCurrency, view, onViewChange }) {
   const slices = useMemo(() => {
-    const totals = computePortfolioTotals(positions, fx, valuationCurrency);
+    const totals = computePortfolioTotals(positions, fx, valuationCurrency, bondPrices);
     if (!totals.value || totals.value <= 0) return [];
 
     const groups = view === "monedas"
-      ? groupByCurrency(positions, fx, valuationCurrency)
-      : groupByCategory(positions, fx, valuationCurrency);
+      ? groupByCurrency(positions, fx, valuationCurrency, bondPrices)
+      : groupByCategory(positions, fx, valuationCurrency, bondPrices);
 
     const total = Object.values(groups).reduce((acc, v) => acc + v, 0);
     if (total <= 0) return [];
@@ -2361,7 +2529,7 @@ function DistributionCard({ positions, fx, valuationCurrency, view, onViewChange
         color: PROVIDER_COLORS[idx % PROVIDER_COLORS.length],
       }))
       .sort((a, b) => b.value - a.value);
-  }, [positions, fx, valuationCurrency, view]);
+  }, [positions, fx, valuationCurrency, view, bondPrices]);
 
   return (
     <div style={cardBaseStyle()}>
@@ -2492,10 +2660,10 @@ function DonutChart({ slices, size = 100 }) {
 
 /* ─────────────── Card 3: Liquidez Proyectada ─────────────── */
 
-function LiquidityCard({ positions, fx, valuationCurrency, window: windowKey, onWindowChange }) {
+function LiquidityCard({ positions, fx, bondPrices, valuationCurrency, window: windowKey, onWindowChange }) {
   const breakdown = useMemo(
-    () => computeLiquidityBreakdown(positions, fx, valuationCurrency, windowKey),
-    [positions, fx, valuationCurrency, windowKey]
+    () => computeLiquidityBreakdown(positions, fx, valuationCurrency, windowKey, bondPrices),
+    [positions, fx, valuationCurrency, windowKey, bondPrices]
   );
 
   return (
@@ -2715,65 +2883,169 @@ function convertValue(amount, fromCurrency, toCurrency, fx) {
  * V1: si tenemos current_price (futuro) lo usamos; sino caemos a entry_price.
  * Para cauciones, retornamos el monto colocado/tomado a su valor nominal.
  */
-function positionValue(p) {
-  const price = p.current_price ?? p.entry_price;
-  if (price == null) {
-    // Cauciones: el valor es directamente la cantidad (es plata)
-    if (p.instrument_type === "caucion") return Number(p.quantity) || 0;
-    return null;
+/**
+ * Resuelve el precio "de mercado" actual de una posición.
+ *
+ * Prioridad:
+ *   1. p.current_price (precio manual cargado por el user, futuro)
+ *   2. bondPrices[ticker] (data912, solo para bonos / ONs)
+ *   3. p.entry_price (fallback a costo)
+ *
+ * Si nada está disponible, devuelve null.
+ *
+ * @returns {{ price: number, source: 'manual'|'market'|'cost' } | null}
+ */
+function resolvePositionPrice(p, bondPrices) {
+  if (p.current_price != null) {
+    return { price: Number(p.current_price), source: "manual" };
   }
+
+  // Para bonos / ONs intentamos data912
+  const ticker = (p.ticker || "").trim().toUpperCase();
+  if (
+    bondPrices &&
+    ticker &&
+    (p.instrument_type === "bond_ars" ||
+      p.instrument_type === "bond_usd" ||
+      p.instrument_type === "on")
+  ) {
+    const m = bondPrices[ticker];
+    if (m?.price > 0) return { price: m.price, source: "market" };
+  }
+
+  if (p.entry_price != null) {
+    return { price: Number(p.entry_price), source: "cost" };
+  }
+  return null;
+}
+
+/**
+ * Convierte un precio (cada 100 VN para bonos, unitario para acciones) en el
+ * VALOR TOTAL de la posición (precio × cantidad, ajustado por convención
+ * del instrumento).
+ */
+function applyPriceToPosition(p, price) {
   const qty = Number(p.quantity) || 0;
-  // Bonos: precio cada 100 VN
-  if (p.instrument_type === "bond_ars" || p.instrument_type === "bond_usd" || p.instrument_type === "on") {
-    return (qty * Number(price)) / 100;
+  // Bonos / ONs: precio cada 100 VN
+  if (
+    p.instrument_type === "bond_ars" ||
+    p.instrument_type === "bond_usd" ||
+    p.instrument_type === "on"
+  ) {
+    return (qty * price) / 100;
   }
   // Futuros: contrato * multiplicador * precio. DLR multiplicador típico = 1000.
   if (p.instrument_type === "future") {
-    const mult = 1000;
-    return qty * mult * Number(price);
+    return qty * 1000 * price;
   }
-  // Opciones: contrato * 100 * prima (placeholder)
+  // Opciones: contrato * 100 * prima
   if (p.instrument_type === "option") {
-    return qty * 100 * Number(price);
+    return qty * 100 * price;
   }
   // Acciones, CEDEARs, FCI, USD, Cripto: cantidad * precio
-  return qty * Number(price);
+  return qty * price;
 }
 
-function computePortfolioTotals(positions, fx, valuationCurrency) {
-  let total = 0;
+/**
+ * Valor de la posición a mercado actual (usa precio actualizado si está
+ * disponible; sino fallback a entry_price).
+ *
+ * Retorna también la `source` ('market' | 'manual' | 'cost') para que la
+ * UI pueda mostrar badges contextuales.
+ */
+function positionValueAtMarket(p, bondPrices) {
+  // Cauciones: el valor es directamente la cantidad (es plata, no hay precio)
+  if (p.instrument_type === "caucion") {
+    return { value: Number(p.quantity) || 0, source: "cost" };
+  }
+  const resolved = resolvePositionPrice(p, bondPrices);
+  if (!resolved) return null;
+  return {
+    value: applyPriceToPosition(p, resolved.price),
+    source: resolved.source,
+  };
+}
+
+/**
+ * Valor de la posición a costo histórico (al entry_price exclusivamente).
+ * Sirve para calcular P&L = market - cost.
+ */
+function positionValueAtCost(p) {
+  if (p.instrument_type === "caucion") return Number(p.quantity) || 0;
+  if (p.entry_price == null) return null;
+  return applyPriceToPosition(p, Number(p.entry_price));
+}
+
+/**
+ * @deprecated mantener por retrocompat si hay código viejo. Usar
+ * positionValueAtMarket / positionValueAtCost.
+ */
+function positionValue(p) {
+  const r = positionValueAtMarket(p);
+  return r ? r.value : null;
+}
+
+function computePortfolioTotals(positions, fx, valuationCurrency, bondPrices) {
+  let totalMarket = 0;
+  let totalCost = 0;
   let unvalued = 0;
   let valuedAny = false;
+  let pricesFromMarket = 0; // posiciones con precio data912 / manual
+  let pricesFromCost = 0;   // posiciones que cayeron al fallback
 
   for (const p of positions) {
-    // Para venta corta de futuros, el "valor" se invierte (es deuda nominal)
-    // pero para V1 lo dejamos absoluto — se ajustará en V2 con P&L real.
-    let raw = positionValue(p);
-    if (raw == null) {
+    const marketRes = positionValueAtMarket(p, bondPrices);
+    const cost = positionValueAtCost(p);
+
+    if (marketRes == null) {
+      unvalued++;
+      continue;
+    }
+
+    const convertedMarket = convertValue(
+      marketRes.value, p.entry_currency || "ARS", valuationCurrency, fx
+    );
+    if (convertedMarket == null) {
       unvalued++;
       continue;
     }
     valuedAny = true;
-    const converted = convertValue(raw, p.entry_currency || "ARS", valuationCurrency, fx);
-    if (converted == null) {
-      unvalued++;
-      continue;
+    totalMarket += convertedMarket;
+
+    if (cost != null) {
+      const convertedCost = convertValue(
+        cost, p.entry_currency || "ARS", valuationCurrency, fx
+      );
+      if (convertedCost != null) totalCost += convertedCost;
     }
-    total += converted;
+
+    if (marketRes.source === "market" || marketRes.source === "manual") {
+      pricesFromMarket++;
+    } else {
+      pricesFromCost++;
+    }
   }
 
+  const pnl = totalMarket - totalCost;
+  const pnlPct = totalCost > 0 ? (pnl / totalCost) * 100 : null;
+
   return {
-    value: valuedAny ? total : null,
+    value: valuedAny ? totalMarket : null,
+    valueAtCost: valuedAny ? totalCost : null,
+    pnl: valuedAny ? pnl : null,
+    pnlPct: valuedAny ? pnlPct : null,
     unvalued,
+    pricesFromMarket,
+    pricesFromCost,
   };
 }
 
-function groupByCategory(positions, fx, valuationCurrency) {
+function groupByCategory(positions, fx, valuationCurrency, bondPrices) {
   const result = {};
   for (const p of positions) {
-    const raw = positionValue(p);
-    if (raw == null) continue;
-    const v = convertValue(raw, p.entry_currency || "ARS", valuationCurrency, fx);
+    const m = positionValueAtMarket(p, bondPrices);
+    if (m == null) continue;
+    const v = convertValue(m.value, p.entry_currency || "ARS", valuationCurrency, fx);
     if (v == null) continue;
     const cat = simplifyCategory(p.instrument_type);
     result[cat] = (result[cat] || 0) + v;
@@ -2781,12 +3053,12 @@ function groupByCategory(positions, fx, valuationCurrency) {
   return result;
 }
 
-function groupByCurrency(positions, fx, valuationCurrency) {
+function groupByCurrency(positions, fx, valuationCurrency, bondPrices) {
   const result = {};
   for (const p of positions) {
-    const raw = positionValue(p);
-    if (raw == null) continue;
-    const v = convertValue(raw, p.entry_currency || "ARS", valuationCurrency, fx);
+    const m = positionValueAtMarket(p, bondPrices);
+    if (m == null) continue;
+    const v = convertValue(m.value, p.entry_currency || "ARS", valuationCurrency, fx);
     if (v == null) continue;
     const cur = p.entry_currency || "ARS";
     result[cur] = (result[cur] || 0) + v;
@@ -2835,7 +3107,7 @@ function prettifyGroupKey(key, view) {
 /**
  * Suma vencimientos en la ventana elegida y devuelve el total por moneda.
  */
-function computeLiquidityBreakdown(positions, fx, valuationCurrency, windowKey) {
+function computeLiquidityBreakdown(positions, fx, valuationCurrency, windowKey, bondPrices) {
   const days = windowKey === "30d" ? 30 : 90;
   const now = new Date();
   const cutoff = new Date(now.getTime() + days * 86400000);
@@ -2848,11 +3120,11 @@ function computeLiquidityBreakdown(positions, fx, valuationCurrency, windowKey) 
     const md = new Date(matDate);
     if (md < now || md > cutoff) continue;
 
-    const raw = positionValue(p);
-    if (raw == null) continue;
+    const m = positionValueAtMarket(p, bondPrices);
+    if (m == null) continue;
     const cur = p.entry_currency || "ARS";
     if (result[cur] != null) {
-      result[cur] += raw;
+      result[cur] += m.value;
     }
   }
 
