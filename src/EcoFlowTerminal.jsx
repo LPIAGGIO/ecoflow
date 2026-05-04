@@ -4356,8 +4356,7 @@ function subTdStyle(align) {
     textAlign: align,
     padding: "6px 8px",
     verticalAlign: "middle",
-    </tr>
-  );
+  };
 }
 
 
