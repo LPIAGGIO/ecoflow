@@ -2676,6 +2676,323 @@ function useUserPositions() {
 }
 
 
+/* ─────────────── Cash movements: helpers + hook ───────────────
+ *
+ * Lógica del cash en EcoFlow:
+ *
+ * 1) Toda compra de bono/stock/cedear/on inyecta automáticamente un
+ *    cash_movement de tipo 'purchase_cost' que resta del saldo. Toda
+ *    venta inyecta un 'sale_proceeds' que suma. La fecha del movement
+ *    depende del settlement (CI = entry_date, T1 = +1 día hábil).
+ *
+ * 2) Los depósitos (Ingresar) y retiros (Retirar) son movements puros
+ *    sin position asociada — son ajustes manuales del cash.
+ *
+ * 3) El saldo se calcula sumando movements (firmados según movement_type).
+ *    NO se persiste el saldo, se computa cada vez. Garantiza consistencia
+ *    al editar/borrar operaciones (ON DELETE CASCADE).
+ *
+ * 4) Tipos NO incluidos en el cash automático: future, option, caucion,
+ *    fci, crypto, usd. Para esos el usuario carga manualmente con
+ *    Ingresar/Retirar si quiere reflejar el flujo de caja.
+ */
+
+/**
+ * Tipos de instrumento que disparan un cash_movement automático al
+ * crear/editar una compra o venta.
+ */
+const CASH_AUTO_TYPES = new Set(["bond_ars", "bond_usd", "on", "stock", "cedear"]);
+
+/**
+ * Calcula el monto de cash (siempre positivo) que mueve una operación.
+ * Para bonos / ON cotizan al 100 → (qty × price) / 100.
+ * Para acciones / CEDEARs → qty × price.
+ *
+ * @returns {number|null}  Monto positivo, o null si no se puede calcular
+ *                          (faltan datos o el tipo no aplica).
+ */
+function computeCashAmount(position) {
+  if (!position) return null;
+  if (!CASH_AUTO_TYPES.has(position.instrument_type)) return null;
+  const qty = Number(position.quantity);
+  const price = Number(position.entry_price);
+  if (!qty || !price || qty <= 0 || price <= 0) return null;
+
+  if (position.instrument_type === "bond_ars" || position.instrument_type === "bond_usd" || position.instrument_type === "on") {
+    return (qty * price) / 100;
+  }
+  return qty * price;
+}
+
+/**
+ * Devuelve la fecha efectiva en la que el cash impacta el saldo, dada
+ * una position con su settlement.
+ *
+ * @returns {string|null}  YYYY-MM-DD, o null si la position no tiene fecha.
+ */
+function computeMovementDate(position) {
+  if (!position?.entry_date) return null;
+  // entry_date viene de Postgres como string YYYY-MM-DD o como objeto Date.
+  // Lo normalizamos a string.
+  const baseDate = typeof position.entry_date === "string"
+    ? position.entry_date.slice(0, 10)
+    : new Date(position.entry_date).toISOString().slice(0, 10);
+
+  if (position.settlement === "T1") {
+    return addBusinessDays(baseDate, 1);
+  }
+  // CI o cualquier otro valor → mismo día (default).
+  return baseDate;
+}
+
+/**
+ * Determina el tipo de cash_movement (sale_proceeds o purchase_cost)
+ * a partir del operation_type de una position.
+ */
+function cashMovementTypeFor(position) {
+  return position.operation_type === "sell" ? "sale_proceeds" : "purchase_cost";
+}
+
+/**
+ * Construye el payload completo de un cash_movement para una position.
+ * Devuelve null si la position no debe generar movement (tipo no incluido,
+ * datos faltantes, etc.).
+ */
+function buildCashMovementPayload(position, userId) {
+  if (!CASH_AUTO_TYPES.has(position.instrument_type)) return null;
+  const amount = computeCashAmount(position);
+  const movementDate = computeMovementDate(position);
+  if (amount == null || !movementDate) return null;
+  return {
+    user_id: userId,
+    movement_date: movementDate,
+    movement_type: cashMovementTypeFor(position),
+    currency: position.entry_currency || "ARS",
+    amount,
+    related_position_id: position.id,
+    notes: null,
+  };
+}
+
+/**
+ * Hook que expone los cash_movements del usuario y deriva el saldo
+ * por moneda. Es la fuente de verdad del efectivo.
+ *
+ * Provee:
+ *   - movements:        array completo de movements (ordenado por fecha desc)
+ *   - balanceByCurrency: { ARS, "USD-MEP", "USD-CCL" } saldo neto actual
+ *   - balanceAt(date, currency): saldo a una fecha específica
+ *   - addManualMovement(type, currency, amount, date, notes): inserta deposit/withdrawal
+ *   - syncForPosition(position): inserta o actualiza el movement para una position
+ *                                 (idempotente: si ya existe, lo updatea; si no, lo crea)
+ *   - removeForPosition(positionId): borra el movement asociado (cascade ya lo hace
+ *                                     desde la BD, pero esto refresca el state local)
+ *   - loading, error, refresh
+ */
+function useCashMovements() {
+  const { user } = useAuth();
+  const [movements, setMovements] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+
+  const refresh = useCallback(async () => {
+    if (!user) {
+      setMovements([]);
+      setLoading(false);
+      return;
+    }
+    setLoading(true);
+    setError(null);
+    const { data, error: err } = await supabase
+      .from("cash_movements")
+      .select("*")
+      .eq("user_id", user.id)
+      .order("movement_date", { ascending: false })
+      .order("created_at", { ascending: false });
+    if (err) {
+      setError(err.message);
+      setMovements([]);
+    } else {
+      setMovements(data ?? []);
+    }
+    setLoading(false);
+  }, [user]);
+
+  useEffect(() => { refresh(); }, [refresh]);
+
+  /**
+   * Suma firmada de los amounts según movement_type:
+   *   deposit, sale_proceeds → +amount
+   *   withdrawal, purchase_cost → -amount
+   */
+  const signedAmount = (m) => {
+    const sign = (m.movement_type === "deposit" || m.movement_type === "sale_proceeds") ? 1 : -1;
+    return sign * Number(m.amount);
+  };
+
+  /**
+   * Saldo NETO al día de hoy por moneda. Solo cuenta movements cuya
+   * movement_date ya pasó (o es hoy). Los movements futuros (T+1
+   * cargados hoy) NO entran al saldo CI.
+   */
+  const balanceByCurrency = useMemo(() => {
+    const today = new Date().toLocaleDateString("en-CA", {
+      timeZone: "America/Argentina/Buenos_Aires",
+    });
+    const result = { "ARS": 0, "USD-MEP": 0, "USD-CCL": 0 };
+    for (const m of movements) {
+      if (m.movement_date > today) continue; // pendientes de liquidar
+      const c = m.currency;
+      if (!(c in result)) continue;
+      result[c] += signedAmount(m);
+    }
+    return result;
+  }, [movements]);
+
+  /**
+   * Saldo a una fecha y moneda específica (incluye movements <= fecha).
+   * Se usa en LiquidityCard para los pickers CI / T1 / 30D / 60D / 90D.
+   */
+  const balanceAt = useCallback((isoDate, currency) => {
+    let total = 0;
+    for (const m of movements) {
+      if (m.movement_date > isoDate) continue;
+      if (m.currency !== currency) continue;
+      total += signedAmount(m);
+    }
+    return total;
+  }, [movements]);
+
+  /**
+   * Inserta un movement manual (deposit / withdrawal). El amount debe
+   * llegar SIEMPRE positivo; el signo lo da movement_type.
+   */
+  const addManualMovement = useCallback(async ({ movement_type, currency, amount, movement_date, notes }) => {
+    if (!user) throw new Error("No hay sesión activa");
+    if (!["deposit", "withdrawal"].includes(movement_type)) {
+      throw new Error("addManualMovement solo acepta deposit o withdrawal");
+    }
+    if (!amount || amount <= 0) throw new Error("El monto debe ser positivo");
+
+    const row = {
+      user_id: user.id,
+      movement_type,
+      currency,
+      amount,
+      movement_date: movement_date || new Date().toLocaleDateString("en-CA", {
+        timeZone: "America/Argentina/Buenos_Aires",
+      }),
+      related_position_id: null,
+      notes: notes || null,
+    };
+
+    const { data, error: err } = await supabase
+      .from("cash_movements")
+      .insert([row])
+      .select()
+      .single();
+    if (err) throw err;
+    setMovements((prev) => [data, ...prev]);
+    return data;
+  }, [user]);
+
+  /**
+   * Sincroniza el cash_movement asociado a una position. Si ya existe
+   * (related_position_id), lo updatea; si no, lo inserta. Si la position
+   * no debe generar movement (tipo no incluido), borra el movement
+   * existente (caso edge: cambiaste el tipo de una posición de bono a
+   * futuro al editarla).
+   */
+  const syncForPosition = useCallback(async (position) => {
+    if (!user) throw new Error("No hay sesión activa");
+    if (!position?.id) return;
+
+    // Buscar movement existente en el state local
+    const existing = movements.find((m) => m.related_position_id === position.id);
+    const payload = buildCashMovementPayload(position, user.id);
+
+    if (!payload) {
+      // Position no debe generar movement → borrar el existente si lo hay
+      if (existing) {
+        const { error: err } = await supabase
+          .from("cash_movements")
+          .delete()
+          .eq("id", existing.id);
+        if (err) throw err;
+        setMovements((prev) => prev.filter((m) => m.id !== existing.id));
+      }
+      return null;
+    }
+
+    if (existing) {
+      // Update
+      const patch = {
+        movement_date: payload.movement_date,
+        movement_type: payload.movement_type,
+        currency: payload.currency,
+        amount: payload.amount,
+      };
+      const { data, error: err } = await supabase
+        .from("cash_movements")
+        .update(patch)
+        .eq("id", existing.id)
+        .select()
+        .single();
+      if (err) throw err;
+      setMovements((prev) => prev.map((m) => (m.id === existing.id ? data : m)));
+      return data;
+    } else {
+      // Insert
+      const { data, error: err } = await supabase
+        .from("cash_movements")
+        .insert([payload])
+        .select()
+        .single();
+      if (err) throw err;
+      setMovements((prev) => [data, ...prev]);
+      return data;
+    }
+  }, [user, movements]);
+
+  /**
+   * Refresca el state local después de borrar una position. La FK
+   * ON DELETE CASCADE en la BD ya borró el movement, así que solo
+   * limpiamos el array local.
+   */
+  const removeForPosition = useCallback((positionId) => {
+    setMovements((prev) => prev.filter((m) => m.related_position_id !== positionId));
+  }, []);
+
+  /**
+   * Elimina un movement manual (típicamente un deposit/withdrawal cargado
+   * por error). No se usa para movements asociados a positions — esos se
+   * borran por cascade al borrar la position.
+   */
+  const deleteManualMovement = useCallback(async (movementId) => {
+    if (!user) throw new Error("No hay sesión activa");
+    const { error: err } = await supabase
+      .from("cash_movements")
+      .delete()
+      .eq("id", movementId);
+    if (err) throw err;
+    setMovements((prev) => prev.filter((m) => m.id !== movementId));
+  }, [user]);
+
+  return {
+    movements,
+    balanceByCurrency,
+    balanceAt,
+    addManualMovement,
+    syncForPosition,
+    removeForPosition,
+    deleteManualMovement,
+    loading,
+    error,
+    refresh,
+  };
+}
+
+
 /* ─────────────── Helpers de formato ─────────────── */
 
 /**
@@ -3867,6 +4184,82 @@ function resolvePositionPrice(p, bondPrices) {
  *
  * Multiplicador DLR típico = 1000 (1 contrato = USD 1.000).
  */
+
+/* ─────────────── Feriados bursátiles BYMA ───────────────
+ *
+ * Lista oficial de feriados del mercado argentino, embebida estática
+ * porque es información determinística publicada por BYMA en diciembre
+ * para el año siguiente. Mantenimiento: 1 vez por año, agregar el
+ * próximo año cuando se publique.
+ *
+ * Fuente original: API pública de https://feriadosbursatiles.ddns.net
+ * (repo público https://github.com/MarianaSardo/feriadobusatilapi).
+ *
+ * Para actualizar:
+ *   curl https://feriadosbursatiles.ddns.net/api/feriados/2027
+ *
+ * Formato: Set de strings YYYY-MM-DD para lookup O(1).
+ * Incluye sábados/domingos NO — los detectamos por getDay() ya que
+ * cualquier sábado/domingo es no-hábil sin necesidad de lista.
+ */
+
+const BYMA_HOLIDAYS = new Set([
+  // 2024 (histórico, por si alguna vez backfilleamos saldos viejos)
+  "2024-01-01", "2024-02-12", "2024-02-13", "2024-03-28", "2024-03-29",
+  "2024-04-01", "2024-04-02", "2024-05-01", "2024-06-17", "2024-06-20",
+  "2024-06-21", "2024-07-09", "2024-10-11", "2024-11-18", "2024-12-25",
+  "2024-12-31",
+  // 2025
+  "2025-01-01", "2025-03-03", "2025-03-04", "2025-03-24", "2025-04-02",
+  "2025-04-17", "2025-04-18", "2025-05-01", "2025-06-16", "2025-06-20",
+  "2025-07-09", "2025-08-15", "2025-11-21", "2025-11-24", "2025-12-08",
+  "2025-12-25",
+  // 2026
+  "2026-01-01", "2026-02-16", "2026-02-17", "2026-03-23", "2026-03-24",
+  "2026-04-02", "2026-04-03", "2026-05-01", "2026-05-25", "2026-06-15",
+  "2026-07-09", "2026-07-10", "2026-08-17", "2026-10-12", "2026-11-06",
+  "2026-12-07", "2026-12-08", "2026-12-24", "2026-12-25", "2026-12-31",
+]);
+
+/**
+ * Devuelve true si la fecha (YYYY-MM-DD) cae en sábado, domingo o feriado
+ * bursátil argentino. Útil para skip al sumar días hábiles.
+ */
+function isNonBusinessDay(yyyymmdd) {
+  if (BYMA_HOLIDAYS.has(yyyymmdd)) return true;
+  // getDay(): 0=domingo, 6=sábado. Construimos en hora local fija para
+  // evitar timezone shifts (yyyy-mm-ddT12:00:00 → mediodía siempre cae
+  // el día correcto sin importar la TZ del browser).
+  const d = new Date(yyyymmdd + "T12:00:00");
+  const dow = d.getDay();
+  return dow === 0 || dow === 6;
+}
+
+/**
+ * Suma N días hábiles a una fecha dada. Sirve para calcular T+1 a partir
+ * de la fecha de operación.
+ *
+ * Ejemplos (asumiendo 2026-04-30 es jueves):
+ *   addBusinessDays("2026-04-30", 1) → "2026-05-04"  (viernes 1° feriado, lunes feriado, viernes hábil... → en realidad acá saltamos al lunes 4)
+ *   addBusinessDays("2026-04-29", 1) → "2026-04-30"  (jueves → viernes)
+ *
+ * @param {string} yyyymmdd  Fecha base, formato YYYY-MM-DD.
+ * @param {number} n         Días hábiles a sumar (>= 0).
+ * @returns {string}         Fecha resultante en formato YYYY-MM-DD.
+ */
+function addBusinessDays(yyyymmdd, n) {
+  if (!yyyymmdd || n < 0) return yyyymmdd;
+  let cursor = new Date(yyyymmdd + "T12:00:00");
+  let added = 0;
+  while (added < n) {
+    cursor.setDate(cursor.getDate() + 1);
+    const iso = cursor.toISOString().slice(0, 10);
+    if (!isNonBusinessDay(iso)) {
+      added++;
+    }
+  }
+  return cursor.toISOString().slice(0, 10);
+}
 
 const FUTURE_MULTIPLIER_DEFAULT = 1000;
 
@@ -5164,6 +5557,12 @@ function PortfolioDashboard({ onNavigate }) {
   const { user } = useAuth();
   const { positions, loading, error, addPosition, updatePosition, deletePosition } = useUserPositions();
 
+  // Hook de cash: trackea movements (deposits, withdrawals, sale_proceeds,
+  // purchase_cost) y deriva el saldo por moneda. Lo usamos en TotalCard,
+  // DistributionCard y LiquidityCard, además de sincronizar movements
+  // automáticamente cuando se crean/editan/borran positions.
+  const cashState = useCashMovements();
+
   // Levantamos los hooks de FX y precios de bonos al nivel del Dashboard,
   // así DashboardOverview Y PositionsTable comparten la misma instancia
   // (un solo fetch en lugar de duplicarlo).
@@ -5241,17 +5640,36 @@ function PortfolioDashboard({ onNavigate }) {
   };
 
   const handleSubmit = async (payload) => {
+    let savedPosition;
     if (editingPosition) {
-      await updatePosition(editingPosition.id, payload);
+      savedPosition = await updatePosition(editingPosition.id, payload);
     } else {
-      await addPosition(payload);
+      savedPosition = await addPosition(payload);
+    }
+    // Sincronizar cash_movement asociado: si la position es de tipo
+    // bond_ars/bond_usd/on/stock/cedear, inserta o actualiza el movement
+    // correspondiente. Si no, syncForPosition borra el movement existente
+    // (caso edge: cambiaste el tipo a futuro al editar).
+    if (savedPosition) {
+      try {
+        await cashState.syncForPosition(savedPosition);
+      } catch (err) {
+        // No bloqueamos al usuario si el cash sync falla — mostramos en consola
+        // y la position queda guardada. Se puede reintentar abriendo y guardando
+        // de nuevo, o desde un futuro botón "Recalcular cash".
+        console.error("Error sincronizando cash_movement:", err);
+      }
     }
     closeDrawer();
   };
 
   const handleDeleteConfirm = async () => {
     if (!confirmingDelete) return;
-    await deletePosition(confirmingDelete.id);
+    const positionId = confirmingDelete.id;
+    await deletePosition(positionId);
+    // El movement asociado lo borra Postgres por ON DELETE CASCADE.
+    // Acá solo limpiamos el state local del hook de cash.
+    cashState.removeForPosition(positionId);
     setConfirmingDelete(null);
   };
 
