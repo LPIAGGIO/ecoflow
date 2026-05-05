@@ -2783,16 +2783,8 @@ function DashboardOverview({ positions, fxState, bondPricesState }) {
 
   return (
     <div style={{ marginBottom: 32 }}>
-      {/* 1. Línea de cotizaciones */}
-      <FxLine
-        fx={fx}
-        loading={anyLoading}
-        error={fxError}
-        onRefresh={handleRefreshAll}
-      />
-
-      {/* 2. Toggle moneda de valuación */}
-      <div className="flex items-center justify-between gap-3" style={{ marginTop: 16, marginBottom: 14 }}>
+      {/* 1. Toggle moneda de valuación */}
+      <div className="flex items-center justify-between gap-3" style={{ marginBottom: 14 }}>
         <ValuationToggle
           value={valuationCurrency}
           onChange={setValuationCurrency}
@@ -2802,7 +2794,7 @@ function DashboardOverview({ positions, fxState, bondPricesState }) {
         </span>
       </div>
 
-      {/* 3. Tres cards principales lado a lado */}
+      {/* 2. Tres cards principales lado a lado */}
       <div
         className="grid"
         style={{
@@ -2835,6 +2827,16 @@ function DashboardOverview({ positions, fxState, bondPricesState }) {
         />
       </div>
 
+      {/* 3. Línea de cotizaciones (entre las cards principales y los
+            flujos proyectados — ahí queda visualmente integrada con la
+            zona de saldo + liquidez). */}
+      <FxLine
+        fx={fx}
+        loading={anyLoading}
+        error={fxError}
+        onRefresh={handleRefreshAll}
+      />
+
       {/* 4. Flujos proyectados (V1: lista simple) */}
       <FlowsSection positions={positions} bondPrices={bondPrices} fx={fx} />
     </div>
@@ -2846,14 +2848,22 @@ function DashboardOverview({ positions, fxState, bondPricesState }) {
  *
  * Reemplazó al FxBand de 4 cards. Ahora todas las cotizaciones (Spot,
  * MEP, CCL, Blue) se muestran en una sola línea horizontal compacta,
- * formato: "Dolar Spot $1.393,50 $1.402,50  Dolar MEP …".
+ * con jerarquía visual:
+ *   - Header tipo dashboard arriba: "COTIZACIONES DEL DÍA · Tue, 05/05"
+ *   - 4 columnas con separadores verticales entre ellas
+ *   - Cada columna: nombre del dólar (uppercase, dim) + dos valores
+ *     etiquetados como "Compra" (muted) y "Venta" (text destacado)
  *
- * El primer monto es la PUNTA COMPRADORA, el segundo es la VENDEDORA.
+ * La diferenciación compra/venta se logra con:
+ *   - sub-label "Compra" / "Venta" en gris pequeñito sobre cada valor
+ *   - "Compra" en color C.muted (más discreta)
+ *   - "Venta" en color C.text con peso 600 (es la que más se mira en
+ *     la operativa de la fintech AR)
  */
 
 function FxLine({ fx, loading, error, onRefresh }) {
   const items = [
-    { key: "mayorista", label: "Dolar Spot" },
+    { key: "mayorista", label: "Dólar Spot" },
     { key: "mep",       label: "Dólar MEP"  },
     { key: "ccl",       label: "Dólar CCL"  },
     { key: "blue",      label: "Dólar Blue" },
@@ -2861,80 +2871,163 @@ function FxLine({ fx, loading, error, onRefresh }) {
 
   return (
     <div
-      className="flex items-center justify-between flex-wrap"
       style={{
         backgroundColor: C.panel,
         border: `1px solid ${C.border}`,
-        padding: "8px 14px",
-        gap: 18,
-        marginBottom: 14,
+        marginBottom: 18,
       }}
     >
-      <div className="flex items-center flex-wrap" style={{ gap: 22, rowGap: 6 }}>
-        {items.map((it) => {
+      {/* Header del bloque con label tipo dashboard + botón actualizar */}
+      <div
+        className="flex items-center justify-between"
+        style={{
+          padding: "8px 14px",
+          borderBottom: `1px solid ${C.border}`,
+        }}
+      >
+        <span
+          style={{
+            fontSize: 9,
+            letterSpacing: "0.22em",
+            color: C.dim,
+            textTransform: "uppercase",
+            fontWeight: 600,
+            fontFamily: "'Roboto', sans-serif",
+          }}
+        >
+          Cotizaciones del día
+        </span>
+        <button
+          onClick={onRefresh}
+          className="eco-refresh-btn"
+          disabled={loading}
+          style={{
+            backgroundColor: "transparent",
+            border: `1px solid ${C.border}`,
+            color: C.muted,
+            padding: "3px 9px",
+            fontSize: 10,
+            fontFamily: "'Roboto', sans-serif",
+            cursor: loading ? "wait" : "pointer",
+            display: "flex",
+            alignItems: "center",
+            gap: 6,
+          }}
+        >
+          <RefreshCw size={10} strokeWidth={1.8} className={loading ? "eco-spin" : undefined} />
+          {loading ? "Cargando" : "Actualizar"}
+        </button>
+      </div>
+
+      {/* Grid de 4 cotizaciones con separadores verticales */}
+      <div
+        className="grid"
+        style={{
+          gridTemplateColumns: "repeat(4, 1fr)",
+        }}
+      >
+        {items.map((it, idx) => {
           const data = fx?.[it.key];
           const buy = data?.buy;
           const sell = data?.sell;
+          const empty = !data || (buy == null && sell == null);
+
           return (
-            <div key={it.key} className="flex items-center" style={{ gap: 8 }}>
+            <div
+              key={it.key}
+              style={{
+                padding: "12px 16px",
+                borderRight: idx < items.length - 1 ? `1px solid ${C.border}` : "none",
+                display: "flex",
+                flexDirection: "column",
+                gap: 8,
+              }}
+            >
+              {/* Nombre del dólar */}
               <span
                 style={{
-                  fontSize: 10.5,
+                  fontSize: 9,
+                  letterSpacing: "0.18em",
                   color: C.muted,
-                  fontWeight: 500,
-                  letterSpacing: "0.02em",
+                  textTransform: "uppercase",
+                  fontWeight: 600,
                   fontFamily: "'Roboto', sans-serif",
                 }}
               >
                 {it.label}
               </span>
-              {(!data || (buy == null && sell == null)) ? (
-                <span style={{ fontSize: 12, color: C.dim, fontFamily: "'JetBrains Mono', monospace" }}>—</span>
+
+              {empty ? (
+                <span style={{ fontSize: 16, color: C.dim, fontFamily: "'JetBrains Mono', monospace" }}>—</span>
               ) : (
-                <span
-                  style={{
-                    fontSize: 12,
-                    color: C.text,
-                    fontFamily: "'JetBrains Mono', monospace",
-                    fontWeight: 500,
-                    letterSpacing: "-0.01em",
-                  }}
-                >
-                  {buy != null ? fmtCurrencyValue(buy, "ARS") : "—"}
-                  {"  "}
-                  <span style={{ color: C.muted, fontWeight: 400 }}>·</span>
-                  {"  "}
-                  {sell != null ? fmtCurrencyValue(sell, "ARS") : "—"}
-                </span>
+                /* Dos columnas: Compra | Venta, con jerarquía visual */
+                <div className="flex items-baseline" style={{ gap: 18 }}>
+                  <div className="flex flex-col" style={{ gap: 2 }}>
+                    <span
+                      style={{
+                        fontSize: 9,
+                        color: C.dim,
+                        letterSpacing: "0.06em",
+                        textTransform: "uppercase",
+                        fontFamily: "'Roboto', sans-serif",
+                      }}
+                    >
+                      Compra
+                    </span>
+                    <span
+                      style={{
+                        fontSize: 14,
+                        color: C.muted,
+                        fontFamily: "'JetBrains Mono', monospace",
+                        fontWeight: 500,
+                        letterSpacing: "-0.01em",
+                      }}
+                    >
+                      {buy != null ? fmtCurrencyValue(buy, "ARS") : "—"}
+                    </span>
+                  </div>
+                  <div className="flex flex-col" style={{ gap: 2 }}>
+                    <span
+                      style={{
+                        fontSize: 9,
+                        color: C.dim,
+                        letterSpacing: "0.06em",
+                        textTransform: "uppercase",
+                        fontFamily: "'Roboto', sans-serif",
+                      }}
+                    >
+                      Venta
+                    </span>
+                    <span
+                      style={{
+                        fontSize: 14,
+                        color: C.text,
+                        fontFamily: "'JetBrains Mono', monospace",
+                        fontWeight: 600,
+                        letterSpacing: "-0.01em",
+                      }}
+                    >
+                      {sell != null ? fmtCurrencyValue(sell, "ARS") : "—"}
+                    </span>
+                  </div>
+                </div>
               )}
             </div>
           );
         })}
       </div>
-      <button
-        onClick={onRefresh}
-        className="eco-refresh-btn"
-        disabled={loading}
-        style={{
-          backgroundColor: "transparent",
-          border: `1px solid ${C.border}`,
-          color: C.muted,
-          padding: "4px 10px",
-          fontSize: 10.5,
-          fontFamily: "'Roboto', sans-serif",
-          cursor: loading ? "wait" : "pointer",
-          display: "flex",
-          alignItems: "center",
-          gap: 6,
-        }}
-      >
-        <RefreshCw size={11} strokeWidth={1.8} className={loading ? "eco-spin" : undefined} />
-        {loading ? "Cargando" : "Actualizar"}
-      </button>
+
       {error && !fx && (
-        <span style={{ fontSize: 11, color: C.red }}>
+        <div
+          style={{
+            fontSize: 11,
+            color: C.red,
+            padding: "6px 14px",
+            borderTop: `1px solid ${C.border}`,
+          }}
+        >
           Error cargando cotizaciones: {error}
-        </span>
+        </div>
       )}
     </div>
   );
