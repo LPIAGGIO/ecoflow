@@ -2783,15 +2783,12 @@ function DashboardOverview({ positions, fxState, bondPricesState }) {
 
   return (
     <div style={{ marginBottom: 32 }}>
-      {/* 1. Banda FX */}
-      <FxBand
+      {/* 1. Línea de cotizaciones */}
+      <FxLine
         fx={fx}
         loading={anyLoading}
         error={fxError}
         onRefresh={handleRefreshAll}
-        lastUpdated={fxLastUpdated}
-        pricesLastFetch={pricesLastFetch}
-        pricesError={pricesError}
       />
 
       {/* 2. Toggle moneda de valuación */}
@@ -2844,6 +2841,104 @@ function DashboardOverview({ positions, fxState, bondPricesState }) {
   );
 }
 
+
+/* ─────────────── FX Line: una línea con cotizaciones ──────────────
+ *
+ * Reemplazó al FxBand de 4 cards. Ahora todas las cotizaciones (Spot,
+ * MEP, CCL, Blue) se muestran en una sola línea horizontal compacta,
+ * formato: "Dolar Spot $1.393,50 $1.402,50  Dolar MEP …".
+ *
+ * El primer monto es la PUNTA COMPRADORA, el segundo es la VENDEDORA.
+ */
+
+function FxLine({ fx, loading, error, onRefresh }) {
+  const items = [
+    { key: "mayorista", label: "Dolar Spot" },
+    { key: "mep",       label: "Dólar MEP"  },
+    { key: "ccl",       label: "Dólar CCL"  },
+    { key: "blue",      label: "Dólar Blue" },
+  ];
+
+  return (
+    <div
+      className="flex items-center justify-between flex-wrap"
+      style={{
+        backgroundColor: C.panel,
+        border: `1px solid ${C.border}`,
+        padding: "8px 14px",
+        gap: 18,
+        marginBottom: 14,
+      }}
+    >
+      <div className="flex items-center flex-wrap" style={{ gap: 22, rowGap: 6 }}>
+        {items.map((it) => {
+          const data = fx?.[it.key];
+          const buy = data?.buy;
+          const sell = data?.sell;
+          return (
+            <div key={it.key} className="flex items-center" style={{ gap: 8 }}>
+              <span
+                style={{
+                  fontSize: 10.5,
+                  color: C.muted,
+                  fontWeight: 500,
+                  letterSpacing: "0.02em",
+                  fontFamily: "'Roboto', sans-serif",
+                }}
+              >
+                {it.label}
+              </span>
+              {(!data || (buy == null && sell == null)) ? (
+                <span style={{ fontSize: 12, color: C.dim, fontFamily: "'JetBrains Mono', monospace" }}>—</span>
+              ) : (
+                <span
+                  style={{
+                    fontSize: 12,
+                    color: C.text,
+                    fontFamily: "'JetBrains Mono', monospace",
+                    fontWeight: 500,
+                    letterSpacing: "-0.01em",
+                  }}
+                >
+                  {buy != null ? fmtCurrencyValue(buy, "ARS") : "—"}
+                  {"  "}
+                  <span style={{ color: C.muted, fontWeight: 400 }}>·</span>
+                  {"  "}
+                  {sell != null ? fmtCurrencyValue(sell, "ARS") : "—"}
+                </span>
+              )}
+            </div>
+          );
+        })}
+      </div>
+      <button
+        onClick={onRefresh}
+        className="eco-refresh-btn"
+        disabled={loading}
+        style={{
+          backgroundColor: "transparent",
+          border: `1px solid ${C.border}`,
+          color: C.muted,
+          padding: "4px 10px",
+          fontSize: 10.5,
+          fontFamily: "'Roboto', sans-serif",
+          cursor: loading ? "wait" : "pointer",
+          display: "flex",
+          alignItems: "center",
+          gap: 6,
+        }}
+      >
+        <RefreshCw size={11} strokeWidth={1.8} className={loading ? "eco-spin" : undefined} />
+        {loading ? "Cargando" : "Actualizar"}
+      </button>
+      {error && !fx && (
+        <span style={{ fontSize: 11, color: C.red }}>
+          Error cargando cotizaciones: {error}
+        </span>
+      )}
+    </div>
+  );
+}
 
 /* ─────────────── FX Band: 4 cards de cotizaciones ─────────────── */
 
@@ -4819,6 +4914,116 @@ function consolidatePositions(positions, bondPrices) {
   return result;
 }
 
+/**
+ * Devuelve la fecha "hoy" como string YYYY-MM-DD en zona horaria de
+ * Buenos Aires. La usamos para filtrar las posiciones cerradas a las
+ * del día en curso.
+ */
+function getTodayStringAR() {
+  // "en-CA" da formato YYYY-MM-DD por defecto, perfecto para comparar
+  // contra entry_date que viene de la BD en ese mismo formato.
+  return new Date().toLocaleDateString("en-CA", {
+    timeZone: "America/Argentina/Buenos_Aires",
+  });
+}
+
+/**
+ * Toma el array de posiciones cerradas (ya consolidadas, con `operations`
+ * conteniendo el sintético: pares COMPRA-espejo + VENTA real) y devuelve
+ * solo las que tienen al menos una VENTA de hoy.
+ *
+ * Para cada fila resultante:
+ *   - filtra `operations` a solo los pares cuya VENTA tiene entry_date=hoy
+ *   - recalcula el P&L sumando solo esos pares
+ *   - actualiza closedQty al total vendido hoy
+ *
+ * Las cerradas históricas (de días previos) NO aparecen — su P&L se
+ * considera ya "consolidado" en el efectivo del comitente y no debería
+ * mezclarse con la operativa del día. Esto evita que mañana se vean las
+ * ventas de hoy mezcladas con las de mañana.
+ */
+function filterClosedToToday(closedGroups) {
+  const today = getTodayStringAR();
+  const result = [];
+
+  for (const g of closedGroups) {
+    // operations viene del sintético: pares (compra-espejo, venta-real)
+    // intercalados. Las posiciones cerradas SIEMPRE tienen sintético,
+    // pero por si acaso validamos que las longitudes sean pares.
+    const ops = g.operations || [];
+    if (ops.length % 2 !== 0) continue;
+
+    const todayPairs = [];
+    for (let i = 0; i < ops.length; i += 2) {
+      const buy = ops[i];
+      const sell = ops[i + 1];
+      if (!sell) continue;
+      if (sell.entry_date === today) {
+        todayPairs.push(buy, sell);
+      }
+    }
+
+    if (todayPairs.length === 0) continue;
+
+    // Recalcular P&L raw del día (suma de qtyVenta × Δprice por par)
+    let realizedPnlRaw = 0;
+    let closedQtyToday = 0;
+    for (let i = 0; i < todayPairs.length; i += 2) {
+      const buy = todayPairs[i];
+      const sell = todayPairs[i + 1];
+      const qty = Number(sell.quantity) || 0;
+      const sellPrice = Number(sell.entry_price) || 0;
+      const buyPrice = buy?.entry_price; // puede ser null en short
+      if (buyPrice != null) {
+        realizedPnlRaw += qty * (sellPrice - buyPrice);
+      }
+      closedQtyToday += qty;
+    }
+
+    // Aplicar convención del instrumento al P&L raw.
+    let realizedPnl;
+    if (g.instrument_type === "future") {
+      realizedPnl = realizedPnlRaw * FUTURE_MULTIPLIER_DEFAULT;
+    } else {
+      // applyConventionToValue(type, 1, raw) escala por la convención
+      // (bonos /100, opciones ×100, resto ×1).
+      realizedPnl = applyConventionToValue(g.instrument_type, 1, realizedPnlRaw);
+    }
+
+    // pnlPct: ratio sobre costo del lote vendido a PPP (aproximación;
+    // si todos los pares tienen el mismo PPP el valor es exacto, si no
+    // es un promedio ponderado razonable).
+    let pnlPct = null;
+    const valueAtCostToday = todayPairs.reduce((acc, op, idx) => {
+      // Solo los buys (índices pares)
+      if (idx % 2 !== 0) return acc;
+      const qty = Number(op.quantity) || 0;
+      const price = op.entry_price;
+      if (price == null) return acc;
+      return acc + applyConventionToValue(g.instrument_type, qty, price);
+    }, 0);
+    if (Math.abs(valueAtCostToday) > 0) {
+      pnlPct = (realizedPnl / Math.abs(valueAtCostToday)) * 100;
+    }
+
+    result.push({
+      ...g,
+      operations: todayPairs,
+      operationsCount: todayPairs.length,
+      buyOpsCount: 0, // sintético, no son compras "reales"
+      sellOpsCount: todayPairs.length / 2,
+      pnl: realizedPnl,
+      realizedPnl: realizedPnl,
+      valueAtMarket: realizedPnl,
+      valueAtCost: 0,
+      pnlPct,
+      closedQty: closedQtyToday,
+    });
+  }
+
+  return result;
+}
+
 function ticker_isBondLike(instrumentType) {
   return (
     instrumentType === "bond_ars" ||
@@ -5216,7 +5421,12 @@ function ConsolidatedSection({
   );
 
   const open = allConsolidated.filter((g) => !g.isClosed);
-  const closed = allConsolidated.filter((g) => g.isClosed);
+  const closedAll = allConsolidated.filter((g) => g.isClosed);
+  // Solo mostramos las cerradas DE HOY: filtramos los pares sintéticos
+  // por fecha de venta y recalculamos P&L solo del día. Esto evita que
+  // ventas de días previos se mezclen con las de hoy en la UI y en el
+  // total realizado del banner.
+  const closed = filterClosedToToday(closedAll);
 
   return (
     <div style={{ marginBottom: 24 }}>
@@ -5342,7 +5552,7 @@ function ClosedPositionsSection({ closed, onEdit, onDelete, onUpdatePrice }) {
             textTransform: "uppercase",
             fontWeight: 600,
           }}>
-            Posiciones cerradas ({closed.length})
+            Posiciones cerradas hoy ({closed.length})
           </span>
           <span
             className="eco-mono"
