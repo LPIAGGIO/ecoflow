@@ -4164,6 +4164,113 @@ function consolidatePositions(positions, bondPrices) {
   // activo fungible (ej. distintas cauciones a distinto plazo).
   const NO_CONSOLIDATE = new Set(["caucion", "option", "fci"]);
 
+  /**
+   * Construye el detalle "neteado" de operaciones para mostrar en el
+   * expandible de la fila CERRADA, y calcula el P&L realizado total
+   * sumando el P&L de cada par sintético.
+   *
+   * Reemplaza el log crudo de movimientos por pares COMPRA↔VENTA donde
+   * cada par representa una venta original con su contraparte de costo
+   * al PPP que tenía la posición JUSTO ANTES de esa venta.
+   *
+   * Ejemplo:
+   *   compra 100 @ 10  → PPP en ese momento = 10
+   *   venta  40 @ 12   → emite par: compra-espejo "40 @ 10" + venta "40 @ 12"
+   *                       (P&L par = 40 × (12-10) = 80 raw)
+   *   compra 60 @ 14   → PPP ahora = (60×10 + 60×14) / 120 = 12  (60 quedaron del lote inicial)
+   *   venta  50 @ 15   → emite par: compra-espejo "50 @ 12" + venta "50 @ 15"
+   *                       (P&L par = 50 × (15-12) = 150 raw)
+   *
+   * Las operaciones sintéticas se marcan con isSynthetic=true para que
+   * la UI deshabilite los botones edit/delete (no existen en la BD).
+   *
+   * IMPORTANTE: El P&L "raw" devuelto NO tiene aplicada la convención
+   * del instrumento (×100 para opciones, ×1000 para futuros, /100 para
+   * bonos). Lo aplicamos en el caller con applyConventionToValue.
+   *
+   * @returns { synthetic: [...], realizedPnlRaw: number }
+   */
+  const buildClosedOperationsSynthetic = (g) => {
+    // Ordenar cronológicamente: entry_date asc, created_at asc como tiebreaker.
+    // Una operación sin entry_date va al final (caso edge).
+    const sorted = [...g.operations].sort((a, b) => {
+      const da = a.entry_date || "9999-12-31";
+      const db = b.entry_date || "9999-12-31";
+      if (da !== db) return da.localeCompare(db);
+      const ca = a.created_at || "";
+      const cb = b.created_at || "";
+      return ca.localeCompare(cb);
+    });
+
+    // Recorremos en orden. Mantenemos PPP y qty acumulada de compras.
+    // En cada VENTA emitimos un par sintético (compra-espejo + venta).
+    let cumulativeBuyQty = 0;
+    let cumulativeBuyValue = 0; // suma(qty × price) de compras
+    const synthetic = [];
+    let realizedPnlRaw = 0;
+    let synthIdx = 0;
+
+    for (const op of sorted) {
+      const qty = Number(op.quantity) || 0;
+      const price = Number(op.entry_price) || 0;
+      if (op.operation_type === "sell") {
+        // PPP en este momento = valor acumulado / qty acumulada
+        const pppNow = cumulativeBuyQty > 0
+          ? cumulativeBuyValue / cumulativeBuyQty
+          : null;
+
+        // P&L "raw" del par (sin aplicar convención del instrumento)
+        if (pppNow != null) {
+          realizedPnlRaw += qty * (price - pppNow);
+        }
+
+        // 1) Compra-espejo: misma qty que la venta, al PPP del momento.
+        //    Fecha = la de la venta (porque conceptualmente "salieron del
+        //    inventario" recién ahora). Sin notas.
+        synthetic.push({
+          id: `${op.id}__synth_buy_${synthIdx}`,
+          isSynthetic: true,
+          operation_type: "buy",
+          ticker: op.ticker,
+          instrument_type: op.instrument_type,
+          quantity: qty,
+          entry_price: pppNow, // puede ser null si es short — la UI muestra "—"
+          entry_currency: op.entry_currency,
+          entry_date: op.entry_date, // misma fecha que la venta
+          notes: null,
+        });
+
+        // 2) Venta real: la copiamos con sus datos originales pero la
+        //    marcamos isSynthetic=true para que el render NO permita
+        //    editarla/borrarla desde acá (la fila real sigue editable
+        //    desde Libro de operaciones / fila ABIERTA si corresponde).
+        synthetic.push({
+          ...op,
+          isSynthetic: true,
+        });
+
+        synthIdx++;
+
+        // En la convención PPP "Cocos/Balanz", la venta NO toca el PPP
+        // de las compras pendientes. Mantenemos PPP — pero descontamos
+        // qty proporcional para que el "PPP futuro" se calcule sobre
+        // el remanente correcto (qtyVendida × PPP sale del valor).
+        if (cumulativeBuyQty > 0 && pppNow != null) {
+          const qtyToConsume = Math.min(qty, cumulativeBuyQty);
+          cumulativeBuyQty -= qtyToConsume;
+          cumulativeBuyValue -= qtyToConsume * pppNow;
+        }
+      } else {
+        // COMPRA: suma al acumulado. (No emite fila al sintético porque
+        // las compras puras viven en la fila ABIERTA, no acá).
+        cumulativeBuyQty += qty;
+        cumulativeBuyValue += qty * price;
+      }
+    }
+
+    return { synthetic, realizedPnlRaw };
+  };
+
   const groups = new Map();
 
   for (const p of positions) {
@@ -4345,12 +4452,22 @@ function consolidatePositions(positions, bondPrices) {
     if (g.instrument_type === "future") {
       const mult = FUTURE_MULTIPLIER_DEFAULT;
 
-      // P&L REALIZADO (de ventas/cierres):
-      //   = qty_vendida × mult × (PPV − PPP)
-      // Es lo que efectivamente ganaste/perdiste al cerrar contratos
-      // contra el precio promedio de compra.
-      if (g.totalSellQty > 0 && ppp != null && ppv != null) {
-        realizedPnl = g.totalSellQty * mult * (ppv - ppp);
+      // Construimos el sintético una sola vez. Devuelve los pares
+      // COMPRA-espejo + VENTA neteados, y el P&L realizado total
+      // calculado par-por-par con PPP cronológico (PPP al momento de
+      // cada venta, no PPP final). Usamos esto como SOURCE OF TRUTH
+      // para tanto el detalle expandible como el realizedPnl global —
+      // así los números de pantalla siempre cuadran.
+      const synth = (g.totalSellQty > 0)
+        ? buildClosedOperationsSynthetic(g)
+        : { synthetic: [], realizedPnlRaw: 0 };
+      const closedOperations = synth.synthetic;
+
+      // P&L REALIZADO: para futuros se aplica el multiplicador al raw.
+      //   raw = sum(qtyVendida × (PPVenta - PPP_momento))
+      //   con multiplicador: raw × FUTURE_MULTIPLIER_DEFAULT
+      if (g.totalSellQty > 0) {
+        realizedPnl = synth.realizedPnlRaw * mult;
       } else {
         realizedPnl = 0;
       }
@@ -4381,7 +4498,7 @@ function consolidatePositions(positions, bondPrices) {
         // (las de venta van a la cerrada). Para el detalle expandible esto
         // significa que en la fila abierta se ven solo las compras.
         const openOperations = g.operations.filter((o) => o.operation_type !== "sell");
-        const closedOperations = g.operations; // la cerrada lleva todo el contexto
+        // closedOperations ya viene del sintético calculado arriba
 
         // Para la entrada CERRADA: precio actual = lastSellPrice, P&L realizado
         const closedPnl = realizedPnl;
@@ -4497,14 +4614,29 @@ function consolidatePositions(positions, bondPrices) {
       //      vendida, aplicando la convención del instrumento.
       // ─────────────────────────────────────────────────────────────────
 
-      // P&L REALIZADO sobre las ventas (si hubo).
-      // Para bonos: (qtyVendida × PPV /100) − (qtyVendida × PPP /100)
-      // Para acciones: qtyVendida × (PPV − PPP)
-      // Etcétera, todo via applyConventionToValue.
-      if (g.totalSellQty > 0 && ppp != null && ppv != null) {
-        const valueOfSells = applyConventionToValue(g.instrument_type, g.totalSellQty, ppv);
-        const costOfSells  = applyConventionToValue(g.instrument_type, g.totalSellQty, ppp);
-        realizedPnl = valueOfSells - costOfSells;
+      // Construimos el sintético una sola vez. Devuelve los pares
+      // COMPRA-espejo + VENTA neteados, y el P&L realizado total
+      // calculado par-por-par con PPP cronológico (PPP al momento de
+      // cada venta, no PPP final). Source of truth tanto para el
+      // detalle expandible como para realizedPnl global.
+      const synth = (g.totalSellQty > 0)
+        ? buildClosedOperationsSynthetic(g)
+        : { synthetic: [], realizedPnlRaw: 0 };
+      const closedOperations = synth.synthetic;
+
+      // P&L REALIZADO sobre las ventas (si hubo). Aplicamos la convención
+      // del instrumento al raw: para bonos /100, para opciones ×100, etc.
+      // Hacemos un truco: applyConventionToValue(type, qty, price) nos
+      // sirve si pasamos qty=1 y price=raw — devuelve el raw escalado.
+      if (g.totalSellQty > 0) {
+        // applyConventionToValue para no-futuros calcula:
+        //   bonos:    (qty * price) / 100
+        //   opciones: qty * 100 * price
+        //   resto:    qty * price
+        // Acá el "raw" ya es qty × Δprice (suma sobre los pares), así
+        // que llamamos con qty=1 para que NO multiplique de nuevo, solo
+        // aplique el factor (/100, ×100, o ×1).
+        realizedPnl = applyConventionToValue(g.instrument_type, 1, synth.realizedPnlRaw);
       } else {
         realizedPnl = 0;
       }
@@ -4533,7 +4665,7 @@ function consolidatePositions(positions, bondPrices) {
           : null;
 
         const openOperations = g.operations.filter((o) => o.operation_type !== "sell");
-        const closedOperations = g.operations; // la cerrada lleva todo el contexto
+        // closedOperations ya viene del sintético calculado arriba
 
         // ── Entrada CERRADA: usa totalSellQty + PPP + PPV ──
         const closedPnl = realizedPnl;
@@ -4639,13 +4771,21 @@ function consolidatePositions(positions, bondPrices) {
       }
     }
 
+    // Para el detalle expandible: si es cierre total, mostramos pares
+    // COMPRA-espejo + VENTA (sintético, ver buildClosedOperationsSynthetic).
+    // Para posición abierta pura sin ventas, las operations crudas alcanzan.
+    // El caso parcial se maneja arriba con su propio push.
+    const operationsForRender = (isClosed && g.totalSellQty > 0)
+      ? buildClosedOperationsSynthetic(g).synthetic
+      : g.operations;
+
     result.push({
       groupKey: g.groupKey,
       instrument_type: g.instrument_type,
       ticker: g.ticker,
       currency: g.currency,
-      operations: g.operations,
-      operationsCount: g.operations.length,
+      operations: operationsForRender,
+      operationsCount: operationsForRender.length,
       buyOpsCount: g.operations.filter((o) => o.operation_type !== "sell").length,
       sellOpsCount: g.operations.filter((o) => o.operation_type === "sell").length,
       netQty,
@@ -5784,58 +5924,68 @@ function ConsolidatedRow({ group, expanded, onToggle, onEdit, onDelete, onUpdate
                           </span>
                         </td>
                         <td style={subTdStyle("right")}>
-                          <div className="flex items-center justify-end gap-1">
-                            <button
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                onEdit(p);
-                              }}
-                              aria-label="Editar"
-                              style={{
-                                backgroundColor: "transparent",
-                                border: `1px solid transparent`,
-                                color: C.dim,
-                                padding: 4,
-                                cursor: "pointer",
-                                transition: "all 100ms ease",
-                              }}
-                              onMouseEnter={(e) => {
-                                e.currentTarget.style.color = C.accent;
-                                e.currentTarget.style.borderColor = C.accentBorder;
-                              }}
-                              onMouseLeave={(e) => {
-                                e.currentTarget.style.color = C.dim;
-                                e.currentTarget.style.borderColor = "transparent";
-                              }}
-                            >
-                              <Pencil size={11} strokeWidth={1.8} />
-                            </button>
-                            <button
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                onDelete(p);
-                              }}
-                              aria-label="Borrar"
-                              style={{
-                                backgroundColor: "transparent",
-                                border: `1px solid transparent`,
-                                color: C.dim,
-                                padding: 4,
-                                cursor: "pointer",
-                                transition: "all 100ms ease",
-                              }}
-                              onMouseEnter={(e) => {
-                                e.currentTarget.style.color = C.red;
-                                e.currentTarget.style.borderColor = "rgba(248,113,113,0.25)";
-                              }}
-                              onMouseLeave={(e) => {
-                                e.currentTarget.style.color = C.dim;
-                                e.currentTarget.style.borderColor = "transparent";
-                              }}
-                            >
-                              <Trash2 size={11} strokeWidth={1.8} />
-                            </button>
-                          </div>
+                          {p.isSynthetic ? (
+                            // Operaciones sintéticas: son la representación
+                            // neteada (compra-espejo a PPP + venta real) que
+                            // arma buildClosedOperationsSynthetic. No existen
+                            // como filas en la BD, por lo que no se pueden
+                            // editar ni borrar desde acá. Para tocar la venta
+                            // original, ir a Libro de operaciones.
+                            <span style={{ color: C.dim, fontSize: 9 }}>—</span>
+                          ) : (
+                            <div className="flex items-center justify-end gap-1">
+                              <button
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  onEdit(p);
+                                }}
+                                aria-label="Editar"
+                                style={{
+                                  backgroundColor: "transparent",
+                                  border: `1px solid transparent`,
+                                  color: C.dim,
+                                  padding: 4,
+                                  cursor: "pointer",
+                                  transition: "all 100ms ease",
+                                }}
+                                onMouseEnter={(e) => {
+                                  e.currentTarget.style.color = C.accent;
+                                  e.currentTarget.style.borderColor = C.accentBorder;
+                                }}
+                                onMouseLeave={(e) => {
+                                  e.currentTarget.style.color = C.dim;
+                                  e.currentTarget.style.borderColor = "transparent";
+                                }}
+                              >
+                                <Pencil size={11} strokeWidth={1.8} />
+                              </button>
+                              <button
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  onDelete(p);
+                                }}
+                                aria-label="Borrar"
+                                style={{
+                                  backgroundColor: "transparent",
+                                  border: `1px solid transparent`,
+                                  color: C.dim,
+                                  padding: 4,
+                                  cursor: "pointer",
+                                  transition: "all 100ms ease",
+                                }}
+                                onMouseEnter={(e) => {
+                                  e.currentTarget.style.color = C.red;
+                                  e.currentTarget.style.borderColor = "rgba(248,113,113,0.25)";
+                                }}
+                                onMouseLeave={(e) => {
+                                  e.currentTarget.style.color = C.dim;
+                                  e.currentTarget.style.borderColor = "transparent";
+                                }}
+                              >
+                                <Trash2 size={11} strokeWidth={1.8} />
+                              </button>
+                            </div>
+                          )}
                         </td>
                       </tr>
                     );
