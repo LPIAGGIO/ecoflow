@@ -3076,7 +3076,7 @@ function fmtDateShort(iso) {
  * y los números reales los conectamos al final.
  */
 
-function DashboardOverview({ positions, fxState, bondPricesState }) {
+function DashboardOverview({ positions, fxState, bondPricesState, onIngresar, onRetirar }) {
   const { fx, loading: fxLoading, error: fxError, lastUpdated: fxLastUpdated, refresh: refreshFx } = fxState;
   const { prices: bondPrices, loading: pricesLoading, error: pricesError, lastFetch: pricesLastFetch, refresh: refreshBondPrices } = bondPricesState;
 
@@ -3125,6 +3125,8 @@ function DashboardOverview({ positions, fxState, bondPricesState }) {
           fx={fx}
           bondPrices={bondPrices}
           valuationCurrency={valuationCurrency}
+          onIngresar={onIngresar}
+          onRetirar={onRetirar}
         />
         <DistributionCard
           positions={positions}
@@ -3497,7 +3499,7 @@ function ValuationToggle({ value, onChange }) {
 
 /* ─────────────── Card 1: Total de cartera ─────────────── */
 
-function TotalCard({ positions, fx, bondPrices, valuationCurrency }) {
+function TotalCard({ positions, fx, bondPrices, valuationCurrency, onIngresar, onRetirar }) {
   // V2: ahora usamos precios de mercado de data912 cuando están disponibles.
   // El P&L se calcula como market - cost. Si no hay precio actualizado para
   // alguna posición, esa cae al fallback "a costo" y aparece en pricesFromCost.
@@ -3624,6 +3626,77 @@ function TotalCard({ positions, fx, bondPrices, valuationCurrency }) {
         >
           <AlertTriangle size={11} strokeWidth={1.8} />
           <span>{totals.unvalued} {totals.unvalued === 1 ? "posición sin valuar" : "posiciones sin valuar"}</span>
+        </div>
+      )}
+
+      {/* Botones Ingresar / Retirar (modelo Balanz).
+       *
+       * Se usan para cargar movimientos manuales de cash (depósitos
+       * desde el banco al broker, retiros del broker al banco). Las
+       * compras y ventas mueven cash automático y NO requieren tocar
+       * estos botones. Si onIngresar/onRetirar no fueron pasados (caso
+       * de uso fuera del PortfolioDashboard), los botones no aparecen. */}
+      {(onIngresar || onRetirar) && (
+        <div
+          className="flex gap-2"
+          style={{ marginTop: 14, paddingTop: 12, borderTop: `1px solid ${C.border}` }}
+        >
+          {onRetirar && (
+            <button
+              onClick={onRetirar}
+              style={{
+                flex: 1,
+                backgroundColor: "transparent",
+                border: `1px solid ${C.border}`,
+                color: C.muted,
+                padding: "7px 10px",
+                fontSize: 11.5,
+                fontFamily: "'Roboto', sans-serif",
+                fontWeight: 500,
+                letterSpacing: "0.02em",
+                cursor: "pointer",
+                transition: "all 120ms ease",
+              }}
+              onMouseEnter={(e) => {
+                e.currentTarget.style.color = C.text;
+                e.currentTarget.style.borderColor = C.borderStrong;
+              }}
+              onMouseLeave={(e) => {
+                e.currentTarget.style.color = C.muted;
+                e.currentTarget.style.borderColor = C.border;
+              }}
+            >
+              Retirar
+            </button>
+          )}
+          {onIngresar && (
+            <button
+              onClick={onIngresar}
+              style={{
+                flex: 1,
+                backgroundColor: C.accent,
+                color: C.bg,
+                border: "none",
+                padding: "7px 10px",
+                fontSize: 11.5,
+                fontFamily: "'Roboto', sans-serif",
+                fontWeight: 600,
+                letterSpacing: "0.02em",
+                cursor: "pointer",
+                transition: "transform 120ms ease, box-shadow 120ms ease",
+              }}
+              onMouseEnter={(e) => {
+                e.currentTarget.style.transform = "translateY(-1px)";
+                e.currentTarget.style.boxShadow = `0 4px 12px ${C.accentGlow}`;
+              }}
+              onMouseLeave={(e) => {
+                e.currentTarget.style.transform = "translateY(0)";
+                e.currentTarget.style.boxShadow = "none";
+              }}
+            >
+              Ingresar
+            </button>
+          )}
         </div>
       )}
     </div>
@@ -5574,6 +5647,10 @@ function PortfolioDashboard({ onNavigate }) {
   const [editingPosition, setEditingPosition] = useState(null);
   const [filter, setFilter] = useState("all");
   const [confirmingDelete, setConfirmingDelete] = useState(null);
+  // Modal de movimiento manual de cash (Ingresar / Retirar). null = cerrado.
+  // Cuando está abierto, contiene el `type` ("deposit" o "withdrawal") para
+  // que el modal sepa qué etiquetas y colores mostrar.
+  const [cashModalType, setCashModalType] = useState(null);
 
   // Handler para edición inline de current_price desde la tabla de
   // posiciones. Acepta `null` para limpiar el override y volver al
@@ -5736,6 +5813,8 @@ function PortfolioDashboard({ onNavigate }) {
             positions={positions}
             fxState={fxState}
             bondPricesState={bondPricesState}
+            onIngresar={() => setCashModalType("deposit")}
+            onRetirar={() => setCashModalType("withdrawal")}
           />
 
           {/* Vista consolidada (Modelo B): agrupa por ticker × moneda × tipo */}
@@ -5781,6 +5860,18 @@ function PortfolioDashboard({ onNavigate }) {
           position={confirmingDelete}
           onCancel={() => setConfirmingDelete(null)}
           onConfirm={handleDeleteConfirm}
+        />
+      )}
+
+      {/* Modal de movimiento manual de cash (Ingresar / Retirar) */}
+      {cashModalType && (
+        <CashMovementModal
+          type={cashModalType}
+          onCancel={() => setCashModalType(null)}
+          onSubmit={async (payload) => {
+            await cashState.addManualMovement(payload);
+            setCashModalType(null);
+          }}
         />
       )}
     </div>
@@ -7215,6 +7306,255 @@ function EditablePriceCell({ position, resolved, onSave }) {
 }
 
 
+/* ─────────────── Modal: ingresar / retirar efectivo ───────────────
+ *
+ * Modal genérico para cargar movimientos manuales de cash:
+ *   - "deposit"    (Ingresar): plata que entra al broker desde tu banco.
+ *                              También sirve para cargar el saldo inicial
+ *                              cuando arrancás con la app.
+ *   - "withdrawal" (Retirar):  plata que sale del broker hacia tu banco.
+ *
+ * Las compras y ventas NO usan este modal — generan movements automáticos
+ * desde el drawer de cargar posición.
+ *
+ * El modal recibe:
+ *   - type: "deposit" | "withdrawal" — predetermina título/colores/etiquetas
+ *   - onCancel: cierra sin guardar
+ *   - onSubmit({movement_type, currency, amount, movement_date, notes}):
+ *       el padre se encarga de llamar al hook useCashMovements.addManualMovement
+ */
+function CashMovementModal({ type, onCancel, onSubmit }) {
+  const isDeposit = type === "deposit";
+  const titleColor = isDeposit ? C.green : C.red;
+
+  const [form, setForm] = useState({
+    currency: "ARS",
+    amount: "",
+    movement_date: new Date().toISOString().slice(0, 10),
+    notes: "",
+  });
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState(null);
+
+  const setField = (key, value) => {
+    setForm((f) => ({ ...f, [key]: value }));
+    if (error) setError(null);
+  };
+
+  // Validación: monto > 0 (los demás tienen defaults)
+  const formIsValid = (() => {
+    const n = Number(form.amount);
+    return Number.isFinite(n) && n > 0;
+  })();
+
+  const handleSubmit = async () => {
+    if (!formIsValid) return;
+    setSubmitting(true);
+    setError(null);
+    try {
+      await onSubmit({
+        movement_type: type,
+        currency: form.currency,
+        amount: Number(form.amount),
+        movement_date: form.movement_date,
+        notes: form.notes.trim() || null,
+      });
+    } catch (err) {
+      setError(err.message || "Error al guardar el movimiento");
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <>
+      <div
+        onClick={!submitting ? onCancel : undefined}
+        style={{
+          position: "fixed",
+          inset: 0,
+          backgroundColor: "rgba(0,0,0,0.5)",
+          backdropFilter: "blur(2px)",
+          zIndex: 90,
+          animation: "ecoFadeIn 120ms ease",
+        }}
+      />
+      <div
+        style={{
+          position: "fixed",
+          top: "50%",
+          left: "50%",
+          transform: "translate(-50%, -50%)",
+          backgroundColor: C.panel,
+          border: `1px solid ${C.borderStrong}`,
+          width: "min(440px, calc(100vw - 32px))",
+          padding: 22,
+          zIndex: 91,
+          animation: "ecoFadeIn 160ms ease",
+        }}
+      >
+        {/* Header */}
+        <div className="flex items-center justify-between" style={{ marginBottom: 18 }}>
+          <div className="flex items-center gap-2">
+            <span
+              style={{
+                width: 10, height: 10, borderRadius: "50%",
+                backgroundColor: titleColor,
+                display: "inline-block",
+              }}
+            />
+            <span
+              style={{
+                fontFamily: "'Raleway', sans-serif",
+                fontSize: 18,
+                fontWeight: 700,
+                color: C.text,
+                letterSpacing: "-0.01em",
+              }}
+            >
+              {isDeposit ? "Ingresar efectivo" : "Retirar efectivo"}
+            </span>
+          </div>
+          <button
+            onClick={onCancel}
+            disabled={submitting}
+            aria-label="Cerrar"
+            style={{
+              backgroundColor: "transparent",
+              border: "none",
+              color: C.dim,
+              cursor: submitting ? "default" : "pointer",
+              padding: 4,
+            }}
+          >
+            <X size={16} strokeWidth={1.8} />
+          </button>
+        </div>
+
+        <p style={{ fontSize: 12, color: C.muted, marginBottom: 18, lineHeight: 1.5 }}>
+          {isDeposit
+            ? "Cargá un depósito desde tu banco al broker, o el saldo inicial con el que arrancás. El monto se sumará al saldo de la moneda seleccionada."
+            : "Cargá un retiro desde el broker hacia tu banco. El monto se descontará del saldo de la moneda seleccionada."}
+        </p>
+
+        {/* Moneda */}
+        <FormSection label="Moneda">
+          <div className="flex gap-2">
+            <ToggleButton
+              active={form.currency === "ARS"}
+              onClick={() => setField("currency", "ARS")}
+            >
+              Pesos
+            </ToggleButton>
+            <ToggleButton
+              active={form.currency === "USD-MEP"}
+              onClick={() => setField("currency", "USD-MEP")}
+            >
+              Dólar MEP
+            </ToggleButton>
+            <ToggleButton
+              active={form.currency === "USD-CCL"}
+              onClick={() => setField("currency", "USD-CCL")}
+            >
+              Dólar CCL
+            </ToggleButton>
+          </div>
+        </FormSection>
+
+        {/* Monto */}
+        <FormSection label="Monto">
+          <MoneyInput
+            value={form.amount}
+            onChange={(v) => setField("amount", v)}
+            placeholder="0,00"
+          />
+        </FormSection>
+
+        {/* Fecha */}
+        <FormSection label="Fecha">
+          <Input
+            type="date"
+            value={form.movement_date}
+            onChange={(v) => setField("movement_date", v)}
+          />
+          <FieldHint>
+            La fecha en la que efectivamente se acreditó/debitó el cash.
+          </FieldHint>
+        </FormSection>
+
+        {/* Notas (opcional) */}
+        <FormSection label="Notas (opcional)">
+          <Input
+            value={form.notes}
+            onChange={(v) => setField("notes", v)}
+            placeholder="Ej: transferencia desde banco BBVA"
+          />
+        </FormSection>
+
+        {/* Error */}
+        {error && (
+          <div
+            className="flex items-center gap-2"
+            style={{
+              backgroundColor: "rgba(248,113,113,0.08)",
+              border: `1px solid rgba(248,113,113,0.30)`,
+              color: C.red,
+              padding: "8px 12px",
+              fontSize: 11.5,
+              marginBottom: 14,
+              fontFamily: "'Roboto', sans-serif",
+            }}
+          >
+            <AlertTriangle size={12} strokeWidth={1.8} />
+            <span>{error}</span>
+          </div>
+        )}
+
+        {/* Botones */}
+        <div className="flex gap-2" style={{ marginTop: 20 }}>
+          <button
+            onClick={onCancel}
+            disabled={submitting}
+            style={{
+              flex: 1,
+              backgroundColor: "transparent",
+              border: `1px solid ${C.border}`,
+              color: C.muted,
+              padding: "9px 14px",
+              fontSize: 12.5,
+              fontFamily: "'Roboto', sans-serif",
+              fontWeight: 500,
+              cursor: submitting ? "default" : "pointer",
+            }}
+          >
+            Cancelar
+          </button>
+          <button
+            onClick={handleSubmit}
+            disabled={!formIsValid || submitting}
+            style={{
+              flex: 1,
+              backgroundColor: formIsValid ? C.accent : C.border,
+              color: formIsValid ? C.bg : C.dim,
+              border: "none",
+              padding: "9px 14px",
+              fontSize: 12.5,
+              fontFamily: "'Roboto', sans-serif",
+              fontWeight: 600,
+              cursor: (!formIsValid || submitting) ? "default" : "pointer",
+              opacity: (!formIsValid || submitting) ? 0.7 : 1,
+              transition: "opacity 120ms ease",
+            }}
+          >
+            {submitting ? "Guardando..." : (isDeposit ? "Confirmar ingreso" : "Confirmar retiro")}
+          </button>
+        </div>
+      </div>
+    </>
+  );
+}
+
+
 /* ─────────────── Modal: confirmar borrado ─────────────── */
 function DeleteConfirmModal({ position, onCancel, onConfirm }) {
   const [deleting, setDeleting] = useState(false);
@@ -7365,6 +7705,7 @@ function AddPositionDrawer({ editingPosition, onClose, onSubmit }) {
         entry_price: editingPosition.entry_price ?? "",
         entry_currency: normalizeLegacyCurrency(editingPosition.entry_currency),
         entry_date: editingPosition.entry_date || new Date().toISOString().slice(0, 10),
+        settlement: editingPosition.settlement || "CI",
         notes: editingPosition.notes || "",
         // extra fields desde el JSONB
         rate_tna: editingPosition.extra?.rate_tna ?? "",
@@ -7382,6 +7723,7 @@ function AddPositionDrawer({ editingPosition, onClose, onSubmit }) {
       entry_price: "",
       entry_currency: "ARS",
       entry_date: new Date().toISOString().slice(0, 10),
+      settlement: "CI",
       notes: "",
       rate_tna: "",
       term_days: "",
@@ -7582,6 +7924,7 @@ function AddPositionDrawer({ editingPosition, onClose, onSubmit }) {
       entry_price: meta.priceLabel != null && form.entry_price !== "" ? Number(form.entry_price) : null,
       entry_currency: form.entry_currency,
       entry_date: form.entry_date,
+      settlement: form.settlement || "CI",
       notes: form.notes.trim() || null,
       extra,
     };
@@ -7735,6 +8078,44 @@ function AddPositionDrawer({ editingPosition, onClose, onSubmit }) {
               </ToggleButton>
             </div>
           </FormSection>
+
+          {/* Plazo de liquidación.
+           *
+           * CI = Contado Inmediato (mismo día, lo más común retail).
+           * T1 = 24hs hábiles (dinero queda disponible al siguiente día hábil).
+           *
+           * Solo se muestra para tipos donde el plazo de liquidación
+           * efectivamente impacta el cash (bonos, on, stocks, cedears).
+           * Para futuros, opciones, cauciones, FCI no aplica el concepto
+           * en esta primera versión y el campo se persiste como CI por
+           * default sin afectar nada.
+           */}
+          {(form.instrument_type === "bond" ||
+            form.instrument_type === "on" ||
+            form.instrument_type === "stock" ||
+            form.instrument_type === "cedear") && (
+            <FormSection label="Plazo de liquidación">
+              <div className="flex gap-2">
+                <ToggleButton
+                  active={form.settlement === "CI"}
+                  onClick={() => setField("settlement", "CI")}
+                >
+                  CI
+                </ToggleButton>
+                <ToggleButton
+                  active={form.settlement === "T1"}
+                  onClick={() => setField("settlement", "T1")}
+                >
+                  24hs
+                </ToggleButton>
+              </div>
+              <FieldHint>
+                {form.settlement === "CI"
+                  ? "El cash impacta el saldo el mismo día."
+                  : "El cash impacta el saldo el día hábil siguiente."}
+              </FieldHint>
+            </FormSection>
+          )}
 
           {/* Ticker.
            *
