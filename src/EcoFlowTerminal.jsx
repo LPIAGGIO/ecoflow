@@ -2678,12 +2678,42 @@ function useUserPositions() {
 
 /* ─────────────── Helpers de formato ─────────────── */
 
+/**
+ * Formatea un número con locale es-AR (separador miles "." y decimal ",").
+ *
+ * Opciones:
+ *   - maxDecimals: tope máximo de decimales (default 2).
+ *   - minDecimals: piso mínimo de decimales (default 0).
+ *   - smartDecimals: si true, detecta cuántos decimales "reales" tiene el
+ *     número de origen y muestra como mínimo 2 y como máximo `maxDecimals`.
+ *     Útil para precios: si BYMA reporta 139,455 lo respetamos; si reporta
+ *     139,32 lo mostramos como 139,32 sin agregar ceros.
+ *     IMPORTANTE: contamos los decimales del number `n` original; si lo
+ *     pasás como string, usamos String(n).
+ */
 function fmtNumber(n, opts = {}) {
   if (n == null || isNaN(n)) return "—";
-  const { maxDecimals = 2, minDecimals = 0 } = opts;
+  const { maxDecimals = 2, minDecimals = 0, smartDecimals = false } = opts;
+
+  let minF = minDecimals;
+  let maxF = maxDecimals;
+
+  if (smartDecimals) {
+    // Cuántos decimales tiene el número original (sin ceros redundantes).
+    // Ej: 139.455 → 3 decimales; 139.32 → 2; 1440 → 0.
+    const str = String(Number(n));
+    const dotIdx = str.indexOf(".");
+    const realDecimals = dotIdx === -1 ? 0 : str.length - dotIdx - 1;
+    // Mostrar 2 mínimo (para que precios "redondos" como 1440 se vean
+    // como "1.440,00") y el máximo entre realDecimals y minDecimals,
+    // pero nunca más que maxDecimals.
+    minF = Math.max(2, minDecimals);
+    maxF = Math.min(maxDecimals, Math.max(minF, realDecimals));
+  }
+
   return Number(n).toLocaleString("es-AR", {
-    minimumFractionDigits: minDecimals,
-    maximumFractionDigits: maxDecimals,
+    minimumFractionDigits: minF,
+    maximumFractionDigits: maxF,
   });
 }
 
@@ -3443,45 +3473,45 @@ function FlowsSection({ positions, bondPrices, fx }) {
                     </span>
                   </td>
                   <td style={flowsTdStyle("left")}>
-                    <span style={{ fontSize: 11, color: C.muted, fontFamily: "'Roboto', sans-serif" }}>
+                    <span style={{ fontSize: 12, color: C.muted, fontFamily: "'Roboto', sans-serif" }}>
                       {e.type}
                     </span>
                   </td>
                   <td style={flowsTdStyle("right")}>
-                    <span style={{ fontSize: 11, color: C.muted, fontFamily: "'JetBrains Mono', monospace" }}>
+                    <span style={{ fontSize: 12, color: C.muted, fontFamily: "'JetBrains Mono', monospace" }}>
                       {fmtNumber(e.quantity, { maxDecimals: 0 })}
                     </span>
                   </td>
                   <td style={flowsTdStyle("right")}>
                     {e.amount != null ? (
                       <div className="flex flex-col items-end" style={{ gap: 1 }}>
-                        <span style={{ fontSize: 11.5, color: C.text, fontFamily: "'JetBrains Mono', monospace", fontWeight: 500 }}>
+                        <span style={{ fontSize: 12, color: C.text, fontFamily: "'JetBrains Mono', monospace", fontWeight: 500 }}>
                           {fmtNumber(e.amount, { maxDecimals: 2 })}
                         </span>
                         {e.amountSource === "cost" && (
-                          <span style={{ fontSize: 8.5, color: C.dim, letterSpacing: "0.05em", textTransform: "uppercase" }}>
+                          <span style={{ fontSize: 9, color: C.dim, letterSpacing: "0.05em", textTransform: "uppercase" }}>
                             a costo
                           </span>
                         )}
                       </div>
                     ) : e.amountNote ? (
                       <div className="flex flex-col items-end" style={{ gap: 1 }}>
-                        <span style={{ color: C.dim, fontSize: 11 }}>—</span>
-                        <span style={{ fontSize: 8.5, color: C.dim, letterSpacing: "0.05em", textTransform: "uppercase" }}>
+                        <span style={{ color: C.dim, fontSize: 12 }}>—</span>
+                        <span style={{ fontSize: 9, color: C.dim, letterSpacing: "0.05em", textTransform: "uppercase" }}>
                           {e.amountNote}
                         </span>
                       </div>
                     ) : (
-                      <span style={{ color: C.dim, fontSize: 11 }}>—</span>
+                      <span style={{ color: C.dim, fontSize: 12 }}>—</span>
                     )}
                   </td>
                   <td style={flowsTdStyle("center")}>
-                    <span style={{ fontSize: 10, color: C.muted, fontFamily: "'Roboto', sans-serif" }}>
+                    <span style={{ fontSize: 12, color: C.muted, fontFamily: "'Roboto', sans-serif" }}>
                       {e.currency}
                     </span>
                   </td>
                   <td style={flowsTdStyle("right")}>
-                    <span style={{ fontSize: 11, color: C.muted, fontFamily: "'JetBrains Mono', monospace" }}>
+                    <span style={{ fontSize: 12, color: C.muted, fontFamily: "'JetBrains Mono', monospace" }}>
                       {fmtMaturityShort(e.date)}
                     </span>
                   </td>
@@ -3496,6 +3526,9 @@ function FlowsSection({ positions, bondPrices, fx }) {
 }
 
 function flowsThStyle(align) {
+  // Mantenemos en sync con PTh dense para que Flujos proyectados se vea
+  // con la misma densidad Bloomberg que Posiciones consolidadas, cerradas
+  // y Últimas operaciones.
   return {
     textAlign: align,
     padding: "5px 14px",
@@ -3510,9 +3543,14 @@ function flowsThStyle(align) {
 }
 
 function flowsTdStyle(align) {
+  // Idéntico a PTd dense (padding 4×14, font 12, vertical-align middle).
+  // Antes faltaban fontSize/color y la fila quedaba ~3px más alta de lo
+  // que se ve en las otras tablas.
   return {
     textAlign: align,
     padding: "4px 14px",
+    fontSize: 12,
+    color: C.text,
     verticalAlign: "middle",
   };
 }
@@ -5528,13 +5566,22 @@ function ConsolidatedRow({ group, expanded, onToggle, onEdit, onDelete, onUpdate
               className="eco-mono"
               style={{ color: group.isShort ? C.red : C.text }}
             >
-              {fmtNumber(group.netQty, { maxDecimals: 8 })}
+              {fmtNumber(
+                group.netQty,
+                // Cripto puede tener fracciones chicas (ej. 0,00012345 BTC).
+                // El resto de los tipos (bonos VN, acciones, CEDEAR, ON,
+                // opciones) son enteros, así que 0 decimales mantiene la
+                // tabla limpia.
+                group.instrument_type === "crypto"
+                  ? { maxDecimals: 8 }
+                  : { maxDecimals: 0 }
+              )}
             </span>
           )}
         </PTd>
         <PTd dense align="right">
           <span className="eco-mono">
-            {group.ppp != null ? fmtNumber(group.ppp, { maxDecimals: 4 }) : "—"}
+            {group.ppp != null ? fmtNumber(group.ppp, { maxDecimals: 4, smartDecimals: true }) : "—"}
           </span>
         </PTd>
         <PTd dense align="right" onClick={(e) => e.stopPropagation()}>
@@ -5544,7 +5591,7 @@ function ConsolidatedRow({ group, expanded, onToggle, onEdit, onDelete, onUpdate
             resolvedForCell?.price != null ? (
               <div className="flex items-center justify-end gap-2">
                 <span className="eco-mono">
-                  {fmtNumber(resolvedForCell.price, { maxDecimals: 4 })}
+                  {fmtNumber(resolvedForCell.price, { maxDecimals: 4, smartDecimals: true })}
                 </span>
                 {resolvedForCell.source === "close" && (
                   <span
@@ -5704,20 +5751,25 @@ function ConsolidatedRow({ group, expanded, onToggle, onEdit, onDelete, onUpdate
                               color: isSell ? C.red : C.text,
                             }}
                           >
-                            {fmtNumber(signedQty, { maxDecimals: 8 })}
+                            {fmtNumber(
+                              signedQty,
+                              p.instrument_type === "crypto"
+                                ? { maxDecimals: 8 }
+                                : { maxDecimals: 0 }
+                            )}
                           </span>
                         </td>
                         <td style={subTdStyle("right")}>
                           <span className="eco-mono" style={{ fontSize: 11.5 }}>
                             {!isSell && p.entry_price != null
-                              ? fmtNumber(p.entry_price, { maxDecimals: 4 })
+                              ? fmtNumber(p.entry_price, { maxDecimals: 4, smartDecimals: true })
                               : <span style={{ color: C.dim }}>—</span>}
                           </span>
                         </td>
                         <td style={subTdStyle("right")}>
                           <span className="eco-mono" style={{ fontSize: 11.5 }}>
                             {isSell && p.entry_price != null
-                              ? fmtNumber(p.entry_price, { maxDecimals: 4 })
+                              ? fmtNumber(p.entry_price, { maxDecimals: 4, smartDecimals: true })
                               : <span style={{ color: C.dim }}>—</span>}
                           </span>
                         </td>
@@ -5980,7 +6032,9 @@ function PositionRow({ position, bondPrices, onEdit, onDelete, onUpdatePrice }) 
             isSell
               ? -Math.abs(Number(position.quantity) || 0)
               : Math.abs(Number(position.quantity) || 0),
-            { maxDecimals: 8 }
+            position.instrument_type === "crypto"
+              ? { maxDecimals: 8 }
+              : { maxDecimals: 0 }
           )}
         </span>
       </PTd>
@@ -5988,7 +6042,7 @@ function PositionRow({ position, bondPrices, onEdit, onDelete, onUpdatePrice }) 
       <PTd dense align="right">
         <span className="eco-mono">
           {!isSell && position.entry_price != null
-            ? fmtNumber(position.entry_price, { maxDecimals: 4 })
+            ? fmtNumber(position.entry_price, { maxDecimals: 4, smartDecimals: true })
             : <span style={{ color: C.dim }}>—</span>}
         </span>
       </PTd>
@@ -5996,7 +6050,7 @@ function PositionRow({ position, bondPrices, onEdit, onDelete, onUpdatePrice }) 
       <PTd dense align="right">
         <span className="eco-mono">
           {isSell && position.entry_price != null
-            ? fmtNumber(position.entry_price, { maxDecimals: 4 })
+            ? fmtNumber(position.entry_price, { maxDecimals: 4, smartDecimals: true })
             : <span style={{ color: C.dim }}>—</span>}
         </span>
       </PTd>
@@ -6229,7 +6283,7 @@ function EditablePriceCell({ position, resolved, onSave }) {
       ) : (
         <div className="flex items-center gap-2">
           <span className="eco-mono">
-            {fmtNumber(resolved.price, { maxDecimals: 4 })}
+            {fmtNumber(resolved.price, { maxDecimals: 4, smartDecimals: true })}
           </span>
           {sourceBadge && (
             <span
@@ -6664,6 +6718,13 @@ function AddPositionDrawer({ editingPosition, onClose, onSubmit }) {
     }
   };
 
+  // Validación derivada en cada render para deshabilitar el botón "Agregar
+  // posición" mientras falten campos requeridos. NO setea errors[] (eso
+  // sucede solo al hacer submit) — solo controla el disabled del botón.
+  // De esta forma evitamos que el user llegue a apretar el botón con un
+  // form incompleto: el ojo ve directamente que está deshabilitado.
+  const formIsValid = Object.keys(validate()).length === 0;
+
   return (
     <>
       {/* Backdrop (respeta los 26px del status bar inferior del workspace) */}
@@ -6848,12 +6909,10 @@ function AddPositionDrawer({ editingPosition, onClose, onSubmit }) {
 
           {/* Cantidad */}
           <FormSection label={meta.quantityLabel} error={errors.quantity} hint={meta.quantityHint}>
-            <Input
-              type="number"
+            <MoneyInput
               value={form.quantity}
               onChange={(v) => setField("quantity", v)}
               placeholder={meta.integerQuantity ? "Entero" : "0,00"}
-              step={meta.integerQuantity ? "1" : "any"}
               hasError={Boolean(errors.quantity)}
             />
           </FormSection>
@@ -6861,12 +6920,10 @@ function AddPositionDrawer({ editingPosition, onClose, onSubmit }) {
           {/* Precio (solo si aplica) */}
           {meta.priceLabel && (
             <FormSection label={meta.priceLabel} error={errors.entry_price} hint={meta.priceHint}>
-              <Input
-                type="number"
+              <MoneyInput
                 value={form.entry_price}
                 onChange={(v) => setField("entry_price", v)}
                 placeholder="0,00"
-                step="any"
                 hasError={Boolean(errors.entry_price)}
               />
             </FormSection>
@@ -7041,7 +7098,8 @@ function AddPositionDrawer({ editingPosition, onClose, onSubmit }) {
             </button>
             <button
               onClick={handleSubmit}
-              disabled={submitting}
+              disabled={submitting || !formIsValid}
+              title={!formIsValid ? "Completá los campos requeridos" : undefined}
               style={{
                 backgroundColor: C.accent,
                 color: C.bg,
@@ -7049,9 +7107,9 @@ function AddPositionDrawer({ editingPosition, onClose, onSubmit }) {
                 padding: "9px 18px",
                 fontSize: 12.5,
                 fontWeight: 600,
-                cursor: submitting ? "not-allowed" : "pointer",
+                cursor: (submitting || !formIsValid) ? "not-allowed" : "pointer",
                 fontFamily: "'Roboto', sans-serif",
-                opacity: submitting ? 0.7 : 1,
+                opacity: (submitting || !formIsValid) ? 0.5 : 1,
                 minWidth: 110,
               }}
             >
@@ -7125,6 +7183,143 @@ function Input({ value, onChange, placeholder, type = "text", step, hasError }) 
         if (!hasError) e.currentTarget.style.borderColor = C.accent;
       }}
       onBlur={(e) => {
+        if (!hasError) e.currentTarget.style.borderColor = C.border;
+      }}
+    />
+  );
+}
+
+/**
+ * Input numérico con máscara de separadores de miles formato es-AR.
+ *
+ * UX:
+ *   - Mientras está focuseado: muestra el número "raw" (sin puntos de miles)
+ *     para que sea fácil editar tipeando dígitos. La coma decimal se
+ *     mantiene visible.
+ *   - Al perder foco: formatea con puntos de miles. Ej: tipear "1500000"
+ *     y al blur ver "1.500.000". Tipear "1500000,75" → "1.500.000,75".
+ *   - Acepta tanto coma como punto como separador decimal (lo que escriba
+ *     el user) y los normaliza internamente.
+ *
+ * Hacia afuera (onChange) emite un STRING numérico estándar JS con punto
+ * decimal: "1500000.75". El form lo guarda así y se persiste como Number
+ * al hacer submit. No hay regreso a "string formateado" en el state — la
+ * máscara es 100% visual.
+ *
+ * Limitaciones:
+ *   - No soporta exponentes (1e6).
+ *   - Negativos sí, pero raramente aplica para precios.
+ */
+function MoneyInput({ value, onChange, placeholder, hasError }) {
+  const [focused, setFocused] = useState(false);
+
+  // Convierte un raw del usuario (con coma o punto, con o sin miles) al
+  // formato "JS number string": dígitos + opcionalmente "." y decimales.
+  // Ej: "1.500.000,75" → "1500000.75"
+  //     "1500000,75"   → "1500000.75"
+  //     "1500000"      → "1500000"
+  //     "1.500"        → "1500"  (interpretamos como miles, NO como decimal)
+  // La regla "punto = miles" es típica es-AR; si el user querría decimal
+  // con punto debería usar coma. (Compromise: si solo hay un punto y NO
+  // hay coma y los dígitos después tienen 1-2, lo tratamos como decimal
+  // tipo "65.74". Esto se discute al final del comentario.)
+  const sanitizeRaw = (input) => {
+    if (input == null) return "";
+    let s = String(input).trim();
+    if (!s) return "";
+
+    // Permitir signo negativo al inicio
+    let sign = "";
+    if (s.startsWith("-")) {
+      sign = "-";
+      s = s.slice(1);
+    }
+
+    const hasComma = s.includes(",");
+    const hasDot = s.includes(".");
+
+    if (hasComma) {
+      // Convención es-AR: coma = decimal, puntos = miles. Quitar puntos.
+      s = s.replace(/\./g, "").replace(",", ".");
+    } else if (hasDot) {
+      // Sin coma. Si hay UN solo punto y los dígitos después son 1-2,
+      // probablemente sea decimal estilo en-US ("65.74"). Si hay varios
+      // puntos o muchos dígitos después, son miles ("1.500.000").
+      const parts = s.split(".");
+      const lastPart = parts[parts.length - 1];
+      if (parts.length === 2 && lastPart.length >= 1 && lastPart.length <= 4) {
+        // Tratamos como decimal (no tocar)
+      } else {
+        // Tratamos como miles → quitar todos los puntos
+        s = s.replace(/\./g, "");
+      }
+    }
+
+    // Solo dígitos y punto decimal
+    s = s.replace(/[^\d.]/g, "");
+    return sign + s;
+  };
+
+  // Formatea un valor numérico (string o number) a "1.500.000,75"
+  const formatWithMask = (numStr) => {
+    if (numStr === "" || numStr == null) return "";
+    const n = Number(numStr);
+    if (isNaN(n)) return String(numStr);
+
+    // Detectar decimales reales para preservarlos
+    const str = String(numStr);
+    const dotIdx = str.indexOf(".");
+    const realDecimals = dotIdx === -1 ? 0 : str.length - dotIdx - 1;
+
+    return n.toLocaleString("es-AR", {
+      minimumFractionDigits: realDecimals,
+      maximumFractionDigits: Math.max(realDecimals, 0),
+      useGrouping: true,
+    });
+  };
+
+  // Display:
+  //   - Focused: mostrar el raw "1500000.75" pero con coma local "1500000,75"
+  //   - Blurred: mostrar formato completo "1.500.000,75"
+  const displayValue = (() => {
+    if (value === "" || value == null) return "";
+    if (focused) {
+      // Reemplazo del separador decimal a coma para que el usuario pueda
+      // seguir escribiendo en formato es-AR.
+      return String(value).replace(".", ",");
+    }
+    return formatWithMask(value);
+  })();
+
+  const handleChange = (e) => {
+    const raw = sanitizeRaw(e.target.value);
+    onChange(raw);
+  };
+
+  return (
+    <input
+      type="text"
+      inputMode="decimal"
+      value={displayValue}
+      onChange={handleChange}
+      placeholder={placeholder}
+      style={{
+        width: "100%",
+        backgroundColor: C.deep,
+        border: `1px solid ${hasError ? C.red : C.border}`,
+        color: C.text,
+        padding: "9px 12px",
+        fontSize: 12.5,
+        fontFamily: "'JetBrains Mono', monospace",
+        outline: "none",
+        transition: "border-color 120ms ease",
+      }}
+      onFocus={(e) => {
+        setFocused(true);
+        if (!hasError) e.currentTarget.style.borderColor = C.accent;
+      }}
+      onBlur={(e) => {
+        setFocused(false);
         if (!hasError) e.currentTarget.style.borderColor = C.border;
       }}
     />
