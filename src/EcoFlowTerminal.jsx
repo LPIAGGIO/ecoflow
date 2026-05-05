@@ -3076,9 +3076,11 @@ function fmtDateShort(iso) {
  * y los números reales los conectamos al final.
  */
 
-function DashboardOverview({ positions, fxState, bondPricesState, onIngresar, onRetirar }) {
+function DashboardOverview({ positions, fxState, bondPricesState, cashState, onIngresar, onRetirar }) {
   const { fx, loading: fxLoading, error: fxError, lastUpdated: fxLastUpdated, refresh: refreshFx } = fxState;
   const { prices: bondPrices, loading: pricesLoading, error: pricesError, lastFetch: pricesLastFetch, refresh: refreshBondPrices } = bondPricesState;
+  const balanceByCurrency = cashState?.balanceByCurrency || { "ARS": 0, "USD-MEP": 0, "USD-CCL": 0 };
+  const movements = cashState?.movements || [];
 
   // Toggle de moneda de valuación: ARS / USD-MEP / USD-CCL
   const [valuationCurrency, setValuationCurrency] = useState("ARS");
@@ -3086,8 +3088,10 @@ function DashboardOverview({ positions, fxState, bondPricesState, onIngresar, on
   // Toggle Distribución: instrumentos / monedas
   const [distView, setDistView] = useState("instruments");
 
-  // Toggle Liquidez Proyectada ventana
-  const [liquidityWindow, setLiquidityWindow] = useState("30d");
+  // Toggle Liquidez Proyectada ventana — default CI (saldo cash actual).
+  // Antes era 30d. El cambio refleja que ahora la card prioriza mostrarte
+  // CUÁNTO TENÉS DISPONIBLE HOY antes que cuánto vas a recibir adelante.
+  const [liquidityWindow, setLiquidityWindow] = useState("CI");
 
   // El botón "Actualizar" refresca AMBAS fuentes de datos: FX + precios bonos
   const handleRefreshAll = useCallback(() => {
@@ -3125,6 +3129,7 @@ function DashboardOverview({ positions, fxState, bondPricesState, onIngresar, on
           fx={fx}
           bondPrices={bondPrices}
           valuationCurrency={valuationCurrency}
+          balanceByCurrency={balanceByCurrency}
           onIngresar={onIngresar}
           onRetirar={onRetirar}
         />
@@ -3133,6 +3138,7 @@ function DashboardOverview({ positions, fxState, bondPricesState, onIngresar, on
           fx={fx}
           bondPrices={bondPrices}
           valuationCurrency={valuationCurrency}
+          balanceByCurrency={balanceByCurrency}
           view={distView}
           onViewChange={setDistView}
         />
@@ -3141,6 +3147,7 @@ function DashboardOverview({ positions, fxState, bondPricesState, onIngresar, on
           fx={fx}
           bondPrices={bondPrices}
           valuationCurrency={valuationCurrency}
+          movements={movements}
           window={liquidityWindow}
           onWindowChange={setLiquidityWindow}
         />
@@ -3499,7 +3506,7 @@ function ValuationToggle({ value, onChange }) {
 
 /* ─────────────── Card 1: Total de cartera ─────────────── */
 
-function TotalCard({ positions, fx, bondPrices, valuationCurrency, onIngresar, onRetirar }) {
+function TotalCard({ positions, fx, bondPrices, valuationCurrency, balanceByCurrency, onIngresar, onRetirar }) {
   // V2: ahora usamos precios de mercado de data912 cuando están disponibles.
   // El P&L se calcula como market - cost. Si no hay precio actualizado para
   // alguna posición, esa cae al fallback "a costo" y aparece en pricesFromCost.
@@ -3507,6 +3514,27 @@ function TotalCard({ positions, fx, bondPrices, valuationCurrency, onIngresar, o
     () => computePortfolioTotals(positions, fx, valuationCurrency, bondPrices),
     [positions, fx, valuationCurrency, bondPrices]
   );
+
+  // Cash neto en la moneda activa: convertimos el saldo de cada moneda
+  // a la valuationCurrency seleccionada y los sumamos. Si el saldo de
+  // alguna moneda no se puede convertir (FX no cargó todavía), esa
+  // moneda no se incluye y se loguea silenciosamente.
+  const cashInValuation = useMemo(() => {
+    if (!balanceByCurrency) return 0;
+    let total = 0;
+    for (const [cur, amount] of Object.entries(balanceByCurrency)) {
+      if (!amount) continue;
+      const conv = convertValue(amount, cur, valuationCurrency, fx);
+      if (conv != null) total += conv;
+    }
+    return total;
+  }, [balanceByCurrency, valuationCurrency, fx]);
+
+  // Total efectivo en pantalla: posiciones a mercado + cash. El P&L NO
+  // suma cash porque el cash no tiene "ganancia" — es plata depositada
+  // o recibida por venta, ya valuada al 100% de su monto.
+  const positionsValue = totals.value ?? 0;
+  const totalWithCash = positionsValue + cashInValuation;
 
   const tcLine = useMemo(() => {
     if (!fx) return null;
@@ -3547,8 +3575,8 @@ function TotalCard({ positions, fx, bondPrices, valuationCurrency, onIngresar, o
             letterSpacing: "-0.02em",
           }}
         >
-          {totals.value !== null
-            ? fmtCurrencyValue(totals.value, valuationCurrency === "ARS" ? "ARS" : "USD")
+          {(totals.value !== null || cashInValuation !== 0)
+            ? fmtCurrencyValue(totalWithCash, valuationCurrency === "ARS" ? "ARS" : "USD")
             : "—"}
         </span>
       </div>
@@ -3704,16 +3732,44 @@ function TotalCard({ positions, fx, bondPrices, valuationCurrency, onIngresar, o
 }
 
 
-/* ─────────────── Card 2: Distribución ─────────────── */
+/* ─────────────── Card 2: Distribución ───────────────
+ *
+ * Dos vistas distintas:
+ *
+ * Vista "Instrumentos" (donut + lista):
+ *   - Muestra cómo está repartida tu cartera por categoría de activo
+ *     (Renta Fija ARS, Renta Fija USD, Acciones, etc.).
+ *   - INCLUYE una porción "Efectivo" agregada al total. Es la suma del
+ *     cash en todas las monedas convertido a valuationCurrency.
+ *
+ * Vista "Monedas" (4 renglones sin donut, modelo Balanz):
+ *   - Instrumentos: valor a mercado de TODAS las posiciones convertido
+ *     a valuationCurrency. Es lo que está invertido.
+ *   - Pesos: saldo cash ARS (en su moneda nativa, no convertido).
+ *   - Dólares: saldo cash USD-MEP (en su moneda nativa).
+ *   - US Dollar (Cable): saldo cash USD-CCL (en su moneda nativa).
+ *   - La suma de los 4 renglones (cada uno en su moneda) NO equivale al
+ *     total — son montos en monedas distintas. Pero da el panorama por
+ *     denominación.
+ */
 
-function DistributionCard({ positions, fx, bondPrices, valuationCurrency, view, onViewChange }) {
-  const slices = useMemo(() => {
-    const totals = computePortfolioTotals(positions, fx, valuationCurrency, bondPrices);
-    if (!totals.value || totals.value <= 0) return [];
+function DistributionCard({ positions, fx, bondPrices, valuationCurrency, balanceByCurrency, view, onViewChange }) {
+  // Vista "Instrumentos": donut con categorías + cash como una porción más.
+  const instrumentSlices = useMemo(() => {
+    const groups = groupByCategory(positions, fx, valuationCurrency, bondPrices);
 
-    const groups = view === "monedas"
-      ? groupByCurrency(positions, fx, valuationCurrency, bondPrices)
-      : groupByCategory(positions, fx, valuationCurrency, bondPrices);
+    // Cash agregado: convertimos cada moneda a la valuationCurrency y sumamos.
+    let cashTotal = 0;
+    if (balanceByCurrency) {
+      for (const [cur, amount] of Object.entries(balanceByCurrency)) {
+        if (!amount || amount <= 0) continue;
+        const conv = convertValue(amount, cur, valuationCurrency, fx);
+        if (conv != null) cashTotal += conv;
+      }
+    }
+    if (cashTotal > 0) {
+      groups["Efectivo"] = (groups["Efectivo"] || 0) + cashTotal;
+    }
 
     const total = Object.values(groups).reduce((acc, v) => acc + v, 0);
     if (total <= 0) return [];
@@ -3722,13 +3778,37 @@ function DistributionCard({ positions, fx, bondPrices, valuationCurrency, view, 
       .filter(([_, v]) => v > 0)
       .map(([key, value], idx) => ({
         key,
-        label: prettifyGroupKey(key, view),
+        label: key,
         value,
         pct: (value / total) * 100,
         color: PROVIDER_COLORS[idx % PROVIDER_COLORS.length],
       }))
       .sort((a, b) => b.value - a.value);
-  }, [positions, fx, valuationCurrency, view, bondPrices]);
+  }, [positions, fx, valuationCurrency, bondPrices, balanceByCurrency]);
+
+  // Vista "Monedas": 4 renglones (Instrumentos + 3 cash por moneda).
+  const monedaRows = useMemo(() => {
+    // Renglón 1: Instrumentos = total a mercado en valuationCurrency
+    const totals = computePortfolioTotals(positions, fx, valuationCurrency, bondPrices);
+    const instrumentsTotal = totals.value ?? 0;
+
+    // Renglones 2-4: cash por moneda (NO convertido — en su moneda nativa).
+    const ars = balanceByCurrency?.["ARS"] || 0;
+    const usdMep = balanceByCurrency?.["USD-MEP"] || 0;
+    const usdCcl = balanceByCurrency?.["USD-CCL"] || 0;
+
+    return [
+      {
+        key: "instruments",
+        label: "Instrumentos",
+        amount: instrumentsTotal,
+        currency: valuationCurrency,
+      },
+      { key: "ars",     label: "Pesos",             amount: ars,    currency: "ARS"     },
+      { key: "usd_mep", label: "Dólares",           amount: usdMep, currency: "USD-MEP" },
+      { key: "usd_ccl", label: "US Dollar (Cable)", amount: usdCcl, currency: "USD-CCL" },
+    ];
+  }, [positions, fx, valuationCurrency, bondPrices, balanceByCurrency]);
 
   return (
     <div style={cardBaseStyle()}>
@@ -3762,15 +3842,57 @@ function DistributionCard({ positions, fx, bondPrices, valuationCurrency, view, 
         </div>
       </div>
 
-      {slices.length === 0 ? (
+      {view === "monedas" ? (
+        /* Vista Monedas: 4 renglones simples sin donut. Cada moneda
+           se muestra en su propio formato. Si el saldo es 0, mostramos
+           "—" para no llenar de ceros. */
+        <div className="flex flex-col">
+          {monedaRows.map((row, idx) => {
+            const empty = !row.amount || row.amount === 0;
+            return (
+              <div
+                key={row.key}
+                className="flex items-center justify-between"
+                style={{
+                  padding: "8px 0",
+                  borderTop: idx > 0 ? `1px solid ${C.border}` : "none",
+                }}
+              >
+                <span
+                  style={{
+                    fontSize: 12,
+                    color: C.muted,
+                    fontFamily: "'Roboto', sans-serif",
+                  }}
+                >
+                  {row.label}
+                </span>
+                <span
+                  style={{
+                    fontSize: 13,
+                    color: empty ? C.dim : C.text,
+                    fontFamily: "'JetBrains Mono', monospace",
+                    fontWeight: 500,
+                    letterSpacing: "-0.01em",
+                  }}
+                >
+                  {empty ? "—" : fmtCurrencyValue(row.amount, row.currency === "ARS" ? "ARS" : "USD")}
+                </span>
+              </div>
+            );
+          })}
+        </div>
+      ) : instrumentSlices.length === 0 ? (
+        /* Vista Instrumentos sin datos */
         <div style={{ fontSize: 12, color: C.dim, padding: "20px 0", textAlign: "center" }}>
           Sin datos para distribuir
         </div>
       ) : (
+        /* Vista Instrumentos: donut + lista */
         <div className="flex items-center gap-3">
-          <DonutChart slices={slices} size={106} />
+          <DonutChart slices={instrumentSlices} size={106} />
           <div className="flex flex-col" style={{ flex: 1, gap: 6, minWidth: 0 }}>
-            {slices.slice(0, 5).map((s) => (
+            {instrumentSlices.slice(0, 5).map((s) => (
               <div key={s.key} className="flex items-center gap-2" style={{ minWidth: 0 }}>
                 <span style={{ width: 8, height: 8, backgroundColor: s.color, flexShrink: 0 }} />
                 <span style={{ fontSize: 11, color: C.muted, fontFamily: "'Roboto', sans-serif", flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
@@ -3781,9 +3903,9 @@ function DistributionCard({ positions, fx, bondPrices, valuationCurrency, view, 
                 </span>
               </div>
             ))}
-            {slices.length > 5 && (
+            {instrumentSlices.length > 5 && (
               <div style={{ fontSize: 10, color: C.dim, fontFamily: "'Roboto', sans-serif" }}>
-                +{slices.length - 5} más
+                +{instrumentSlices.length - 5} más
               </div>
             )}
           </div>
@@ -3859,11 +3981,23 @@ function DonutChart({ slices, size = 100 }) {
 
 /* ─────────────── Card 3: Liquidez Proyectada ─────────────── */
 
-function LiquidityCard({ positions, fx, bondPrices, valuationCurrency, window: windowKey, onWindowChange }) {
+function LiquidityCard({ positions, fx, bondPrices, valuationCurrency, movements, window: windowKey, onWindowChange }) {
   const breakdown = useMemo(
-    () => computeLiquidityBreakdown(positions, fx, valuationCurrency, windowKey, bondPrices),
-    [positions, fx, valuationCurrency, windowKey, bondPrices]
+    () => computeLiquidityBreakdown(positions, fx, valuationCurrency, windowKey, bondPrices, movements),
+    [positions, fx, valuationCurrency, windowKey, bondPrices, movements]
   );
+
+  // Mensaje de footer dinámico según el window seleccionado.
+  // CI / T1 son saldos puros; 30d+ incluye proyección de vencimientos.
+  const footerMessage = (() => {
+    if (windowKey === "CI") {
+      return "Saldo de efectivo disponible al día de hoy.";
+    }
+    if (windowKey === "T1") {
+      return "Saldo CI más flujos que liquidan al siguiente día hábil.";
+    }
+    return "Bonos, ONs, cauciones y opciones con vencimiento en la ventana, valuados a precio de mercado actual. Al vencimiento puede variar.";
+  })();
 
   return (
     <div style={cardBaseStyle()}>
@@ -3871,6 +4005,8 @@ function LiquidityCard({ positions, fx, bondPrices, valuationCurrency, window: w
         <span style={cardTitleStyle()}>Liquidez proyectada</span>
         <div className="flex" style={{ backgroundColor: C.deep, border: `1px solid ${C.border}`, padding: 2 }}>
           {[
+            { key: "CI",  label: "CI"  },
+            { key: "T1",  label: "T1"  },
             { key: "30d", label: "30d" },
             { key: "60d", label: "60d" },
             { key: "90d", label: "90d" },
@@ -3905,15 +4041,20 @@ function LiquidityCard({ positions, fx, bondPrices, valuationCurrency, window: w
           { key: "USD-CCL",  label: "USD CCL" },
         ].map((row) => {
           const v = breakdown[row.key] ?? 0;
-          const display = v > 0
-            ? fmtCurrencyValue(v, row.key === "ARS" ? "ARS" : "USD")
-            : "—";
+          // Mostramos saldos negativos también (rojos) — son señal útil
+          // para el usuario de que tiene un descubierto en esa moneda.
+          const isNegative = v < 0;
+          const isZero = v === 0;
+          const display = isZero
+            ? "—"
+            : fmtCurrencyValue(v, row.key === "ARS" ? "ARS" : "USD");
+          const color = isZero ? C.dim : (isNegative ? C.red : C.text);
           return (
             <div key={row.key} className="flex items-center justify-between">
               <span style={{ fontSize: 11.5, color: C.muted, fontFamily: "'Roboto', sans-serif" }}>
                 {row.label}
               </span>
-              <span style={{ fontSize: 13, color: v > 0 ? C.text : C.dim, fontFamily: "'JetBrains Mono', monospace", fontWeight: 500 }}>
+              <span style={{ fontSize: 13, color, fontFamily: "'JetBrains Mono', monospace", fontWeight: 500 }}>
                 {display}
               </span>
             </div>
@@ -3922,7 +4063,7 @@ function LiquidityCard({ positions, fx, bondPrices, valuationCurrency, window: w
       </div>
 
       <div style={{ fontSize: 10, color: C.dim, marginTop: 10, fontFamily: "'Roboto', sans-serif", lineHeight: 1.4 }}>
-        Bonos, ONs, cauciones, futuros y opciones con vencimiento en la ventana. Valor de mercado a costo · al vencimiento puede variar.
+        {footerMessage}
       </div>
     </div>
   );
@@ -4711,43 +4852,95 @@ function prettifyGroupKey(key, view) {
 /**
  * Suma vencimientos en la ventana elegida y devuelve el total por moneda.
  */
-function computeLiquidityBreakdown(positions, fx, valuationCurrency, windowKey, bondPrices) {
-  const days = windowKey === "30d" ? 30 : windowKey === "60d" ? 60 : 90;
-  const now = new Date();
-  const cutoff = new Date(now.getTime() + days * 86400000);
-
+/**
+ * Calcula el saldo proyectado por moneda dentro de una ventana temporal.
+ *
+ * Windows soportadas:
+ *   - "CI"  → saldo cash actual (movements con movement_date <= hoy)
+ *   - "T1"  → CI + flujos hasta el siguiente día hábil
+ *   - "30d" → CI + flujos en los próximos 30 días calendario
+ *   - "60d" → CI + flujos en los próximos 60 días calendario
+ *   - "90d" → CI + flujos en los próximos 90 días calendario
+ *
+ * "Flujos" en este contexto incluyen:
+ *   - Vencimientos de bonos / ON / cauciones / opciones dentro de la ventana,
+ *     valuados a precio de mercado actual (lo que se va a recibir al vencer
+ *     puede variar si el precio se mueve, lo aclaramos en el footer).
+ *   - Movements futuros ya cargados en cash_movements (típico: ventas T+1
+ *     cargadas hoy, depósitos con fecha futura).
+ *
+ * El cash actual (CI) SIEMPRE se incluye como base. Las otras ventanas lo
+ * acumulan sumándole los flujos esperados.
+ */
+function computeLiquidityBreakdown(positions, fx, valuationCurrency, windowKey, bondPrices, movements) {
   const result = { ARS: 0, "USD-MEP": 0, "USD-CCL": 0 };
 
-  // Futuros excluidos: al vencimiento solo se libera la garantía (que ya
-  // está en otra posición) y se realiza el P&L. No es un "ingreso" típico
-  // ni predecible — depende del precio final del subyacente.
-  const nonFuture = positions.filter((p) => p.instrument_type !== "future");
+  const todayIso = new Date().toLocaleDateString("en-CA", {
+    timeZone: "America/Argentina/Buenos_Aires",
+  });
+  const today = new Date(todayIso + "T12:00:00");
 
-  // Vista consolidada: la liquidez al vencimiento corresponde a la qty
-  // NETA (compras − ventas) por su valor de mercado actual. Si el bono
-  // está parcialmente cerrado, sólo la fila "open" aporta liquidez
-  // futura; la fila "closed" tiene netQty=0 y no entra. Antes este loop
-  // iteraba operación por operación y la venta SUMABA en lugar de
-  // restar (mismo bug que groupByCategory y computePortfolioTotals).
-  const groups = consolidatePositions(nonFuture, bondPrices);
+  // 1) Saldo CI base: sumamos todos los cash_movements con fecha <= hoy.
+  // Esto está disponible siempre, independiente del window seleccionado.
+  if (movements && movements.length > 0) {
+    for (const m of movements) {
+      if (m.movement_date > todayIso) continue;
+      if (!(m.currency in result)) continue;
+      const sign = (m.movement_type === "deposit" || m.movement_type === "sale_proceeds") ? 1 : -1;
+      result[m.currency] += sign * Number(m.amount);
+    }
+  }
 
-  for (const g of groups) {
-    // Posiciones cerradas (o sin qty neta) no aportan liquidez futura.
-    if (g.netQty === 0 || g.isClosed) continue;
-    if (g.valueAtMarket == null) continue;
+  // 2) Si el window es CI, ya terminamos.
+  if (windowKey === "CI") {
+    return result;
+  }
 
-    // Tomamos el vencimiento de cualquier operación del grupo (todas
-    // comparten ticker y por tanto la misma fecha de vto).
-    const sample = g.operations[0];
-    if (!sample) continue;
-    const matDate = getPositionMaturity(sample);
-    if (!matDate) continue;
-    const md = new Date(matDate);
-    if (md < now || md > cutoff) continue;
+  // 3) Para T1 / 30d / 60d / 90d sumamos flujos futuros dentro de la ventana.
+  let cutoff;
+  if (windowKey === "T1") {
+    const nextBiz = addBusinessDays(todayIso, 1);
+    cutoff = new Date(nextBiz + "T12:00:00");
+  } else {
+    const days = windowKey === "30d" ? 30 : windowKey === "60d" ? 60 : 90;
+    cutoff = new Date(today.getTime() + days * 86400000);
+  }
 
-    const cur = g.currency || "ARS";
-    if (result[cur] != null) {
-      result[cur] += g.valueAtMarket;
+  // 3a) Movements futuros (ya cargados): por ej, una venta T+1 cargada hoy
+  // genera un sale_proceeds con movement_date = mañana hábil.
+  if (movements && movements.length > 0) {
+    for (const m of movements) {
+      if (m.movement_date <= todayIso) continue; // los <= hoy ya están en CI
+      const md = new Date(m.movement_date + "T12:00:00");
+      if (md > cutoff) continue;
+      if (!(m.currency in result)) continue;
+      const sign = (m.movement_type === "deposit" || m.movement_type === "sale_proceeds") ? 1 : -1;
+      result[m.currency] += sign * Number(m.amount);
+    }
+  }
+
+  // 3b) Vencimientos / cobros de posiciones (mismo cálculo que antes,
+  //     pero solo lo aplicamos para windows >= 30d. T1 raramente captura
+  //     un vencimiento de bono y mezclarlo confunde más que aporta).
+  if (windowKey !== "T1") {
+    const nonFuture = positions.filter((p) => p.instrument_type !== "future");
+    const groups = consolidatePositions(nonFuture, bondPrices);
+
+    for (const g of groups) {
+      if (g.netQty === 0 || g.isClosed) continue;
+      if (g.valueAtMarket == null) continue;
+
+      const sample = g.operations[0];
+      if (!sample) continue;
+      const matDate = getPositionMaturity(sample);
+      if (!matDate) continue;
+      const md = new Date(matDate);
+      if (md < today || md > cutoff) continue;
+
+      const cur = g.currency || "ARS";
+      if (result[cur] != null) {
+        result[cur] += g.valueAtMarket;
+      }
     }
   }
 
@@ -5813,6 +6006,7 @@ function PortfolioDashboard({ onNavigate }) {
             positions={positions}
             fxState={fxState}
             bondPricesState={bondPricesState}
+            cashState={cashState}
             onIngresar={() => setCashModalType("deposit")}
             onRetirar={() => setCashModalType("withdrawal")}
           />
