@@ -4932,14 +4932,53 @@ function computeLiquidityBreakdown(positions, fx, valuationCurrency, windowKey, 
     cutoff = new Date(today.getTime() + days * 86400000);
   }
 
+  // Pre-cómputo: ¿cuáles positions vencen DENTRO de la ventana?
+  // Las usamos para evitar doble-contar movements automáticos
+  // (purchase_cost / sale_proceeds) cuya position asociada también
+  // entrará al cálculo de Liquidez vía vencimiento.
+  //
+  // Caso típico del bug: comprás un bono S29Y6 con plazo T1. Eso
+  // genera un purchase_cost con fecha mañana (sale del cash) Y la
+  // position en sí entra en cartera hoy. Al vencer S29Y6 dentro de
+  // la ventana, valueAtMarket sumaría su valor al vencimiento, pero
+  // ese valor YA INCLUYE el millón comprado en T1. Si además sumamos
+  // el movement T1 al cálculo, restamos el millón dos veces (una al
+  // egresar mañana y otra implícita al vencer el bono más adelante).
+  // El resultado: Liquidez quedaba ~$1.3M debajo del Total real.
+  //
+  // Solución: si el movement automático corresponde a una position
+  // que vence DENTRO de la ventana, lo saltamos. El efecto neto sobre
+  // tu cash queda absorbido por el flujo del vencimiento.
+  const positionMaturesInWindow = new Set();
+  if (positions && positions.length > 0) {
+    for (const p of positions) {
+      const md = getPositionMaturity(p);
+      if (!md) continue;
+      const matDate = new Date(md);
+      if (matDate >= today && matDate <= cutoff) {
+        positionMaturesInWindow.add(p.id);
+      }
+    }
+  }
+
   // 3a) Movements futuros (ya cargados): por ej, una venta T+1 cargada hoy
   // genera un sale_proceeds con movement_date = mañana hábil.
+  //
+  // EXCEPCIÓN: movements automáticos cuya position asociada vence
+  // dentro de la ventana NO se cuentan (ver explicación arriba).
   if (movements && movements.length > 0) {
     for (const m of movements) {
       if (m.movement_date <= todayIso) continue; // los <= hoy ya están en CI
       const md = new Date(m.movement_date + "T12:00:00");
       if (md > cutoff) continue;
       if (!(m.currency in result)) continue;
+
+      // Skip si es movement automático y la position vence en ventana
+      // (su valor está implícito en el flujo del vencimiento).
+      if (m.related_position_id && positionMaturesInWindow.has(m.related_position_id)) {
+        continue;
+      }
+
       const sign = (m.movement_type === "deposit" || m.movement_type === "sale_proceeds") ? 1 : -1;
       result[m.currency] += sign * Number(m.amount);
     }
