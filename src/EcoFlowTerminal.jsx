@@ -2978,11 +2978,37 @@ function useCashMovements() {
     setMovements((prev) => prev.filter((m) => m.id !== movementId));
   }, [user]);
 
+  /**
+   * Actualiza un movement manual (deposit/withdrawal) cargado previamente.
+   * Permite cambiar tipo, moneda, monto, fecha y notas. Si el cambio es
+   * de deposit a withdrawal (o viceversa), el saldo se ajusta automático
+   * porque el balance se recalcula a partir del log entero cada vez.
+   */
+  const updateManualMovement = useCallback(async (movementId, patch) => {
+    if (!user) throw new Error("No hay sesión activa");
+    if (patch.movement_type && !["deposit", "withdrawal"].includes(patch.movement_type)) {
+      throw new Error("updateManualMovement solo acepta deposit o withdrawal");
+    }
+    if (patch.amount != null && patch.amount <= 0) {
+      throw new Error("El monto debe ser positivo");
+    }
+    const { data, error: err } = await supabase
+      .from("cash_movements")
+      .update(patch)
+      .eq("id", movementId)
+      .select()
+      .single();
+    if (err) throw err;
+    setMovements((prev) => prev.map((m) => (m.id === movementId ? data : m)));
+    return data;
+  }, [user]);
+
   return {
     movements,
     balanceByCurrency,
     balanceAt,
     addManualMovement,
+    updateManualMovement,
     syncForPosition,
     removeForPosition,
     deleteManualMovement,
@@ -5844,6 +5870,11 @@ function PortfolioDashboard({ onNavigate }) {
   // Cuando está abierto, contiene el `type` ("deposit" o "withdrawal") para
   // que el modal sepa qué etiquetas y colores mostrar.
   const [cashModalType, setCashModalType] = useState(null);
+  // Movement bajo edición. Si está seteado, el modal de cash arranca
+  // en modo edición con los valores precargados.
+  const [editingCashMovement, setEditingCashMovement] = useState(null);
+  // Movement pendiente de confirmación de borrado.
+  const [confirmingDeleteCash, setConfirmingDeleteCash] = useState(null);
 
   // Handler para edición inline de current_price desde la tabla de
   // posiciones. Acepta `null` para limpiar el override y volver al
@@ -6030,10 +6061,13 @@ function PortfolioDashboard({ onNavigate }) {
               cuando necesita auditar movimientos. */}
           <OperationsHistorySection
             positions={filteredPositions}
+            movements={cashState.movements}
             bondPrices={bondPricesState.prices}
             onEdit={openEdit}
             onDelete={(p) => setConfirmingDelete(p)}
             onUpdatePrice={handleUpdateCurrentPrice}
+            onEditCashMovement={(m) => setEditingCashMovement(m)}
+            onDeleteCashMovement={(m) => setConfirmingDeleteCash(m)}
             onNavigateToLibro={onNavigate ? () => onNavigate("libro-operaciones") : null}
           />
         </>
@@ -6057,14 +6091,37 @@ function PortfolioDashboard({ onNavigate }) {
         />
       )}
 
-      {/* Modal de movimiento manual de cash (Ingresar / Retirar) */}
-      {cashModalType && (
+      {/* Modal de movimiento manual de cash (Ingresar / Retirar / Editar) */}
+      {(cashModalType || editingCashMovement) && (
         <CashMovementModal
-          type={cashModalType}
-          onCancel={() => setCashModalType(null)}
-          onSubmit={async (payload) => {
-            await cashState.addManualMovement(payload);
+          type={cashModalType || editingCashMovement.movement_type}
+          editingMovement={editingCashMovement}
+          onCancel={() => {
             setCashModalType(null);
+            setEditingCashMovement(null);
+          }}
+          onSubmit={async (payload) => {
+            if (editingCashMovement) {
+              // Modo edición: update del movement existente
+              await cashState.updateManualMovement(editingCashMovement.id, payload);
+            } else {
+              // Modo creación: insert nuevo
+              await cashState.addManualMovement(payload);
+            }
+            setCashModalType(null);
+            setEditingCashMovement(null);
+          }}
+        />
+      )}
+
+      {/* Modal de confirmación de borrado de cash movement */}
+      {confirmingDeleteCash && (
+        <DeleteCashMovementModal
+          movement={confirmingDeleteCash}
+          onCancel={() => setConfirmingDeleteCash(null)}
+          onConfirm={async () => {
+            await cashState.deleteManualMovement(confirmingDeleteCash.id);
+            setConfirmingDeleteCash(null);
           }}
         />
       )}
@@ -6413,46 +6470,82 @@ function ClosedPositionsSection({ closed, onEdit, onDelete, onUpdatePrice }) {
  * El padding de filas es muy compacto (densidad estilo Bloomberg) porque
  * con el tiempo van a acumularse muchas operaciones día a día.
  */
-function OperationsHistorySection({ positions, bondPrices, onEdit, onDelete, onUpdatePrice, onNavigateToLibro }) {
+function OperationsHistorySection({
+  positions,
+  movements,
+  bondPrices,
+  onEdit,
+  onDelete,
+  onUpdatePrice,
+  onEditCashMovement,
+  onDeleteCashMovement,
+  onNavigateToLibro,
+}) {
   const [open, setOpen] = useState(false);
 
-  // Filtramos las posiciones a mostrar: las del día más reciente con
-  // actividad. Si HOY hubo operaciones, son las de hoy; si no, las del
-  // último día que sí tuvo. Limitamos a las 10 más recientes.
-  const recentOps = useMemo(() => {
-    if (!positions?.length) return [];
+  // Mergeamos positions + cash_movements manuales en una sola lista,
+  // ordenada por fecha desc (con created_at como tiebreaker). Solo
+  // mostramos los manuales (deposits/withdrawals) — los automáticos
+  // (sale_proceeds, purchase_cost) son redundantes con la position que
+  // los originó.
+  //
+  // Cada elemento se etiqueta con `_kind` para que la PositionsTable
+  // sepa qué sub-renderer usar.
+  const recentRows = useMemo(() => {
+    const items = [];
 
-    // Ordenar por entry_date desc (created_at como tiebreaker si está)
-    const sorted = [...positions].sort((a, b) => {
-      const da = a.entry_date || "";
-      const db = b.entry_date || "";
-      if (da !== db) return db.localeCompare(da);
-      const ca = a.created_at || "";
-      const cb = b.created_at || "";
-      return cb.localeCompare(ca);
+    // 1) Positions (todas)
+    for (const p of (positions || [])) {
+      items.push({
+        _kind: "position",
+        item: p,
+        sortDate: p.entry_date || "",
+        sortCreated: p.created_at || "",
+      });
+    }
+
+    // 2) Cash movements MANUALES (deposit/withdrawal sin related_position_id)
+    for (const m of (movements || [])) {
+      if (m.related_position_id) continue;
+      if (m.movement_type !== "deposit" && m.movement_type !== "withdrawal") continue;
+      items.push({
+        _kind: "cash_movement",
+        item: m,
+        sortDate: m.movement_date || "",
+        sortCreated: m.created_at || "",
+      });
+    }
+
+    // Ordenar por fecha desc, created_at desc como tiebreaker
+    items.sort((a, b) => {
+      if (a.sortDate !== b.sortDate) return b.sortDate.localeCompare(a.sortDate);
+      return b.sortCreated.localeCompare(a.sortCreated);
     });
 
+    if (items.length === 0) return [];
+
+    // Filtro: si hay items HOY, mostramos solo los de hoy. Si no, los
+    // del último día con actividad. Tope: 10. Mismo criterio que antes
+    // pero aplicado al merge.
     const today = new Date().toISOString().slice(0, 10);
-    const todayOps = sorted.filter((p) => p.entry_date === today);
+    const todayItems = items.filter((it) => it.sortDate === today);
 
-    // Si hay operaciones hoy → mostrar solo las de hoy (hasta 10)
-    if (todayOps.length > 0) return todayOps.slice(0, 10);
+    if (todayItems.length > 0) return todayItems.slice(0, 10);
 
-    // Sino, mostrar las del último día con actividad (hasta 10)
-    const lastDate = sorted[0]?.entry_date;
+    const lastDate = items[0].sortDate;
     if (!lastDate) return [];
-    return sorted.filter((p) => p.entry_date === lastDate).slice(0, 10);
-  }, [positions]);
+    return items.filter((it) => it.sortDate === lastDate).slice(0, 10);
+  }, [positions, movements]);
 
   // Header label: "Operaciones de hoy" o "Operaciones del DD/MMM" según el
   // día que estemos mostrando.
   const headerLabel = useMemo(() => {
-    if (recentOps.length === 0) return "Últimas operaciones";
+    if (recentRows.length === 0) return "Últimas operaciones";
     const today = new Date().toISOString().slice(0, 10);
-    const showingDate = recentOps[0].entry_date;
+    const showingDate = recentRows[0].sortDate;
     if (showingDate === today) return "Operaciones de hoy";
     return `Operaciones del ${fmtDateShort(showingDate)}`;
-  }, [recentOps]);
+  }, [recentRows]);
 
   return (
     <div style={{ marginBottom: 24 }}>
@@ -6483,9 +6576,9 @@ function OperationsHistorySection({ positions, bondPrices, onEdit, onDelete, onU
             textTransform: "uppercase",
             fontWeight: 600,
           }}>
-            Últimas operaciones ({recentOps.length})
+            Últimas operaciones ({recentRows.length})
           </span>
-          {recentOps.length > 0 && (
+          {recentRows.length > 0 && (
             <span style={{
               fontSize: 9.5,
               color: C.dim,
@@ -6526,11 +6619,13 @@ function OperationsHistorySection({ positions, bondPrices, onEdit, onDelete, onU
 
       {open && (
         <PositionsTable
-          positions={recentOps}
+          rows={recentRows}
           bondPrices={bondPrices}
           onEdit={onEdit}
           onDelete={onDelete}
           onUpdatePrice={onUpdatePrice}
+          onEditCashMovement={onEditCashMovement}
+          onDeleteCashMovement={onDeleteCashMovement}
         />
       )}
     </div>
@@ -7038,7 +7133,31 @@ function subTdStyle(align) {
 
 
 /* ─────────────── Tabla de posiciones ─────────────── */
-function PositionsTable({ positions, bondPrices, onEdit, onDelete, onUpdatePrice }) {
+/**
+ * Tabla mixta que renderiza positions y cash_movements en el mismo
+ * formato visual. Cada item del array `rows` tiene un campo `_kind`
+ * que identifica si es 'position' o 'cash_movement', y el componente
+ * elige el sub-renderer correspondiente.
+ *
+ * Para mantener compatibilidad con código existente que pasa `positions`
+ * (modelo viejo, antes de cash), si solo se pasa `positions` esto se
+ * normaliza internamente como `rows` con _kind='position'.
+ */
+function PositionsTable({
+  positions,
+  rows,
+  bondPrices,
+  onEdit,
+  onDelete,
+  onUpdatePrice,
+  onEditCashMovement,
+  onDeleteCashMovement,
+}) {
+  // Normalizar entrada: si no nos pasaron `rows`, construirlas a partir
+  // de `positions` (compatibilidad con código viejo que solo trabaja con
+  // positions, ej: tablas en otras secciones).
+  const allRows = rows ?? (positions || []).map((p) => ({ _kind: "position", item: p }));
+
   return (
     <div
       style={{
@@ -7065,16 +7184,30 @@ function PositionsTable({ positions, bondPrices, onEdit, onDelete, onUpdatePrice
             </tr>
           </thead>
           <tbody>
-            {positions.map((p) => (
-              <PositionRow
-                key={p.id}
-                position={p}
-                bondPrices={bondPrices}
-                onEdit={() => onEdit(p)}
-                onDelete={() => onDelete(p)}
-                onUpdatePrice={(newPrice) => onUpdatePrice(p.id, newPrice)}
-              />
-            ))}
+            {allRows.map((row) => {
+              if (row._kind === "cash_movement") {
+                const m = row.item;
+                return (
+                  <CashMovementRow
+                    key={`cm_${m.id}`}
+                    movement={m}
+                    onEdit={onEditCashMovement || (() => {})}
+                    onDelete={onDeleteCashMovement || (() => {})}
+                  />
+                );
+              }
+              const p = row.item;
+              return (
+                <PositionRow
+                  key={p.id}
+                  position={p}
+                  bondPrices={bondPrices}
+                  onEdit={() => onEdit(p)}
+                  onDelete={() => onDelete(p)}
+                  onUpdatePrice={(newPrice) => onUpdatePrice(p.id, newPrice)}
+                />
+              );
+            })}
           </tbody>
         </table>
       </div>
@@ -7271,6 +7404,188 @@ function PositionRow({ position, bondPrices, onEdit, onDelete, onUpdatePrice }) 
           </button>
           <button
             onClick={onDelete}
+            aria-label="Borrar"
+            style={{
+              backgroundColor: "transparent",
+              border: `1px solid transparent`,
+              color: C.dim,
+              padding: 5,
+              cursor: "pointer",
+              transition: "all 100ms ease",
+            }}
+            onMouseEnter={(e) => {
+              e.currentTarget.style.color = C.red;
+              e.currentTarget.style.borderColor = "rgba(248,113,113,0.40)";
+            }}
+            onMouseLeave={(e) => {
+              e.currentTarget.style.color = C.dim;
+              e.currentTarget.style.borderColor = "transparent";
+            }}
+          >
+            <Trash2 size={12} strokeWidth={1.8} />
+          </button>
+        </div>
+      </PTd>
+    </tr>
+  );
+}
+
+
+/* ─────────────── Fila de movimiento de efectivo ───────────────
+ *
+ * Variante de PositionRow para los cash_movements manuales (deposit /
+ * withdrawal). Mantiene EL MISMO esquema de columnas que PositionRow
+ * para que ambos tipos de fila convivan visualmente sin que la tabla
+ * se desalinee.
+ *
+ * Mapeo de columnas:
+ *   - Tipo:       "Efectivo" + ícono Wallet
+ *   - Op.:        badge INGRESO (verde) o RETIRO (rojo)
+ *   - Ticker:     moneda del movement (ARS / USD-MEP / USD-CCL)
+ *   - Cantidad:   "—" (no aplica para cash)
+ *   - Precio:     "—" para deposits y withdrawals
+ *   - Total:      monto del movement, signo según tipo
+ *   - Moneda:     misma que ticker (redundante pero mantiene formato)
+ *   - Fecha:      movement_date
+ *   - Notas:      notes
+ *
+ * Solo se muestran movements MANUALES (related_position_id IS NULL).
+ * Los automáticos (sale_proceeds, purchase_cost) viven asociados a
+ * una position y se borran en cascade — no se muestran acá para no
+ * duplicar info.
+ */
+function CashMovementRow({ movement, onEdit, onDelete }) {
+  const isDeposit = movement.movement_type === "deposit";
+  const opLabel = isDeposit ? "INGRESO" : "RETIRO";
+  const opColor = isDeposit ? C.green : C.red;
+  const opBg = isDeposit ? "rgba(74,222,128,0.10)" : "rgba(248,113,113,0.10)";
+  const opBorder = isDeposit ? "rgba(74,222,128,0.30)" : "rgba(248,113,113,0.30)";
+
+  const amount = Number(movement.amount) || 0;
+  const signedAmount = isDeposit ? amount : -amount;
+
+  return (
+    <tr
+      style={{
+        borderBottom: `1px solid ${C.border}`,
+        transition: "background-color 100ms ease",
+      }}
+      onMouseEnter={(e) => (e.currentTarget.style.backgroundColor = "rgba(255,255,255,0.015)")}
+      onMouseLeave={(e) => (e.currentTarget.style.backgroundColor = "transparent")}
+    >
+      {/* Tipo: ícono Wallet + label "Efectivo" */}
+      <PTd dense>
+        <div className="flex items-center gap-2">
+          <Wallet size={12} color={C.muted} strokeWidth={1.7} />
+          <span style={{ fontSize: 11, color: C.muted }}>Efectivo</span>
+        </div>
+      </PTd>
+
+      {/* Op.: badge INGRESO / RETIRO */}
+      <PTd dense>
+        <span
+          style={{
+            fontSize: 9,
+            fontWeight: 700,
+            letterSpacing: "0.14em",
+            padding: "1px 6px",
+            borderRadius: 3,
+            color: opColor,
+            backgroundColor: opBg,
+            border: `1px solid ${opBorder}`,
+          }}
+        >
+          {opLabel}
+        </span>
+      </PTd>
+
+      {/* Ticker: moneda del movement */}
+      <PTd dense>
+        <span className="eco-mono" style={{ fontWeight: 600, fontSize: 12 }}>
+          {movement.currency}
+        </span>
+      </PTd>
+
+      {/* Cantidad: no aplica */}
+      <PTd dense align="right">
+        <span style={{ color: C.dim }}>—</span>
+      </PTd>
+
+      {/* Precio compra: no aplica */}
+      <PTd dense align="right">
+        <span style={{ color: C.dim }}>—</span>
+      </PTd>
+
+      {/* Precio venta: no aplica */}
+      <PTd dense align="right">
+        <span style={{ color: C.dim }}>—</span>
+      </PTd>
+
+      {/* Total: el monto firmado del movement */}
+      <PTd dense align="right">
+        <span
+          className="eco-mono"
+          style={{ color: isDeposit ? C.text : C.red, fontWeight: 500 }}
+        >
+          {fmtNumber(signedAmount, { maxDecimals: 2 })}
+        </span>
+      </PTd>
+
+      {/* Moneda */}
+      <PTd dense>
+        <span style={{ fontSize: 11, color: C.muted }}>{movement.currency}</span>
+      </PTd>
+
+      {/* Fecha */}
+      <PTd dense>
+        <span style={{ fontSize: 11, color: C.muted }}>{fmtDateShort(movement.movement_date)}</span>
+      </PTd>
+
+      {/* Notas */}
+      <PTd dense>
+        <span
+          style={{
+            fontSize: 10.5,
+            color: C.dim,
+            maxWidth: 180,
+            display: "inline-block",
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
+          }}
+          title={movement.notes || ""}
+        >
+          {movement.notes || "—"}
+        </span>
+      </PTd>
+
+      {/* Acciones: editar / borrar */}
+      <PTd dense align="right">
+        <div className="flex items-center justify-end gap-1">
+          <button
+            onClick={() => onEdit(movement)}
+            aria-label="Editar"
+            style={{
+              backgroundColor: "transparent",
+              border: `1px solid transparent`,
+              color: C.dim,
+              padding: 5,
+              cursor: "pointer",
+              transition: "all 100ms ease",
+            }}
+            onMouseEnter={(e) => {
+              e.currentTarget.style.color = C.accent;
+              e.currentTarget.style.borderColor = C.accentBorder;
+            }}
+            onMouseLeave={(e) => {
+              e.currentTarget.style.color = C.dim;
+              e.currentTarget.style.borderColor = "transparent";
+            }}
+          >
+            <Pencil size={12} strokeWidth={1.8} />
+          </button>
+          <button
+            onClick={() => onDelete(movement)}
             aria-label="Borrar"
             style={{
               backgroundColor: "transparent",
@@ -7517,15 +7832,32 @@ function EditablePriceCell({ position, resolved, onSave }) {
  *   - onSubmit({movement_type, currency, amount, movement_date, notes}):
  *       el padre se encarga de llamar al hook useCashMovements.addManualMovement
  */
-function CashMovementModal({ type, onCancel, onSubmit }) {
-  const isDeposit = type === "deposit";
+function CashMovementModal({ type, editingMovement, onCancel, onSubmit }) {
+  const isEditing = Boolean(editingMovement);
+
+  // Si estamos editando, el tipo lo determina el movement existente.
+  // Si no, viene del prop `type`.
+  const [movementType, setMovementType] = useState(
+    isEditing ? editingMovement.movement_type : type
+  );
+  const isDeposit = movementType === "deposit";
   const titleColor = isDeposit ? C.green : C.red;
 
-  const [form, setForm] = useState({
-    currency: "ARS",
-    amount: "",
-    movement_date: new Date().toISOString().slice(0, 10),
-    notes: "",
+  const [form, setForm] = useState(() => {
+    if (isEditing) {
+      return {
+        currency: editingMovement.currency || "ARS",
+        amount: String(editingMovement.amount ?? ""),
+        movement_date: editingMovement.movement_date || new Date().toISOString().slice(0, 10),
+        notes: editingMovement.notes || "",
+      };
+    }
+    return {
+      currency: "ARS",
+      amount: "",
+      movement_date: new Date().toISOString().slice(0, 10),
+      notes: "",
+    };
   });
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState(null);
@@ -7547,7 +7879,7 @@ function CashMovementModal({ type, onCancel, onSubmit }) {
     setError(null);
     try {
       await onSubmit({
-        movement_type: type,
+        movement_type: movementType,
         currency: form.currency,
         amount: Number(form.amount),
         movement_date: form.movement_date,
@@ -7606,7 +7938,9 @@ function CashMovementModal({ type, onCancel, onSubmit }) {
                 letterSpacing: "-0.01em",
               }}
             >
-              {isDeposit ? "Ingresar efectivo" : "Retirar efectivo"}
+              {isEditing
+                ? (isDeposit ? "Editar ingreso" : "Editar retiro")
+                : (isDeposit ? "Ingresar efectivo" : "Retirar efectivo")}
             </span>
           </div>
           <button
@@ -7626,10 +7960,36 @@ function CashMovementModal({ type, onCancel, onSubmit }) {
         </div>
 
         <p style={{ fontSize: 12, color: C.muted, marginBottom: 18, lineHeight: 1.5 }}>
-          {isDeposit
-            ? "Cargá un depósito desde tu banco al broker, o el saldo inicial con el que arrancás. El monto se sumará al saldo de la moneda seleccionada."
-            : "Cargá un retiro desde el broker hacia tu banco. El monto se descontará del saldo de la moneda seleccionada."}
+          {isEditing
+            ? "Modificá los datos del movimiento. Si cambiás de Ingreso a Retiro (o viceversa), el saldo se ajusta automáticamente."
+            : (isDeposit
+              ? "Cargá un depósito desde tu banco al broker, o el saldo inicial con el que arrancás. El monto se sumará al saldo de la moneda seleccionada."
+              : "Cargá un retiro desde el broker hacia tu banco. El monto se descontará del saldo de la moneda seleccionada.")}
         </p>
+
+        {/* Tipo (solo visible en edición — al crear viene fijado por el botón
+            que se clickeó). Permite cambiar deposit ↔ withdrawal sin tener
+            que borrar y volver a crear el movement. */}
+        {isEditing && (
+          <FormSection label="Tipo">
+            <div className="flex gap-2">
+              <ToggleButton
+                active={movementType === "deposit"}
+                onClick={() => setMovementType("deposit")}
+                color="green"
+              >
+                Ingreso
+              </ToggleButton>
+              <ToggleButton
+                active={movementType === "withdrawal"}
+                onClick={() => setMovementType("withdrawal")}
+                color="red"
+              >
+                Retiro
+              </ToggleButton>
+            </div>
+          </FormSection>
+        )}
 
         {/* Moneda */}
         <FormSection label="Moneda">
@@ -7740,7 +8100,11 @@ function CashMovementModal({ type, onCancel, onSubmit }) {
               transition: "opacity 120ms ease",
             }}
           >
-            {submitting ? "Guardando..." : (isDeposit ? "Confirmar ingreso" : "Confirmar retiro")}
+            {submitting
+              ? "Guardando..."
+              : isEditing
+                ? "Guardar cambios"
+                : (isDeposit ? "Confirmar ingreso" : "Confirmar retiro")}
           </button>
         </div>
       </div>
@@ -7814,6 +8178,121 @@ function DeleteConfirmModal({ position, onCancel, onConfirm }) {
           ¿Seguro querés borrar la operación de{" "}
           <strong style={{ color: C.text }}>{position.ticker}</strong>?
           Esta acción no se puede deshacer.
+        </p>
+        <div className="flex items-center justify-end gap-2">
+          <button
+            onClick={onCancel}
+            disabled={deleting}
+            style={{
+              backgroundColor: "transparent",
+              border: `1px solid ${C.border}`,
+              color: C.muted,
+              padding: "8px 14px",
+              fontSize: 12,
+              cursor: deleting ? "not-allowed" : "pointer",
+              fontFamily: "'Roboto', sans-serif",
+            }}
+          >
+            Cancelar
+          </button>
+          <button
+            onClick={handleConfirm}
+            disabled={deleting}
+            style={{
+              backgroundColor: C.red,
+              border: "none",
+              color: "#fff",
+              padding: "8px 14px",
+              fontSize: 12,
+              fontWeight: 600,
+              cursor: deleting ? "not-allowed" : "pointer",
+              fontFamily: "'Roboto', sans-serif",
+              opacity: deleting ? 0.6 : 1,
+            }}
+          >
+            {deleting ? "Borrando..." : "Borrar"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+
+/* ─────────────── Modal: confirmar borrado de cash movement ───────────────
+ *
+ * Variante de DeleteConfirmModal específica para movimientos de efectivo
+ * manuales (deposit / withdrawal). Solo se muestra para movements MANUALES
+ * — los automáticos (sale_proceeds, purchase_cost) NO tienen UI de delete
+ * porque viven asociados a una position y se borran en cascade al borrar
+ * la position original.
+ */
+function DeleteCashMovementModal({ movement, onCancel, onConfirm }) {
+  const [deleting, setDeleting] = useState(false);
+
+  const handleConfirm = async () => {
+    setDeleting(true);
+    try {
+      await onConfirm();
+    } finally {
+      setDeleting(false);
+    }
+  };
+
+  const isDeposit = movement.movement_type === "deposit";
+  const tipoLabel = isDeposit ? "ingreso" : "retiro";
+
+  return (
+    <div
+      onClick={onCancel}
+      style={{
+        position: "fixed",
+        inset: 0,
+        backgroundColor: "rgba(0, 0, 0, 0.55)",
+        backdropFilter: "blur(2px)",
+        zIndex: 100,
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        padding: 20,
+      }}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        className="eco-fade-in"
+        style={{
+          backgroundColor: C.panel,
+          border: `1px solid ${C.borderStrong}`,
+          padding: 28,
+          maxWidth: 400,
+          width: "100%",
+          fontFamily: "'Roboto', sans-serif",
+        }}
+      >
+        <div className="flex items-center gap-3" style={{ marginBottom: 14 }}>
+          <div
+            style={{
+              width: 36,
+              height: 36,
+              backgroundColor: "rgba(248,113,113,0.10)",
+              border: `1px solid rgba(248,113,113,0.30)`,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+            }}
+          >
+            <AlertTriangle size={16} color={C.red} strokeWidth={1.8} />
+          </div>
+          <h3 style={{ margin: 0, fontSize: 15, color: C.text, fontFamily: "'Raleway', sans-serif", fontWeight: 600 }}>
+            Borrar movimiento
+          </h3>
+        </div>
+        <p style={{ fontSize: 12.5, color: C.muted, lineHeight: 1.6, marginBottom: 20 }}>
+          ¿Seguro querés borrar el {tipoLabel} de{" "}
+          <strong style={{ color: C.text }}>
+            {fmtCurrencyValue(Number(movement.amount), movement.currency === "ARS" ? "ARS" : "USD")} {movement.currency}
+          </strong>
+          {" "}del {fmtDateShort(movement.movement_date)}? El saldo se va a recalcular automáticamente. Esta acción no se puede deshacer.
         </p>
         <div className="flex items-center justify-end gap-2">
           <button
