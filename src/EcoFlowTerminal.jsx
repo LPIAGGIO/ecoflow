@@ -3770,13 +3770,41 @@ function computePortfolioTotals(positions, fx, valuationCurrency, bondPrices) {
   let pricesFromMarket = 0; // posiciones con precio data912 / manual
   let pricesFromCost = 0;   // posiciones que cayeron al fallback
 
-  // Para futuros usamos la vista consolidada: solo así podemos calcular
-  // correctamente el P&L realizado de posiciones cerradas (compra + venta
-  // del mismo ticker). La función positionValueAtMarket a nivel individual
-  // no tiene visibilidad del grupo y subestimaría el P&L de cierres.
-  const futurePositions = positions.filter((p) => p.instrument_type === "future");
-  const nonFuturePositions = positions.filter((p) => p.instrument_type !== "future");
+  // Separamos las posiciones en TRES grupos según cómo se valúan:
+  //
+  //  1) Futuros: vista consolidada. valor = P&L (realizado + no realizado),
+  //     costo = 0. El "valor de mercado" del notional NO se incluye.
+  //
+  //  2) Consolidables con split (bond_ars, bond_usd, on, stock, cedear):
+  //     vista consolidada para que las VENTAS resten correctamente del
+  //     valor de mercado y el P&L realizado se cuente bien. Antes este
+  //     loop iteraba operación por operación con positionValueAtMarket(),
+  //     que NO respeta operation_type='sell' y por eso una venta de bono
+  //     SUMABA al total en lugar de restar. Bug reportado por LP en mayo
+  //     2026: T30J6 vendí 10M de un total de 35,9M y el "Total" de la
+  //     cartera estaba inflado en ~14M.
+  //
+  //  3) Resto (caucion, fci, usd, crypto, option): loop individual.
+  //     Estos tipos NO mezclan compras y ventas del mismo ticker (una
+  //     caución colocada se cobra, no se vende; un FCI se rescata, etc).
+  //     Por eso el bug del split no aplica acá.
+  const futurePositions = [];
+  const consolidableSplitPositions = [];
+  const individualPositions = [];
 
+  const SPLIT_TYPES = new Set(["bond_ars", "bond_usd", "on", "stock", "cedear"]);
+
+  for (const p of positions) {
+    if (p.instrument_type === "future") {
+      futurePositions.push(p);
+    } else if (SPLIT_TYPES.has(p.instrument_type)) {
+      consolidableSplitPositions.push(p);
+    } else {
+      individualPositions.push(p);
+    }
+  }
+
+  // ── (1) FUTUROS: vista consolidada ──────────────────────────────────
   if (futurePositions.length > 0) {
     const futureGroups = consolidatePositions(futurePositions, bondPrices);
     for (const g of futureGroups) {
@@ -3799,7 +3827,59 @@ function computePortfolioTotals(positions, fx, valuationCurrency, bondPrices) {
     }
   }
 
-  for (const p of nonFuturePositions) {
+  // ── (2) CONSOLIDABLES CON SPLIT: vista consolidada ──────────────────
+  // Acá entra cada grupo (bond, stock, cedear, on) que ya viene splitteado
+  // por consolidatePositions:
+  //   - Posición 100% abierta (sin ventas): 1 fila, valor mkt + costo normales
+  //   - Cierre parcial: 2 filas (una "open" con netQty + costo, una "closed"
+  //     con valor=P&L realizado y costo=0)
+  //   - Cierre total: 1 fila "closed" con valor=P&L realizado y costo=0
+  // Sumando linealmente, el total queda correcto porque las cerradas
+  // aportan SOLO el P&L (sin doble-contar capital).
+  if (consolidableSplitPositions.length > 0) {
+    const groups = consolidatePositions(consolidableSplitPositions, bondPrices);
+    for (const g of groups) {
+      if (g.valueAtMarket == null) {
+        unvalued++;
+        continue;
+      }
+      const convertedMarket = convertValue(
+        g.valueAtMarket, g.currency || "ARS", valuationCurrency, fx
+      );
+      if (convertedMarket == null) {
+        unvalued++;
+        continue;
+      }
+      valuedAny = true;
+      totalMarket += convertedMarket;
+
+      if (g.valueAtCost != null) {
+        const convertedCost = convertValue(
+          g.valueAtCost, g.currency || "ARS", valuationCurrency, fx
+        );
+        if (convertedCost != null) totalCost += convertedCost;
+      }
+
+      // Para clasificar fuente: priceSource del grupo viene de useBondPrices
+      // (byma/data912/manual) o "cost"/"close". Las cerradas siempre son
+      // "close" → cuentan como market.
+      const src = g.priceSource;
+      const fromMarket =
+        src === "byma" ||
+        src === "data912" ||
+        src === "market" ||
+        src === "manual" ||
+        src === "close";
+      if (fromMarket) {
+        pricesFromMarket++;
+      } else {
+        pricesFromCost++;
+      }
+    }
+  }
+
+  // ── (3) INDIVIDUALES: loop simple (caucion, fci, usd, crypto, option) ──
+  for (const p of individualPositions) {
     const marketRes = positionValueAtMarket(p, bondPrices);
     const cost = positionValueAtCost(p);
 
@@ -3857,17 +3937,24 @@ function computePortfolioTotals(positions, fx, valuationCurrency, bondPrices) {
 
 function groupByCategory(positions, fx, valuationCurrency, bondPrices) {
   const result = {};
-  for (const p of positions) {
-    // Futuros se excluyen del donut de distribución: su "valor" es solo
-    // el P&L mark-to-market (no son wealth nominal). Los mostramos como
-    // exposición separada, no como categoría de cartera.
-    if (p.instrument_type === "future") continue;
 
-    const m = positionValueAtMarket(p, bondPrices);
-    if (m == null) continue;
-    const v = convertValue(m.value, p.entry_currency || "ARS", valuationCurrency, fx);
+  // Excluir futuros (su valor es solo P&L mark-to-market, no es wealth
+  // nominal — los mostramos como exposición separada).
+  const nonFuture = positions.filter((p) => p.instrument_type !== "future");
+
+  // Vista consolidada: si la posición tiene un cierre parcial, aporta
+  // como (1) fila abierta con valor de mercado de netQty + (2) fila
+  // cerrada con valor = P&L realizado. Sumar ambas da el valor neto
+  // correcto (capital remanente + ganancia/pérdida realizada). Esto
+  // arregla el bug de que una venta del mismo ticker SUMABA al donut
+  // en lugar de restar (porque positionValueAtMarket no respeta
+  // operation_type='sell').
+  const groups = consolidatePositions(nonFuture, bondPrices);
+  for (const g of groups) {
+    if (g.valueAtMarket == null) continue;
+    const v = convertValue(g.valueAtMarket, g.currency || "ARS", valuationCurrency, fx);
     if (v == null) continue;
-    const cat = simplifyCategory(p.instrument_type);
+    const cat = simplifyCategory(g.instrument_type);
     result[cat] = (result[cat] || 0) + v;
   }
   return result;
@@ -3875,15 +3962,17 @@ function groupByCategory(positions, fx, valuationCurrency, bondPrices) {
 
 function groupByCurrency(positions, fx, valuationCurrency, bondPrices) {
   const result = {};
-  for (const p of positions) {
-    // Mismo criterio: futuros excluidos del breakdown por moneda.
-    if (p.instrument_type === "future") continue;
 
-    const m = positionValueAtMarket(p, bondPrices);
-    if (m == null) continue;
-    const v = convertValue(m.value, p.entry_currency || "ARS", valuationCurrency, fx);
+  // Mismo criterio: futuros excluidos del breakdown por moneda.
+  const nonFuture = positions.filter((p) => p.instrument_type !== "future");
+
+  // Vista consolidada — ver groupByCategory para detalle del fix.
+  const groups = consolidatePositions(nonFuture, bondPrices);
+  for (const g of groups) {
+    if (g.valueAtMarket == null) continue;
+    const v = convertValue(g.valueAtMarket, g.currency || "ARS", valuationCurrency, fx);
     if (v == null) continue;
-    const cur = p.entry_currency || "ARS";
+    const cur = g.currency || "ARS";
     result[cur] = (result[cur] || 0) + v;
   }
   return result;
@@ -3937,22 +4026,36 @@ function computeLiquidityBreakdown(positions, fx, valuationCurrency, windowKey, 
 
   const result = { ARS: 0, "USD-MEP": 0, "USD-CCL": 0 };
 
-  for (const p of positions) {
-    // Futuros excluidos: al vencimiento solo se libera la garantía (que
-    // ya está en otra posición) y se realiza el P&L. No es un "ingreso"
-    // típico ni predecible — depende del precio final del subyacente.
-    if (p.instrument_type === "future") continue;
+  // Futuros excluidos: al vencimiento solo se libera la garantía (que ya
+  // está en otra posición) y se realiza el P&L. No es un "ingreso" típico
+  // ni predecible — depende del precio final del subyacente.
+  const nonFuture = positions.filter((p) => p.instrument_type !== "future");
 
-    const matDate = getPositionMaturity(p);
+  // Vista consolidada: la liquidez al vencimiento corresponde a la qty
+  // NETA (compras − ventas) por su valor de mercado actual. Si el bono
+  // está parcialmente cerrado, sólo la fila "open" aporta liquidez
+  // futura; la fila "closed" tiene netQty=0 y no entra. Antes este loop
+  // iteraba operación por operación y la venta SUMABA en lugar de
+  // restar (mismo bug que groupByCategory y computePortfolioTotals).
+  const groups = consolidatePositions(nonFuture, bondPrices);
+
+  for (const g of groups) {
+    // Posiciones cerradas (o sin qty neta) no aportan liquidez futura.
+    if (g.netQty === 0 || g.isClosed) continue;
+    if (g.valueAtMarket == null) continue;
+
+    // Tomamos el vencimiento de cualquier operación del grupo (todas
+    // comparten ticker y por tanto la misma fecha de vto).
+    const sample = g.operations[0];
+    if (!sample) continue;
+    const matDate = getPositionMaturity(sample);
     if (!matDate) continue;
     const md = new Date(matDate);
     if (md < now || md > cutoff) continue;
 
-    const m = positionValueAtMarket(p, bondPrices);
-    if (m == null) continue;
-    const cur = p.entry_currency || "ARS";
+    const cur = g.currency || "ARS";
     if (result[cur] != null) {
-      result[cur] += m.value;
+      result[cur] += g.valueAtMarket;
     }
   }
 
@@ -4340,17 +4443,161 @@ function consolidatePositions(positions, bondPrices) {
         if (initialNotional > 0) pnlPct = (pnl / initialNotional) * 100;
       }
     } else {
-      valueAtMarket = currentPrice != null
-        ? applyConventionToValue(g.instrument_type, netQty, currentPrice)
-        : null;
-      valueAtCost = ppp != null
-        ? applyConventionToValue(g.instrument_type, netQty, ppp)
-        : null;
-      if (valueAtMarket != null && valueAtCost != null) {
-        pnl = valueAtMarket - valueAtCost;
-        pnlPct = Math.abs(valueAtCost) > 0
-          ? (pnl / Math.abs(valueAtCost)) * 100
+      // ─────────────────────────────────────────────────────────────────
+      //  Tipos consolidables NO-futuros (bond_ars, bond_usd, on, stock,
+      //  cedear, fci, usd, crypto, option).
+      //
+      //  Acá replicamos la lógica de split open/closed que ya teníamos
+      //  para futuros, pero usando applyConventionToValue() para respetar
+      //  la convención de cada instrumento (ej. bonos /100, opciones ×100).
+      //
+      //  Convención PPP (Cocos/Balanz/IOL):
+      //    - El PPP se calcula sólo sobre las compras y NO se mueve por
+      //      ventas. Si compraste 35,9M a 139,32 y vendés 10M, el PPP de
+      //      los 25,9M restantes sigue siendo 139,32.
+      //    - El P&L realizado se calcula como (PPV − PPP) sobre la qty
+      //      vendida, aplicando la convención del instrumento.
+      // ─────────────────────────────────────────────────────────────────
+
+      // P&L REALIZADO sobre las ventas (si hubo).
+      // Para bonos: (qtyVendida × PPV /100) − (qtyVendida × PPP /100)
+      // Para acciones: qtyVendida × (PPV − PPP)
+      // Etcétera, todo via applyConventionToValue.
+      if (g.totalSellQty > 0 && ppp != null && ppv != null) {
+        const valueOfSells = applyConventionToValue(g.instrument_type, g.totalSellQty, ppv);
+        const costOfSells  = applyConventionToValue(g.instrument_type, g.totalSellQty, ppp);
+        realizedPnl = valueOfSells - costOfSells;
+      } else {
+        realizedPnl = 0;
+      }
+
+      // CASO ESPECIAL — cierre parcial:
+      //   netQty != 0 && hubo ventas → el grupo se DIVIDE en dos entradas:
+      //     ABIERTA (netQty unidades, PPP, P&L no realizado vs precio actual)
+      //     CERRADA (totalSellQty unidades, PPV, P&L realizado)
+      //   Esto matchea el comportamiento que ya teníamos para futuros y
+      //   replica la vista que dan Cocos / Balanz.
+      const isPartialClose = netQty !== 0 && g.totalSellQty > 0;
+
+      if (isPartialClose) {
+        // ── Entrada ABIERTA: usa netQty + PPP + precio actual ──
+        const openValueAtMarket = currentPrice != null
+          ? applyConventionToValue(g.instrument_type, netQty, currentPrice)
           : null;
+        const openValueAtCost = ppp != null
+          ? applyConventionToValue(g.instrument_type, netQty, ppp)
+          : null;
+        const openPnl = (openValueAtMarket != null && openValueAtCost != null)
+          ? openValueAtMarket - openValueAtCost
+          : null;
+        const openPnlPct = (openPnl != null && openValueAtCost != null && Math.abs(openValueAtCost) > 0)
+          ? (openPnl / Math.abs(openValueAtCost)) * 100
+          : null;
+
+        const openOperations = g.operations.filter((o) => o.operation_type !== "sell");
+        const closedOperations = g.operations; // la cerrada lleva todo el contexto
+
+        // ── Entrada CERRADA: usa totalSellQty + PPP + PPV ──
+        const closedPnl = realizedPnl;
+        const closedValueAtCost = applyConventionToValue(g.instrument_type, g.totalSellQty, ppp);
+        const closedPnlPct = (closedValueAtCost != null && Math.abs(closedValueAtCost) > 0)
+          ? (closedPnl / Math.abs(closedValueAtCost)) * 100
+          : null;
+
+        // Push entrada ABIERTA
+        result.push({
+          groupKey: g.groupKey + "|open",
+          instrument_type: g.instrument_type,
+          ticker: g.ticker,
+          currency: g.currency,
+          operations: openOperations,
+          operationsCount: openOperations.length,
+          buyOpsCount: openOperations.length,
+          sellOpsCount: 0,
+          netQty,
+          isShort: netQty < 0,
+          isClosed: false,
+          ppp,
+          ppv: null,
+          currentPrice,
+          priceSource,
+          valueAtMarket: openValueAtMarket,
+          valueAtCost: openValueAtCost,
+          pnl: openPnl,
+          pnlPct: openPnlPct,
+          realizedPnl: 0,
+          unrealizedPnl: openPnl,
+          notional: null,
+          firstDate: g.firstDate,
+          lastDate: g.lastDate,
+          notesAggregated: g.notesAggregated,
+        });
+
+        // Push entrada CERRADA
+        result.push({
+          groupKey: g.groupKey + "|closed",
+          instrument_type: g.instrument_type,
+          ticker: g.ticker,
+          currency: g.currency,
+          operations: closedOperations,
+          operationsCount: closedOperations.length,
+          buyOpsCount: g.operations.filter((o) => o.operation_type !== "sell").length,
+          sellOpsCount: g.operations.filter((o) => o.operation_type === "sell").length,
+          netQty: 0,
+          isShort: false,
+          isClosed: true,
+          ppp,
+          ppv,
+          currentPrice: g.lastSellPrice,
+          priceSource: "close",
+          // Para no-futuros, el "Total" de la fila cerrada lo dejamos en
+          // el P&L realizado (mismo criterio que futuros): es lo que
+          // efectivamente entró/salió de tu comitente al cerrar.
+          valueAtMarket: closedPnl,
+          valueAtCost: 0,
+          pnl: closedPnl,
+          pnlPct: closedPnlPct,
+          realizedPnl: closedPnl,
+          unrealizedPnl: 0,
+          notional: 0,
+          closedQty: g.totalSellQty,
+          firstDate: g.firstDate,
+          lastDate: g.lastDate,
+          notesAggregated: g.notesAggregated,
+        });
+        continue; // saltamos el push genérico de abajo
+      }
+
+      // CASOS NO PARTICULARES (sin venta, o cierre total):
+      if (isClosed) {
+        // CIERRE TOTAL (netQty = 0, hubo compras y ventas que se calzaron
+        // exactamente). Una sola fila cerrada con P&L realizado.
+        const closedValueAtCost = (ppp != null)
+          ? applyConventionToValue(g.instrument_type, g.totalSellQty, ppp)
+          : null;
+        valueAtMarket = realizedPnl;
+        valueAtCost = 0;
+        pnl = realizedPnl;
+        unrealizedPnl = 0;
+        pnlPct = (closedValueAtCost != null && Math.abs(closedValueAtCost) > 0)
+          ? (realizedPnl / Math.abs(closedValueAtCost)) * 100
+          : null;
+      } else {
+        // CASO STANDARD: posición abierta sin ventas (totalSellQty = 0).
+        // Es la lógica que tenía el bloque antes de este fix.
+        valueAtMarket = currentPrice != null
+          ? applyConventionToValue(g.instrument_type, netQty, currentPrice)
+          : null;
+        valueAtCost = ppp != null
+          ? applyConventionToValue(g.instrument_type, netQty, ppp)
+          : null;
+        if (valueAtMarket != null && valueAtCost != null) {
+          pnl = valueAtMarket - valueAtCost;
+          unrealizedPnl = pnl;
+          pnlPct = Math.abs(valueAtCost) > 0
+            ? (pnl / Math.abs(valueAtCost)) * 100
+            : null;
+        }
       }
     }
 
