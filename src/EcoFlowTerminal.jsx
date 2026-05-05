@@ -5267,54 +5267,23 @@ function PortfolioDashboard({ onNavigate }) {
         <span>Beta</span>
       </div>
 
-      <div className="flex items-end justify-between gap-4" style={{ marginBottom: 26 }}>
-        <div>
-          <h1
-            style={{
-              fontFamily: "'Raleway', sans-serif",
-              fontSize: 26,
-              fontWeight: 700,
-              color: C.text,
-              letterSpacing: "-0.015em",
-              margin: 0,
-              marginBottom: 6,
-            }}
-          >
-            Hola, {firstName}
-          </h1>
-          <p style={{ fontSize: 13, color: C.muted, margin: 0, maxWidth: 640 }}>
-            Cargá tus posiciones para ver tu cartera consolidada y descubrir oportunidades.
-          </p>
-        </div>
-
-        <button
-          onClick={openCreate}
-          className="flex items-center gap-2"
+      <div style={{ marginBottom: 26 }}>
+        <h1
           style={{
-            backgroundColor: C.accent,
-            color: C.bg,
-            border: "none",
-            padding: "10px 16px",
-            cursor: "pointer",
-            fontSize: 13,
-            fontWeight: 600,
-            fontFamily: "'Roboto', sans-serif",
-            letterSpacing: "0.01em",
-            transition: "transform 120ms ease, box-shadow 120ms ease",
-            whiteSpace: "nowrap",
-          }}
-          onMouseEnter={(e) => {
-            e.currentTarget.style.transform = "translateY(-1px)";
-            e.currentTarget.style.boxShadow = `0 4px 12px ${C.accentGlow}`;
-          }}
-          onMouseLeave={(e) => {
-            e.currentTarget.style.transform = "translateY(0)";
-            e.currentTarget.style.boxShadow = "none";
+            fontFamily: "'Raleway', sans-serif",
+            fontSize: 26,
+            fontWeight: 700,
+            color: C.text,
+            letterSpacing: "-0.015em",
+            margin: 0,
+            marginBottom: 6,
           }}
         >
-          <Plus size={15} strokeWidth={2.2} />
-          Agregar posición
-        </button>
+          Hola, {firstName}
+        </h1>
+        <p style={{ fontSize: 13, color: C.muted, margin: 0, maxWidth: 640 }}>
+          Cargá tus posiciones para ver tu cartera consolidada y descubrir oportunidades.
+        </p>
       </div>
 
       {/* Estado de error */}
@@ -5362,6 +5331,7 @@ function PortfolioDashboard({ onNavigate }) {
             onEdit={openEdit}
             onDelete={(p) => setConfirmingDelete(p)}
             onUpdatePrice={handleUpdateCurrentPrice}
+            onAdd={openCreate}
           />
 
           {/* Historial de operaciones (Modelo A): lista cruda de cada
@@ -5504,6 +5474,7 @@ function ConsolidatedSection({
   onEdit,
   onDelete,
   onUpdatePrice,
+  onAdd,
 }) {
   // Consolidamos sobre TODAS las positions filtradas (incluyendo cerradas).
   // Después separamos en `open` y `closed` para que cada una vaya a su
@@ -5523,7 +5494,7 @@ function ConsolidatedSection({
 
   return (
     <div style={{ marginBottom: 24 }}>
-      <div className="flex items-center justify-between" style={{ marginBottom: 8 }}>
+      <div className="flex items-center justify-between gap-3" style={{ marginBottom: 12 }}>
         <span style={{
           fontSize: 9,
           letterSpacing: "0.22em",
@@ -5533,6 +5504,42 @@ function ConsolidatedSection({
         }}>
           Posiciones consolidadas ({open.length})
         </span>
+
+        {/* Botón "Agregar posición" — vive acá (al lado del header de la
+            sección) porque es la acción principal de Posiciones
+            consolidadas. Antes estaba arriba al lado del saludo, pero
+            visualmente queda mejor anclado a la sección donde produce
+            efecto directo. */}
+        {onAdd && (
+          <button
+            onClick={onAdd}
+            className="flex items-center gap-2"
+            style={{
+              backgroundColor: C.accent,
+              color: C.bg,
+              border: "none",
+              padding: "8px 14px",
+              cursor: "pointer",
+              fontSize: 12.5,
+              fontWeight: 600,
+              fontFamily: "'Roboto', sans-serif",
+              letterSpacing: "0.01em",
+              transition: "transform 120ms ease, box-shadow 120ms ease",
+              whiteSpace: "nowrap",
+            }}
+            onMouseEnter={(e) => {
+              e.currentTarget.style.transform = "translateY(-1px)";
+              e.currentTarget.style.boxShadow = `0 4px 12px ${C.accentGlow}`;
+            }}
+            onMouseLeave={(e) => {
+              e.currentTarget.style.transform = "translateY(0)";
+              e.currentTarget.style.boxShadow = "none";
+            }}
+          >
+            <Plus size={14} strokeWidth={2.2} />
+            Agregar posición
+          </button>
+        )}
       </div>
 
       {/* Filtros (chips por tipo) */}
