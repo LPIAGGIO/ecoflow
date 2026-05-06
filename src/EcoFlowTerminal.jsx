@@ -2430,11 +2430,21 @@ function getTickerOptions(instrumentType, currentTicker, catalog) {
       instrumentType === "cedear" ? CEDEAR_REGISTRY :
       ON_REGISTRY;
 
-    // Particionar por plaza
-    const pesos = [];
-    const mep = [];
-    const ccl = [];
+    // Construimos opts con ordenación por DESCRIPCIÓN de empresa para que
+    // las 3 plazas del mismo emisor queden contiguas:
+    //   ALUA   — Aluar S.A.
+    //   ALUAD  — Aluar S.A. · MEP
+    //   ALUAC  — Aluar S.A. · CCL
+    //   BBAR   — BBVA Argentina
+    //   BBARD  — BBVA Argentina · MEP
+    //   ...
+    // El sort principal es alfabético por descripción; el desempate es
+    // por plaza (ARS=0, MEP=1, CCL=2) para que dentro de una empresa la
+    // moneda local salga primero.
+    const conocidos = [];
     const otros = [];
+
+    const plazaOrder = { "ARS": "0", "USD-MEP": "1", "USD-CCL": "2" };
 
     for (const row of list) {
       const ticker = (row.ticker || "").toUpperCase().trim();
@@ -2444,7 +2454,6 @@ function getTickerOptions(instrumentType, currentTicker, catalog) {
       const { base, plaza } = detectPlaza(ticker, registry);
       const desc = registry[base] || row.description || null;
 
-      // Sufijo de plaza para el label cuando NO es ARS
       const plazaSuffix =
         plaza === "USD-MEP" ? " · MEP" :
         plaza === "USD-CCL" ? " · CCL" :
@@ -2454,54 +2463,49 @@ function getTickerOptions(instrumentType, currentTicker, catalog) {
         ? `${ticker} — ${desc}${plazaSuffix}`
         : ticker;
 
-      const opt = {
-        value: ticker,
-        label,
-        sortKey: `${base}_${plaza}`,
-      };
+      // sortKey para "conocidos": alfabético por descripción, después
+      // plaza (ARS antes de MEP antes de CCL), después ticker como
+      // tiebreaker final.
+      const sortKey = desc
+        ? `${desc.toLowerCase()}__${plazaOrder[plaza] || "9"}__${ticker}`
+        : `~~~${ticker}`; // sin desc nunca llega acá
 
-      // Si el base NO está en el registry, va a "Otros" (sin importar plaza).
-      // Esto ayuda al usuario a darse cuenta de qué tickers están
-      // sin enriquecer.
+      const opt = { value: ticker, label, sortKey };
+
+      // Si el base NO está en el registry → "Otros (sin descripción)".
+      // Esto sirve como visual cue de que el catálogo está sin
+      // enriquecer para ese ticker.
       if (!registry[base]) {
-        otros.push(opt);
-        continue;
+        otros.push({ ...opt, sortKey: ticker });
+      } else {
+        conocidos.push(opt);
       }
-
-      if (plaza === "USD-MEP") mep.push(opt);
-      else if (plaza === "USD-CCL") ccl.push(opt);
-      else pesos.push(opt);
     }
 
-    // Sort interno: pesos/MEP/CCL alfabéticamente, otros igual
-    const byKey = (a, b) => a.sortKey.localeCompare(b.sortKey);
-    pesos.sort(byKey);
-    mep.sort(byKey);
-    ccl.sort(byKey);
-    otros.sort((a, b) => a.label.localeCompare(b.label));
+    conocidos.sort((a, b) => a.sortKey.localeCompare(b.sortKey));
+    otros.sort((a, b) => a.sortKey.localeCompare(b.sortKey));
+
+    // Solo dos grupos: "Conocidos" (sin label visible si es el único) y "Otros".
+    // Si NO hay otros, el optgroup de conocidos no aporta — devolvemos
+    // options plano. Si hay otros, los separamos en grupos para que el
+    // usuario distinga lo que está enriquecido de lo que no.
+    if (otros.length === 0) {
+      // Solo conocidos: lista plana, con placeholder.
+      return { mode: "select", options: conocidos };
+    }
 
     const groups = [];
-    // Labels de grupo según el tipo
-    const pesosLabel =
-      instrumentType === "stock"  ? "Acciones (Pesos)" :
-      instrumentType === "cedear" ? "CEDEARs (Pesos)" :
-      "ON (Pesos)";
-    const mepLabel =
-      instrumentType === "stock"  ? "Acciones (USD MEP)" :
-      instrumentType === "cedear" ? "CEDEARs (USD MEP)" :
-      "ON (USD MEP)";
-    const cclLabel =
-      instrumentType === "stock"  ? "Acciones (USD CCL)" :
-      instrumentType === "cedear" ? "CEDEARs (USD CCL)" :
-      "ON (USD CCL)";
+    if (conocidos.length) {
+      const knownLabel =
+        instrumentType === "stock"  ? "Acciones" :
+        instrumentType === "cedear" ? "CEDEARs"  :
+        "ON";
+      groups.push({ label: knownLabel, options: conocidos });
+    }
+    groups.push({ label: "Otros (sin descripción)", options: otros });
 
-    if (pesos.length) groups.push({ label: pesosLabel, options: pesos });
-    if (mep.length)   groups.push({ label: mepLabel,   options: mep   });
-    if (ccl.length)   groups.push({ label: cclLabel,   options: ccl   });
-    if (otros.length) groups.push({ label: "Otros (sin descripción)", options: otros });
-
-    // Si el ticker actual no está en ningún grupo (caso edición de
-    // posición vieja), lo agregamos al final como "Editando".
+    // Si el ticker actual no está en ningún grupo (caso edición), lo
+    // agregamos como grupo "Editando" al final.
     const allValues = new Set();
     for (const g of groups) for (const o of g.options) allValues.add(o.value);
     if (currentTicker && currentTicker.trim() && !allValues.has(currentTicker)) {
