@@ -3321,6 +3321,9 @@ function DashboardOverview({ positions, fxState, bondPricesState, cashState, onI
  */
 
 function FxLine({ fx, error }) {
+  // Cada nombre incluye "(HOY)" entre paréntesis para que el usuario
+  // entienda que es la cotización del día sin necesidad de un título
+  // separado arriba (que ocupaba espacio vertical innecesariamente).
   const items = [
     { key: "mayorista", label: "Dólar Spot" },
     { key: "mep",       label: "Dólar MEP"  },
@@ -3336,31 +3339,10 @@ function FxLine({ fx, error }) {
         marginBottom: 14,
       }}
     >
-      {/* Header del bloque con label tipo dashboard.
-       *  Compacto: padding chico, sin botón actualizar (el botón global vive
-       *  ahora en el header de Posiciones consolidadas, al lado de Agregar).
+      {/* Grid de 4 cotizaciones con separadores verticales — sin header
+       *  arriba (el "(HOY)" en cada label cumple ese rol). El botón global
+       *  Actualizar vive en el header de Posiciones consolidadas.
        */}
-      <div
-        style={{
-          padding: "5px 12px",
-          borderBottom: `1px solid ${C.border}`,
-        }}
-      >
-        <span
-          style={{
-            fontSize: 8.5,
-            letterSpacing: "0.22em",
-            color: C.dim,
-            textTransform: "uppercase",
-            fontWeight: 600,
-            fontFamily: "'Roboto', sans-serif",
-          }}
-        >
-          Cotizaciones del día
-        </span>
-      </div>
-
-      {/* Grid de 4 cotizaciones con separadores verticales — ahora más compacto */}
       <div
         className="grid"
         style={{
@@ -3384,7 +3366,7 @@ function FxLine({ fx, error }) {
                 gap: 5,
               }}
             >
-              {/* Nombre del dólar */}
+              {/* Nombre del dólar + "(HOY)" en sufijo más tenue */}
               <span
                 style={{
                   fontSize: 8.5,
@@ -3396,6 +3378,9 @@ function FxLine({ fx, error }) {
                 }}
               >
                 {it.label}
+                <span style={{ color: C.dim, marginLeft: 6, fontWeight: 500 }}>
+                  (Hoy)
+                </span>
               </span>
 
               {empty ? (
@@ -5994,118 +5979,87 @@ function applyConventionToValue(instrumentType, qty, price) {
  */
 /* ─────────────── DataSourcesFooter ───────────────
  *
- * Footer minimalista que se ubica al final del Portfolio dashboard
- * (después de "Últimas operaciones"). Muestra:
+ * Footer estandarizado que aparece al pie de TODOS los módulos
+ * (Portfolio, Carry Trade, Cotizaciones Dólar, etc.). Comunica:
  *
- *   - FUENTES: las APIs externas que alimentan el dashboard (data912
- *     para precios de bonos, dolarapi para FX).
- *   - AUTO-REFRESH: cada cuánto se reactualizan los datos.
- *     Detecta automáticamente si estamos en horario de mercado
- *     (10:00-17:00 ART, día hábil BYMA) y muestra 5 MIN o 30 MIN.
- *   - ÚLTIMA ACT: tiempo relativo desde la actualización más reciente
- *     (toma el max entre FX y bondPrices). Se re-renderiza cada
- *     segundo para que el contador siga corriendo en pantalla.
+ *   - FUENTES: el set completo de APIs externas que la plataforma
+ *     consulta en general. Mostramos siempre las mismas en todos los
+ *     módulos por una decisión de transparencia: el usuario ve "estas
+ *     son las fuentes de TODA la app", no solo del módulo en pantalla.
  *
- * Estilo: replica el footer del módulo Carry Trade (mismo padding,
- * mismas separaciones por bullet, mismas tipografías).
+ *   - AUTO-REFRESH: frecuencia + status del mercado. Recibimos el modo
+ *     ya calculado vía prop (cada módulo decide qué interval usa) y
+ *     traducimos a label.
+ *
+ *   - ÚLTIMA ACT: timestamp más reciente del módulo, formateado como
+ *     tiempo relativo (hace Xs / Xm / Xh / Xd) usando timeAgo() ya
+ *     existente. Re-renderiza cada segundo para que el contador siga
+ *     vivo aunque no haya nuevos fetches.
+ *
+ * Reemplaza los footers manuales que cada módulo tenía duplicados,
+ * con leves diferencias entre módulos.
  */
-function DataSourcesFooter({ fxLastUpdated, pricesLastFetch }) {
-  // Re-render cada segundo para que el "hace Xs" siga avanzando aunque
-  // no haya cambios en las props.
-  const [, setNowTick] = useState(0);
+function DataSourcesFooter({
+  lastUpdated,
+  intervalMode = "idle",
+  activeIntervalLabel = "5 min",
+  idleIntervalLabel = "30 min",
+  marginTop = 18,
+}) {
+  // Re-render cada segundo para que el contador "hace Xs" avance en pantalla.
+  const [now, setNow] = useState(new Date());
   useEffect(() => {
-    const id = setInterval(() => setNowTick((n) => n + 1), 1000);
+    const id = setInterval(() => setNow(new Date()), 1000);
     return () => clearInterval(id);
   }, []);
 
-  // Detectar horario de mercado para mostrar "EN HORARIO" o "FUERA DE HORARIO"
-  // y la frecuencia de auto-refresh (5 min vs 30 min).
-  const { intervalLabel, statusLabel } = useMemo(() => {
-    const now = new Date();
-    const arDateStr = now.toLocaleDateString("en-CA", {
-      timeZone: "America/Argentina/Buenos_Aires",
-    });
-    const arHourStr = now.toLocaleTimeString("en-GB", {
-      timeZone: "America/Argentina/Buenos_Aires",
-      hour12: false,
-    });
-    const arHour = parseInt(arHourStr.slice(0, 2), 10);
-    const isMarketHours = arHour >= 10 && arHour < 17;
-    const isBizDay = !isNonBusinessDay(arDateStr);
-    const onMarket = isMarketHours && isBizDay;
-    return {
-      intervalLabel: onMarket ? "5 MIN" : "30 MIN",
-      statusLabel: onMarket ? "EN HORARIO" : "FUERA DE HORARIO",
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [/* recalcula con cada tick gracias al re-render del setNowTick */]);
+  // Normalizar lastUpdated a Date (puede venir como Date, ISO string, o null)
+  const lastDate = useMemo(() => {
+    if (!lastUpdated) return null;
+    if (lastUpdated instanceof Date) return lastUpdated;
+    const d = new Date(lastUpdated);
+    return isNaN(d.getTime()) ? null : d;
+  }, [lastUpdated]);
 
-  // Última actualización: el timestamp más reciente entre FX y bondPrices.
-  // Si ninguno cargó todavía, mostramos "—".
-  const lastActLabel = useMemo(() => {
-    const fx = fxLastUpdated ? new Date(fxLastUpdated).getTime() : 0;
-    const px = pricesLastFetch ? new Date(pricesLastFetch).getTime() : 0;
-    const latest = Math.max(fx, px);
-    if (!latest) return "—";
-    const diffSec = Math.max(0, Math.floor((Date.now() - latest) / 1000));
-    if (diffSec < 60) return `HACE ${diffSec}S`;
-    if (diffSec < 3600) return `HACE ${Math.floor(diffSec / 60)}M`;
-    if (diffSec < 86400) return `HACE ${Math.floor(diffSec / 3600)}H`;
-    return `HACE ${Math.floor(diffSec / 86400)}D`;
-    // dependencias declaradas explícitamente; el tick fuerza re-render
-    // pero estos memos sólo recalculan si cambian las props o el tiempo
-    // efectivamente computado adentro.
-  }, [fxLastUpdated, pricesLastFetch]);
-
-  // Estilo de cada label "etiqueta: valor" en la línea.
-  const sepStyle = {
-    color: C.dim,
-    margin: "0 8px",
-    fontSize: 9,
-  };
-  const tagStyle = {
-    color: C.dim,
-    fontSize: 9,
-    letterSpacing: "0.18em",
-    fontWeight: 500,
-  };
-  const valueStyle = {
-    color: C.muted,
-    fontSize: 9,
-    letterSpacing: "0.14em",
-    fontWeight: 600,
-    marginLeft: 6,
-  };
+  const intervalLabel = intervalMode === "active"
+    ? `${activeIntervalLabel} · horario hábil`
+    : `${idleIntervalLabel} · fuera de horario`;
 
   return (
     <div
+      className="flex flex-wrap items-center gap-2"
       style={{
-        marginTop: 18,
-        padding: "10px 14px",
-        backgroundColor: C.deep,
-        border: `1px solid ${C.border}`,
-        fontFamily: "'Roboto', sans-serif",
+        fontSize: 10,
+        color: C.dim,
+        letterSpacing: "0.10em",
         textTransform: "uppercase",
-        whiteSpace: "nowrap",
-        overflow: "hidden",
+        marginTop,
       }}
     >
-      <span style={tagStyle}>FUENTES:</span>
-      <span style={valueStyle}>DATA912.COM</span>
-      <span style={sepStyle}>·</span>
-      <span style={valueStyle}>DOLARAPI.COM</span>
+      <span>fuentes:</span>
+      <span style={{ color: C.muted }}>data912.com</span>
+      <span style={{ color: C.faint }}>·</span>
+      <span style={{ color: C.muted }}>dolarapi.com</span>
+      <span style={{ color: C.faint }}>·</span>
+      <span style={{ color: C.muted }}>API REM (BCRA)</span>
+      <span style={{ color: C.faint }}>·</span>
+      <span style={{ color: C.muted }}>BYMA</span>
+      <span style={{ color: C.faint }}>·</span>
+      <span style={{ color: C.muted }}>Matba-Rofex</span>
+      <span style={{ color: C.faint }}>·</span>
+      <span style={{ color: C.muted }}>A3 Mercados</span>
+      <span style={{ color: C.faint }}>·</span>
+      <span style={{ color: C.muted }}>criptoya.com</span>
 
-      <span style={sepStyle}>·</span>
+      <span style={{ color: C.faint }}>·</span>
 
-      <span style={tagStyle}>AUTO-REFRESH:</span>
-      <span style={valueStyle}>{intervalLabel}</span>
-      <span style={sepStyle}>·</span>
-      <span style={valueStyle}>{statusLabel}</span>
+      <span>auto-refresh:</span>
+      <span style={{ color: C.muted }}>{intervalLabel}</span>
 
-      <span style={sepStyle}>·</span>
+      <span style={{ color: C.faint }}>·</span>
 
-      <span style={tagStyle}>ÚLTIMA ACT:</span>
-      <span style={valueStyle}>{lastActLabel}</span>
+      <span>última act:</span>
+      <span style={{ color: C.muted }}>{timeAgo(lastDate, now)}</span>
     </div>
   );
 }
@@ -6403,12 +6357,19 @@ function PortfolioDashboard({ onNavigate }) {
             onNavigateToLibro={onNavigate ? () => onNavigate("libro-operaciones") : null}
           />
 
-          {/* Footer informativo: fuentes de datos + estado auto-refresh.
-              Replica el estilo de Carry Trade. La "última actualización"
-              toma el timestamp más reciente entre FX y precios de bonos. */}
+          {/* Footer informativo: fuentes globales + estado auto-refresh.
+              Componente compartido con Carry Trade y Cotizaciones Dólar.
+              `lastUpdated` es el max entre FX y bondPrices (lo que
+              tenga el timestamp más reciente). `intervalMode` lo
+              calculamos en base al horario actual. */}
           <DataSourcesFooter
-            fxLastUpdated={fxState.lastUpdated}
-            pricesLastFetch={bondPricesState.lastFetch}
+            lastUpdated={(() => {
+              const fx = fxState.lastUpdated ? new Date(fxState.lastUpdated).getTime() : 0;
+              const px = bondPricesState.lastFetch ? new Date(bondPricesState.lastFetch).getTime() : 0;
+              const max = Math.max(fx, px);
+              return max ? new Date(max) : null;
+            })()}
+            intervalMode={isActiveMarketWindow() ? "active" : "idle"}
           />
         </>
       )}
@@ -10202,24 +10163,13 @@ function ComparaDolarModule() {
         accentTop={C.cat.pink}
       />
 
-      {/* Footer */}
-      <div
-        className="flex flex-wrap items-center gap-2 mt-5"
-        style={{ fontSize: 10, color: C.dim, letterSpacing: "0.10em", textTransform: "uppercase" }}
-      >
-        <span>fuentes:</span>
-        <span style={{ color: C.muted }}>dolarapi.com</span>
-        <span style={{ color: C.faint }}>·</span>
-        <span style={{ color: C.muted }}>criptoya.com</span>
-        <span style={{ color: C.faint }}>·</span>
-        <span>auto-refresh:</span>
-        <span style={{ color: C.muted }}>
-          {intervalMode === "active" ? "15 min · horario hábil" : "30 min · fuera de horario"}
-        </span>
-        <span style={{ color: C.faint }}>·</span>
-        <span>última act:</span>
-        <span style={{ color: C.muted }}>{timeAgo(lastFetch, now)}</span>
-      </div>
+      {/* Footer estandarizado (componente compartido). */}
+      <DataSourcesFooter
+        lastUpdated={lastFetch}
+        intervalMode={intervalMode}
+        activeIntervalLabel="15 min"
+        marginTop={20}
+      />
     </div>
   );
 }
@@ -11454,23 +11404,17 @@ function CarryTradeModule() {
         />
       )}
 
-      {/* Footer */}
-      <div className="flex flex-wrap items-center gap-2 mt-7" style={{ fontSize: 10, color: C.dim, letterSpacing: "0.10em", textTransform: "uppercase" }}>
-        <span>fuentes:</span>
-        <span style={{ color: C.muted }}>data912.com</span>
-        <span style={{ color: C.faint }}>·</span>
-        <span style={{ color: C.muted }}>API REM (BCRA)</span>
-        <span style={{ color: C.faint }}>·</span>
-        <span style={{ color: C.muted }}>dolarapi.com</span>
-        <span style={{ color: C.faint }}>·</span>
-        <span>auto-refresh:</span>
-        <span style={{ color: C.muted }}>
-          {intervalMode === "active" ? "15 min · horario hábil" : "30 min · fuera de horario"}
-        </span>
-        <span style={{ color: C.faint }}>·</span>
-        <span>última act:</span>
-        <span style={{ color: C.muted }}>{timeAgo(lastFetch, now)}</span>
-      </div>
+      {/* Footer estandarizado (componente compartido con Portfolio
+          y Cotizaciones Dólar). Mostramos las fuentes globales de la
+          plataforma, no solo las de este módulo, por transparencia.
+          Carry Trade refresca cada 15 min en horario activo (no 5 min
+          como Portfolio — sus datos no son tan time-sensitive). */}
+      <DataSourcesFooter
+        lastUpdated={lastFetch}
+        intervalMode={intervalMode}
+        activeIntervalLabel="15 min"
+        marginTop={28}
+      />
 
       <p style={{ fontSize: 10, color: C.dim, marginTop: 12, lineHeight: 1.5, maxWidth: 720 }}>
         Precios de data912.com con delay ~2h respecto a BYMA. Cálculo asume VN=$100 al vencimiento (Lecaps/Boncaps capitalizables).
@@ -13681,17 +13625,13 @@ function FuturosVsCaucionModule() {
         )}
       </div>
 
-      {/* Footer */}
-      <div className="flex flex-wrap items-center gap-2 mt-7" style={{ fontSize: 10, color: C.dim, letterSpacing: "0.10em", textTransform: "uppercase" }}>
-        <span>fuentes:</span>
-        <span style={{ color: C.muted }}>Matba-Rofex</span>
-        <span style={{ color: C.faint }}>·</span>
-        <span style={{ color: C.muted }}>A3 Mercados</span>
-        <span style={{ color: C.faint }}>·</span>
-        <span style={{ color: C.muted }}>dolarapi.com</span>
-        <span style={{ color: C.faint }}>·</span>
-        <span style={{ color: C.muted }}>API REM (BCRA)</span>
-      </div>
+      {/* Footer estandarizado (componente compartido). */}
+      <DataSourcesFooter
+        lastUpdated={lastFetch}
+        intervalMode={intervalMode}
+        activeIntervalLabel="15 min"
+        marginTop={28}
+      />
     </div>
   );
 }
