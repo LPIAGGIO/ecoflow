@@ -1987,6 +1987,311 @@ const BONAR_PATTERN = /^AL\d{2,3}[CD]?$/;
 const GLOBAL_PATTERN = /^GD\d{2,3}[CD]?$/;
 const HARD_DOLLAR_OTHER = /^(AE|GE)\d{2,3}[CD]?$/;
 
+
+/* ─────────────── STOCK_REGISTRY (acciones argentinas BYMA) ─────────────
+ *
+ * Descripciones de las acciones argentinas que cotizan en BYMA. La idea es
+ * darle al usuario el nombre de la empresa al lado del ticker en el
+ * dropdown del drawer (sino le quedan sólo los códigos sin contexto).
+ *
+ * Cobertura: panel principal del Merval + secundario con liquidez
+ * razonable. Si aparece un ticker fuera del registry (panel chico, OPAs
+ * recientes, etc.) cae al grupo "Otros".
+ *
+ * Las plaza-variants (sufijo D para MEP, C para CCL) NO están listadas
+ * acá — se derivan automáticamente del ticker base + sufijo.
+ *
+ * Si se agrega una empresa nueva, alcanza con sumar el ticker con su
+ * descripción legible. No hace falta tocar más código.
+ */
+const STOCK_REGISTRY = {
+  // Panel principal Merval
+  "ALUA":    "Aluar S.A.",
+  "BBAR":    "BBVA Argentina",
+  "BMA":     "Banco Macro",
+  "BYMA":    "Bolsas y Mercados Argentinos",
+  "CEPU":    "Central Puerto",
+  "COME":    "Soc. Comercial del Plata",
+  "CRES":    "Cresud",
+  "CVH":     "Cablevisión Holding",
+  "EDN":     "Edenor",
+  "GGAL":    "Grupo Financiero Galicia",
+  "HARG":    "Holcim Argentina",
+  "LOMA":    "Loma Negra",
+  "METR":    "MetroGas",
+  "MIRG":    "Mirgor",
+  "PAMP":    "Pampa Energía",
+  "SUPV":    "Grupo Supervielle",
+  "TECO2":   "Telecom Argentina",
+  "TGNO4":   "Transportadora de Gas del Norte",
+  "TGSU2":   "Transportadora de Gas del Sur",
+  "TRAN":    "Transener",
+  "TXAR":    "Ternium Argentina",
+  "VALO":    "Banco de Valores",
+  "YPFD":    "YPF",
+
+  // Panel general (selección de las más operadas)
+  "AGRO":    "Agrometal",
+  "AUSO":    "Autopistas del Sol",
+  "BHIP":    "Banco Hipotecario",
+  "BOLT":    "Boldt",
+  "BPAT":    "Banco Patagonia",
+  "CADO":    "Carlos Casado",
+  "CAPX":    "Capex",
+  "CARC":    "Carboclor",
+  "CECO2":   "Central Costanera",
+  "CELU":    "Celulosa Argentina",
+  "CGPA2":   "Camuzzi Gas Pampeana",
+  "CTIO":    "Consultatio",
+  "DGCU2":   "Distribuidora Gas Cuyana",
+  "DOME":    "Domec",
+  "DYCA":    "Dycasa",
+  "FERR":    "Ferrum",
+  "FIPL":    "Fiplasto",
+  "GBAN":    "Gas Natural BAN",
+  "GCDI":    "Grupo Concesionario del Oeste",
+  "GCLA":    "Grupo Clarín",
+  "GRIM":    "Grimoldi",
+  "HAVA":    "Havanna",
+  "INAG":    "Instituto Rosenbusch",
+  "INVJ":    "Inversora Juramento",
+  "IRSA":    "IRSA Inversiones y Representaciones",
+  "LEDE":    "Ledesma",
+  "LONG":    "Longvie",
+  "MOLA":    "Molinos Agro",
+  "MOLI":    "Molinos Río de la Plata",
+  "MORI":    "Morixe",
+  "OEST":    "Oeste Editorial",
+  "PATA":    "Importadora y Exportadora de la Patagonia",
+  "POLL":    "Polledo",
+  "RICH":    "Laboratorios Richmond",
+  "RIGO":    "Rigolleau",
+  "ROSE":    "Instituto Rosenbusch",
+  "SAMI":    "San Miguel",
+  "SEMI":    "Semino",
+  "TGLT":    "TGLT",
+  "A3":      "A3 Mercados",
+};
+
+
+/* ─────────────── CEDEAR_REGISTRY ─────────────
+ *
+ * CEDEARs (Certificados de Depósito Argentinos) de las empresas más
+ * operadas. La lista completa de BYMA tiene ~600 CEDEARs, acá ponemos
+ * los ~80 más populares — el resto cae a "Otros" pero sigue listándose.
+ *
+ * El sufijo D significa MEP (USD), y C significa CCL (USD CCL).
+ *   AAPL  → Apple Inc.
+ *   AAPLD → Apple Inc. (USD MEP)
+ *   AAPLC → Apple Inc. (USD CCL)
+ *
+ * Acá listamos solo el ticker base ARS. Las variantes USD se derivan.
+ */
+const CEDEAR_REGISTRY = {
+  // Tech (FAANG + grandes)
+  "AAPL":  "Apple Inc.",
+  "MSFT":  "Microsoft Corp.",
+  "GOOGL": "Alphabet (Google) Class A",
+  "AMZN":  "Amazon.com Inc.",
+  "META":  "Meta Platforms (Facebook)",
+  "NFLX":  "Netflix Inc.",
+  "TSLA":  "Tesla Inc.",
+  "NVDA":  "NVIDIA Corp.",
+  "AMD":   "Advanced Micro Devices",
+  "INTC":  "Intel Corp.",
+  "ORCL":  "Oracle Corp.",
+  "CRM":   "Salesforce Inc.",
+  "ADBE":  "Adobe Inc.",
+  "PYPL":  "PayPal Holdings",
+  "SHOP":  "Shopify Inc.",
+  "UBER":  "Uber Technologies",
+  "PLTR":  "Palantir Technologies",
+  "NIO":   "NIO Inc.",
+  "BABA":  "Alibaba Group",
+  "TSM":   "Taiwan Semiconductor",
+  "MELI":  "MercadoLibre",
+  "SPOT":  "Spotify Technology",
+  "SNAP":  "Snap Inc.",
+  "PINS":  "Pinterest Inc.",
+  "SQ":    "Block Inc. (Square)",
+  "ZM":    "Zoom Video",
+  "ROKU":  "Roku Inc.",
+  "TWLO":  "Twilio Inc.",
+
+  // Financieras
+  "JPM":   "JPMorgan Chase & Co.",
+  "BAC":   "Bank of America",
+  "WFC":   "Wells Fargo & Co.",
+  "C":     "Citigroup Inc.",
+  "GS":    "Goldman Sachs Group",
+  "MS":    "Morgan Stanley",
+  "V":     "Visa Inc.",
+  "MA":    "Mastercard Inc.",
+  "AXP":   "American Express",
+  "BRKB":  "Berkshire Hathaway B",
+
+  // Industrial / Consumo
+  "KO":    "Coca-Cola Co.",
+  "PEP":   "PepsiCo Inc.",
+  "WMT":   "Walmart Inc.",
+  "MCD":   "McDonald's Corp.",
+  "NKE":   "Nike Inc.",
+  "DIS":   "Walt Disney Co.",
+  "SBUX":  "Starbucks Corp.",
+  "PG":    "Procter & Gamble",
+  "JNJ":   "Johnson & Johnson",
+  "PFE":   "Pfizer Inc.",
+  "MRK":   "Merck & Co.",
+  "ABBV":  "AbbVie Inc.",
+  "BMY":   "Bristol-Myers Squibb",
+  "VZ":    "Verizon Communications",
+  "T":     "AT&T Inc.",
+  "F":     "Ford Motor Co.",
+  "GM":    "General Motors",
+  "BA":    "Boeing Co.",
+  "CAT":   "Caterpillar Inc.",
+  "GE":    "General Electric",
+  "MMM":   "3M Company",
+  "HD":    "Home Depot Inc.",
+  "LOW":   "Lowe's Companies",
+  "TGT":   "Target Corp.",
+  "COST":  "Costco Wholesale",
+
+  // Energía / Materiales
+  "XOM":   "Exxon Mobil Corp.",
+  "CVX":   "Chevron Corp.",
+  "VALE":  "Vale S.A.",
+  "RIO":   "Rio Tinto plc",
+  "FCX":   "Freeport-McMoRan",
+  "GOLD":  "Barrick Gold Corp.",
+  "GLOB":  "Globant S.A.",
+
+  // Argentinas listadas en NY (CEDEARs domésticos)
+  "YPFD":  "YPF S.A. (NYSE)",
+  "GGAL":  "Grupo Galicia (NYSE)",
+  "BMA":   "Banco Macro (NYSE)",
+  "BBAR":  "BBVA Argentina (NYSE)",
+  "PAM":   "Pampa Energía (NYSE)",
+  "TGS":   "TGS (NYSE)",
+  "EDN":   "Edenor (NYSE)",
+  "TEO":   "Telecom Argentina (NYSE)",
+  "IRS":   "IRSA (NYSE)",
+  "LOMA":  "Loma Negra (NYSE)",
+  "CRESY": "Cresud (NASDAQ)",
+  "SUPV":  "Supervielle (NYSE)",
+  "CEPU":  "Central Puerto (NYSE)",
+
+  // ETFs populares
+  "SPY":   "SPDR S&P 500 ETF",
+  "QQQ":   "Invesco QQQ (NASDAQ-100)",
+  "DIA":   "SPDR Dow Jones ETF",
+  "IWM":   "iShares Russell 2000",
+  "EEM":   "iShares MSCI Emerging Markets",
+  "EWZ":   "iShares MSCI Brazil",
+  "GLD":   "SPDR Gold Trust",
+  "SLV":   "iShares Silver Trust",
+  "TLT":   "iShares 20+ Year Treasury",
+  "VTI":   "Vanguard Total Stock Market",
+  "VOO":   "Vanguard S&P 500",
+};
+
+
+/* ─────────────── ON_REGISTRY (Obligaciones Negociables) ─────────────
+ *
+ * ONs son bonos corporativos. Las descripciones varían mucho — ponemos
+ * los emisores principales con sus emisiones más operadas. Si no está
+ * en el registry, mostramos solo el ticker.
+ *
+ * El catálogo dinámico de Supabase tiene una lista mucho más grande
+ * — el registry acá es para enriquecer las descripciones más comunes.
+ */
+const ON_REGISTRY = {
+  // YPF
+  "YMCQO":   "YPF Clase XXIX (USD)",
+  "YMCJO":   "YPF Clase XX (USD)",
+  "YMCHO":   "YPF Clase XVII (USD)",
+  // Pampa Energía
+  "MGC9O":   "Pampa Energía Clase 9",
+  "MGC2O":   "Pampa Energía Clase 2",
+  // Telecom
+  "TLCDO":   "Telecom Argentina (USD)",
+  "TLCMO":   "Telecom Argentina",
+  // IRSA
+  "IRCFO":   "IRSA (USD)",
+  "IRCKO":   "IRSA",
+  // Vista Energy
+  "VSCRO":   "Vista Energy",
+  "VSCJO":   "Vista Energy (USD)",
+  // Tecpetrol
+  "TTC1O":   "Tecpetrol (USD)",
+  // Cresud
+  "CSDO":    "Cresud",
+  // Banco Galicia
+  "BGCAO":   "Banco Galicia (USD)",
+  // Aeropuertos
+  "ARC1O":   "Aeropuertos Argentina 2000",
+  // Albanesi / GENNEIA
+  "GNCXO":   "Genneia (USD)",
+  // CGC
+  "CGC5O":   "Compañía General de Combustibles",
+  "CGC8O":   "Compañía General de Combustibles 8",
+};
+
+
+/**
+ * Saca el sufijo de plaza (D = MEP, C = CCL) de un ticker, devolviendo
+ * el ticker base sin sufijo y la plaza detectada.
+ *
+ *   "ALUAD"  → { base: "ALUA",  plaza: "USD-MEP" }
+ *   "BMA.D"  → { base: "BMA",   plaza: "USD-MEP" } (caso especial con punto)
+ *   "AAPLC"  → { base: "AAPL",  plaza: "USD-CCL" }
+ *   "GGAL"   → { base: "GGAL",  plaza: "ARS"     }
+ *
+ * Cuidado con tickers que terminan naturalmente en C/D sin ser variantes
+ * de plaza (ej: "AMD" termina en D pero es Advanced Micro Devices, no
+ * "AM" en plaza MEP). El registry maneja esos casos: si "AMD" está en
+ * el registry como base, no lo tratamos como sufijo.
+ */
+function detectPlaza(ticker, baseRegistry) {
+  if (!ticker) return { base: ticker, plaza: "ARS" };
+  const t = ticker.toUpperCase().trim();
+
+  // Caso especial: ticker.D (con punto) — siempre es plaza MEP
+  if (t.endsWith(".D")) {
+    const base = t.slice(0, -2);
+    return { base, plaza: "USD-MEP" };
+  }
+  if (t.endsWith(".C")) {
+    const base = t.slice(0, -2);
+    return { base, plaza: "USD-CCL" };
+  }
+
+  // Si el ticker completo está en el registry, NO le sacamos sufijo
+  // (ej: AMD, AMD es la base real). Esto evita falsos positivos.
+  if (baseRegistry[t]) {
+    return { base: t, plaza: "ARS" };
+  }
+
+  // Si termina en D o C y al sacar el sufijo el resultado SÍ está en el
+  // registry, entonces sí es una variante de plaza.
+  if (t.endsWith("D") && t.length > 2) {
+    const base = t.slice(0, -1);
+    if (baseRegistry[base]) {
+      return { base, plaza: "USD-MEP" };
+    }
+  }
+  if (t.endsWith("C") && t.length > 2) {
+    const base = t.slice(0, -1);
+    if (baseRegistry[base]) {
+      return { base, plaza: "USD-CCL" };
+    }
+  }
+
+  // No es variante conocida — devolvemos como está, asumiendo ARS.
+  return { base: t, plaza: "ARS" };
+}
+
+
 function getTickerOptions(instrumentType, currentTicker, catalog) {
   // ─── Bonos: agrupados con optgroup por subtipo ─────────────────────
   // Lecaps / Boncaps / Duales vienen del registry hardcoded (BOND_REGISTRY).
@@ -2097,24 +2402,116 @@ function getTickerOptions(instrumentType, currentTicker, catalog) {
     return ensureCurrentInOptions(opts, currentTicker, "select");
   }
 
-  // ─── Stock / CEDEAR / ON: catálogo dinámico filtrado ────────────────
-  // El catálogo a veces viene contaminado con tickers de bonos (Boncaps
-  // clasificados como stock, etc.). Filtramos defensivamente para que
-  // no se cuelen en estos dropdowns.
+  // ─── Stock / CEDEAR / ON: catálogo dinámico filtrado + agrupado ────────
+  // El catálogo viene de Supabase (poblado por refresh de instruments).
+  // A veces tiene tickers contaminados (boncaps clasificados como stock,
+  // etc.) — filtramos esos defensivamente con looksLikeSovereignBond.
+  //
+  // Para enriquecer descripciones usamos los registries hardcoded
+  // (STOCK_REGISTRY, CEDEAR_REGISTRY, ON_REGISTRY). Si un ticker está
+  // ahí, mostramos "TICKER — Empresa S.A.". Si no, cae al grupo "Otros"
+  // al final con solo el ticker (visual cue de que el catálogo está
+  // incompleto para ese código).
+  //
+  // Agrupamos por plaza con <optgroup> usando detectPlaza:
+  //   - Pesos     (sin sufijo D/C)
+  //   - USD-MEP   (sufijo D o .D)
+  //   - USD-CCL   (sufijo C o .C)
+  //   - Otros     (no identificados en el registry)
   if (instrumentType === "stock" || instrumentType === "cedear" || instrumentType === "on") {
     const list = catalog?.[instrumentType];
-    if (list && list.length > 0) {
-      const opts = list
-        .filter((row) => !looksLikeSovereignBond(row.ticker))
-        .map((row) => ({
-          ticker: row.ticker,
-          sortKey: row.ticker,
-          label: row.description ? `${row.ticker} — ${row.description}` : row.ticker,
-        }))
-        .sort((a, b) => a.sortKey.localeCompare(b.sortKey));
-      return ensureCurrentInOptions(opts, currentTicker, "select");
+    if (!list || list.length === 0) {
+      return { mode: "input", options: [] };
     }
-    return { mode: "input", options: [] };
+
+    // Elegir el registry según el tipo
+    const registry =
+      instrumentType === "stock"  ? STOCK_REGISTRY  :
+      instrumentType === "cedear" ? CEDEAR_REGISTRY :
+      ON_REGISTRY;
+
+    // Particionar por plaza
+    const pesos = [];
+    const mep = [];
+    const ccl = [];
+    const otros = [];
+
+    for (const row of list) {
+      const ticker = (row.ticker || "").toUpperCase().trim();
+      if (!ticker) continue;
+      if (looksLikeSovereignBond(ticker)) continue;
+
+      const { base, plaza } = detectPlaza(ticker, registry);
+      const desc = registry[base] || row.description || null;
+
+      // Sufijo de plaza para el label cuando NO es ARS
+      const plazaSuffix =
+        plaza === "USD-MEP" ? " · MEP" :
+        plaza === "USD-CCL" ? " · CCL" :
+        "";
+
+      const label = desc
+        ? `${ticker} — ${desc}${plazaSuffix}`
+        : ticker;
+
+      const opt = {
+        value: ticker,
+        label,
+        sortKey: `${base}_${plaza}`,
+      };
+
+      // Si el base NO está en el registry, va a "Otros" (sin importar plaza).
+      // Esto ayuda al usuario a darse cuenta de qué tickers están
+      // sin enriquecer.
+      if (!registry[base]) {
+        otros.push(opt);
+        continue;
+      }
+
+      if (plaza === "USD-MEP") mep.push(opt);
+      else if (plaza === "USD-CCL") ccl.push(opt);
+      else pesos.push(opt);
+    }
+
+    // Sort interno: pesos/MEP/CCL alfabéticamente, otros igual
+    const byKey = (a, b) => a.sortKey.localeCompare(b.sortKey);
+    pesos.sort(byKey);
+    mep.sort(byKey);
+    ccl.sort(byKey);
+    otros.sort((a, b) => a.label.localeCompare(b.label));
+
+    const groups = [];
+    // Labels de grupo según el tipo
+    const pesosLabel =
+      instrumentType === "stock"  ? "Acciones (Pesos)" :
+      instrumentType === "cedear" ? "CEDEARs (Pesos)" :
+      "ON (Pesos)";
+    const mepLabel =
+      instrumentType === "stock"  ? "Acciones (USD MEP)" :
+      instrumentType === "cedear" ? "CEDEARs (USD MEP)" :
+      "ON (USD MEP)";
+    const cclLabel =
+      instrumentType === "stock"  ? "Acciones (USD CCL)" :
+      instrumentType === "cedear" ? "CEDEARs (USD CCL)" :
+      "ON (USD CCL)";
+
+    if (pesos.length) groups.push({ label: pesosLabel, options: pesos });
+    if (mep.length)   groups.push({ label: mepLabel,   options: mep   });
+    if (ccl.length)   groups.push({ label: cclLabel,   options: ccl   });
+    if (otros.length) groups.push({ label: "Otros (sin descripción)", options: otros });
+
+    // Si el ticker actual no está en ningún grupo (caso edición de
+    // posición vieja), lo agregamos al final como "Editando".
+    const allValues = new Set();
+    for (const g of groups) for (const o of g.options) allValues.add(o.value);
+    if (currentTicker && currentTicker.trim() && !allValues.has(currentTicker)) {
+      groups.push({
+        label: "Editando",
+        options: [{ value: currentTicker, label: `${currentTicker} — (cargado manualmente)` }],
+      });
+    }
+
+    return { mode: "select", groups };
   }
 
   // Resto (caucion, option, fci): input libre por ahora.
@@ -14787,10 +15184,8 @@ function typeLabel(type) {
   }
 }
 
-
 function formatDate(iso) {
   if (!iso) return "—";
   const d = new Date(iso + "T00:00:00");
   return d.toLocaleDateString("es-AR", { day: "2-digit", month: "short", year: "2-digit" }).replace(/\./g, "");
 }
-
