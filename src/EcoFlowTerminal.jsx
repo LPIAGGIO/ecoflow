@@ -5269,7 +5269,10 @@ function consolidatePositions(positions, bondPrices) {
     });
 
     // Recorremos en orden. Mantenemos PPP y qty acumulada de compras.
-    // En cada VENTA emitimos un par sintético (compra-espejo + venta).
+    // En cada VENTA emitimos UNA fila sintética "closed_pair" que
+    // representa el par neteado: incluye qty, PPP del momento (entry_price)
+    // y precio de venta (sell_price), todo en una sola fila visual con
+    // badge CERRADA.
     let cumulativeBuyQty = 0;
     let cumulativeBuyValue = 0; // suma(qty × price) de compras
     const synthetic = [];
@@ -5290,29 +5293,26 @@ function consolidatePositions(positions, bondPrices) {
           realizedPnlRaw += qty * (price - pppNow);
         }
 
-        // 1) Compra-espejo: misma qty que la venta, al PPP del momento.
-        //    Fecha = la de la venta (porque conceptualmente "salieron del
-        //    inventario" recién ahora). Sin notas.
+        // Fila ÚNICA "closed_pair": representa el par neteado completo.
+        // - operation_type = "closed_pair" (marcador para que la UI
+        //   renderice un badge CERRADA y muestre ambos precios).
+        // - entry_price guarda el PPP del momento (precio compra).
+        // - sell_price guarda el precio real de la venta.
+        // - quantity es la qty de la venta (lo que se cerró).
+        // - entry_date es la fecha de la venta.
+        // - notes hereda las de la venta original (si tenía).
         synthetic.push({
-          id: `${op.id}__synth_buy_${synthIdx}`,
+          id: `${op.id}__synth_pair_${synthIdx}`,
           isSynthetic: true,
-          operation_type: "buy",
+          operation_type: "closed_pair",
           ticker: op.ticker,
           instrument_type: op.instrument_type,
           quantity: qty,
-          entry_price: pppNow, // puede ser null si es short — la UI muestra "—"
+          entry_price: pppNow, // PPP al momento de la venta — null si short
+          sell_price: price,
           entry_currency: op.entry_currency,
-          entry_date: op.entry_date, // misma fecha que la venta
-          notes: null,
-        });
-
-        // 2) Venta real: la copiamos con sus datos originales pero la
-        //    marcamos isSynthetic=true para que el render NO permita
-        //    editarla/borrarla desde acá (la fila real sigue editable
-        //    desde Libro de operaciones / fila ABIERTA si corresponde).
-        synthetic.push({
-          ...op,
-          isSynthetic: true,
+          entry_date: op.entry_date, // fecha de la venta
+          notes: op.notes || null,
         });
 
         synthIdx++;
@@ -5563,7 +5563,7 @@ function consolidatePositions(positions, bondPrices) {
         // Filtrar las operations: solo las de compra van a la entrada abierta.
         // (las de venta van a la cerrada). Para el detalle expandible esto
         // significa que en la fila abierta se ven solo las compras.
-        const openOperations = g.operations.filter((o) => o.operation_type !== "sell");
+        const openOperations = g.operations; // log completo: compras + ventas, sin neteo
         // closedOperations ya viene del sintético calculado arriba
 
         // Para la entrada CERRADA: precio actual = lastSellPrice, P&L realizado
@@ -5730,7 +5730,7 @@ function consolidatePositions(positions, bondPrices) {
           ? (openPnl / Math.abs(openValueAtCost)) * 100
           : null;
 
-        const openOperations = g.operations.filter((o) => o.operation_type !== "sell");
+        const openOperations = g.operations; // log completo: compras + ventas, sin neteo
         // closedOperations ya viene del sintético calculado arriba
 
         // ── Entrada CERRADA: usa totalSellQty + PPP + PPV ──
@@ -5918,33 +5918,24 @@ function filterClosedToToday(closedGroups) {
   const result = [];
 
   for (const g of closedGroups) {
-    // operations viene del sintético: pares (compra-espejo, venta-real)
-    // intercalados. Las posiciones cerradas SIEMPRE tienen sintético,
-    // pero por si acaso validamos que las longitudes sean pares.
+    // operations viene del sintético: 1 fila por par cerrado
+    // (operation_type === "closed_pair") con entry_price = PPP del momento
+    // y sell_price = precio real de la venta.
     const ops = g.operations || [];
-    if (ops.length % 2 !== 0) continue;
 
-    const todayPairs = [];
-    for (let i = 0; i < ops.length; i += 2) {
-      const buy = ops[i];
-      const sell = ops[i + 1];
-      if (!sell) continue;
-      if (sell.entry_date === today) {
-        todayPairs.push(buy, sell);
-      }
-    }
+    const todayPairs = ops.filter((p) =>
+      p.operation_type === "closed_pair" && p.entry_date === today
+    );
 
     if (todayPairs.length === 0) continue;
 
-    // Recalcular P&L raw del día (suma de qtyVenta × Δprice por par)
+    // Recalcular P&L raw del día: sum(qty × (sell_price - PPP))
     let realizedPnlRaw = 0;
     let closedQtyToday = 0;
-    for (let i = 0; i < todayPairs.length; i += 2) {
-      const buy = todayPairs[i];
-      const sell = todayPairs[i + 1];
-      const qty = Number(sell.quantity) || 0;
-      const sellPrice = Number(sell.entry_price) || 0;
-      const buyPrice = buy?.entry_price; // puede ser null en short
+    for (const pair of todayPairs) {
+      const qty = Number(pair.quantity) || 0;
+      const sellPrice = Number(pair.sell_price) || 0;
+      const buyPrice = pair.entry_price; // PPP — null si fue short
       if (buyPrice != null) {
         realizedPnlRaw += qty * (sellPrice - buyPrice);
       }
@@ -5956,20 +5947,14 @@ function filterClosedToToday(closedGroups) {
     if (g.instrument_type === "future") {
       realizedPnl = realizedPnlRaw * FUTURE_MULTIPLIER_DEFAULT;
     } else {
-      // applyConventionToValue(type, 1, raw) escala por la convención
-      // (bonos /100, opciones ×100, resto ×1).
       realizedPnl = applyConventionToValue(g.instrument_type, 1, realizedPnlRaw);
     }
 
-    // pnlPct: ratio sobre costo del lote vendido a PPP (aproximación;
-    // si todos los pares tienen el mismo PPP el valor es exacto, si no
-    // es un promedio ponderado razonable).
+    // pnlPct: ratio sobre costo del lote vendido a PPP.
     let pnlPct = null;
-    const valueAtCostToday = todayPairs.reduce((acc, op, idx) => {
-      // Solo los buys (índices pares)
-      if (idx % 2 !== 0) return acc;
-      const qty = Number(op.quantity) || 0;
-      const price = op.entry_price;
+    const valueAtCostToday = todayPairs.reduce((acc, pair) => {
+      const qty = Number(pair.quantity) || 0;
+      const price = pair.entry_price;
       if (price == null) return acc;
       return acc + applyConventionToValue(g.instrument_type, qty, price);
     }, 0);
@@ -5981,8 +5966,8 @@ function filterClosedToToday(closedGroups) {
       ...g,
       operations: todayPairs,
       operationsCount: todayPairs.length,
-      buyOpsCount: 0, // sintético, no son compras "reales"
-      sellOpsCount: todayPairs.length / 2,
+      buyOpsCount: 0,
+      sellOpsCount: todayPairs.length,
       pnl: realizedPnl,
       realizedPnl: realizedPnl,
       valueAtMarket: realizedPnl,
@@ -7162,12 +7147,29 @@ function ConsolidatedRow({ group, expanded, onToggle, onEdit, onDelete, onUpdate
                 <tbody>
                   {group.operations.map((p) => {
                     const isSell = p.operation_type === "sell";
-                    // Cantidad firmada: ventas en negativo para reflejar que
-                    // restan de la posición. La magnitud absoluta sigue siendo
-                    // el valor cargado (p.quantity es siempre positivo en BD).
-                    const signedQty = isSell
-                      ? -Math.abs(Number(p.quantity) || 0)
-                      : Math.abs(Number(p.quantity) || 0);
+                    const isClosedPair = p.operation_type === "closed_pair";
+                    // Cantidad firmada:
+                    //  - VENTA cruda (en fila ABIERTA): negativa (restó posición).
+                    //  - COMPRA cruda: positiva.
+                    //  - CERRADA (par sintético): positiva, sin signo
+                    //    (representa el lote cerrado, no un movimiento direccional).
+                    const rawQty = Math.abs(Number(p.quantity) || 0);
+                    const signedQty = isSell ? -rawQty : rawQty;
+
+                    // Badge: COMPRA verde / VENTA rojo / CERRADA accent
+                    const badgeLabel = isClosedPair ? "CERRADA" : isSell ? "VENTA" : "COMPRA";
+                    const badgeColor = isClosedPair ? C.accent : isSell ? C.red : C.green;
+                    const badgeBg = isClosedPair
+                      ? "rgba(94, 129, 244, 0.10)"
+                      : isSell ? "rgba(248,113,113,0.10)" : "rgba(74,222,128,0.10)";
+                    const badgeBorder = isClosedPair
+                      ? "rgba(94, 129, 244, 0.30)"
+                      : isSell ? "rgba(248,113,113,0.25)" : "rgba(74,222,128,0.25)";
+
+                    // Para CERRADA, el color de la qty es text (neutro);
+                    // para VENTA cruda es rojo; COMPRA es text.
+                    const qtyColor = isClosedPair ? C.text : (isSell ? C.red : C.text);
+
                     return (
                       <tr key={p.id} style={{ borderBottom: `1px solid ${C.border}` }}>
                         <td style={subTdStyle("left")}>
@@ -7178,12 +7180,12 @@ function ConsolidatedRow({ group, expanded, onToggle, onEdit, onDelete, onUpdate
                               letterSpacing: "0.14em",
                               padding: "1px 6px",
                               borderRadius: 2,
-                              color: isSell ? C.red : C.green,
-                              backgroundColor: isSell ? "rgba(248,113,113,0.10)" : "rgba(74,222,128,0.10)",
-                              border: `1px solid ${isSell ? "rgba(248,113,113,0.25)" : "rgba(74,222,128,0.25)"}`,
+                              color: badgeColor,
+                              backgroundColor: badgeBg,
+                              border: `1px solid ${badgeBorder}`,
                             }}
                           >
-                            {isSell ? "VENTA" : "COMPRA"}
+                            {badgeLabel}
                           </span>
                         </td>
                         <td style={subTdStyle("right")}>
@@ -7191,7 +7193,7 @@ function ConsolidatedRow({ group, expanded, onToggle, onEdit, onDelete, onUpdate
                             className="eco-mono"
                             style={{
                               fontSize: 11.5,
-                              color: isSell ? C.red : C.text,
+                              color: qtyColor,
                             }}
                           >
                             {fmtNumber(
@@ -7203,17 +7205,27 @@ function ConsolidatedRow({ group, expanded, onToggle, onEdit, onDelete, onUpdate
                           </span>
                         </td>
                         <td style={subTdStyle("right")}>
+                          {/* Precio compra:
+                                - COMPRA: muestra entry_price.
+                                - VENTA cruda: vacío.
+                                - CERRADA: muestra entry_price (que es el PPP del momento). */}
                           <span className="eco-mono" style={{ fontSize: 11.5 }}>
-                            {!isSell && p.entry_price != null
+                            {(isClosedPair || !isSell) && p.entry_price != null
                               ? fmtNumber(p.entry_price, { maxDecimals: 4, smartDecimals: true })
                               : <span style={{ color: C.dim }}>—</span>}
                           </span>
                         </td>
                         <td style={subTdStyle("right")}>
+                          {/* Precio venta:
+                                - VENTA cruda: muestra entry_price (precio venta real).
+                                - CERRADA: muestra sell_price (precio venta real).
+                                - COMPRA: vacío. */}
                           <span className="eco-mono" style={{ fontSize: 11.5 }}>
-                            {isSell && p.entry_price != null
-                              ? fmtNumber(p.entry_price, { maxDecimals: 4, smartDecimals: true })
-                              : <span style={{ color: C.dim }}>—</span>}
+                            {isClosedPair && p.sell_price != null
+                              ? fmtNumber(p.sell_price, { maxDecimals: 4, smartDecimals: true })
+                              : (isSell && p.entry_price != null
+                                ? fmtNumber(p.entry_price, { maxDecimals: 4, smartDecimals: true })
+                                : <span style={{ color: C.dim }}>—</span>)}
                           </span>
                         </td>
                         <td style={subTdStyle("right")}>
