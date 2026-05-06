@@ -1083,9 +1083,14 @@ function LibroOperacionesModule() {
 function LibroOperacionesView() {
   const { positions, loading, error, updatePosition, deletePosition } = useUserPositions();
   const bondPricesState = useBondPrices();
+  // Hook de cash: necesario para mostrar y editar/borrar movements manuales
+  // (deposits/withdrawals) en el libro. Los automáticos (sale_proceeds /
+  // purchase_cost) NO se muestran porque ya están representados por la
+  // position que los originó — eso evita duplicar info.
+  const cashState = useCashMovements();
 
   // Filtros UI
-  const [filterType, setFilterType] = useState("all");        // "all" | instrument_type
+  const [filterType, setFilterType] = useState("all");        // "all" | instrument_type | "cash"
   const [filterOperation, setFilterOperation] = useState("all"); // "all" | "buy" | "sell"
   const [dateFrom, setDateFrom] = useState("");
   const [dateTo, setDateTo] = useState("");
@@ -1095,6 +1100,9 @@ function LibroOperacionesView() {
   // Estado de edición / borrado (igual que PortfolioDashboard, en stub)
   const [editingPosition, setEditingPosition] = useState(null);
   const [confirmingDelete, setConfirmingDelete] = useState(null);
+  // Movement bajo edición / pendiente de borrado.
+  const [editingCashMovement, setEditingCashMovement] = useState(null);
+  const [confirmingDeleteCash, setConfirmingDeleteCash] = useState(null);
 
   const handleUpdateCurrentPrice = useCallback(async (positionId, newPrice) => {
     const patch = {
@@ -1111,45 +1119,85 @@ function LibroOperacionesView() {
   // Reseteamos página cuando cambia un filtro
   useEffect(() => { setPage(1); }, [filterType, filterOperation, dateFrom, dateTo]);
 
-  // Aplicamos filtros + sort
-  const filtered = useMemo(() => {
-    let rows = [...(positions || [])];
+  // Solo nos interesan los movements MANUALES (los automáticos los
+  // representan las positions correspondientes; mostrar ambos sería
+  // duplicar info en pantalla).
+  const manualMovements = useMemo(() => {
+    return (cashState.movements || []).filter(
+      (m) => !m.related_position_id &&
+             (m.movement_type === "deposit" || m.movement_type === "withdrawal")
+    );
+  }, [cashState.movements]);
 
-    // Filtro tipo
-    if (filterType !== "all") {
-      if (filterType === "bond") {
-        rows = rows.filter((p) =>
-          p.instrument_type === "bond_ars" || p.instrument_type === "bond_usd"
-        );
-      } else {
-        rows = rows.filter((p) => p.instrument_type === filterType);
+  // Aplicamos filtros + sort sobre el merge de positions + cash movements.
+  // Cada item del array final lleva un campo `_kind` ("position" |
+  // "cash_movement") y un `item` con el dato original — formato que
+  // PositionsTable ya sabe renderizar.
+  const filtered = useMemo(() => {
+    const items = [];
+
+    // Helper: ¿la operation type filtra como "buy" o "sell"?
+    const matchesOpFilter = (kind, opOrType) => {
+      if (filterOperation === "all") return true;
+      if (kind === "position") {
+        if (filterOperation === "buy") return opOrType !== "sell";
+        return opOrType === "sell";
+      }
+      // Cash: deposit cuenta como "buy" (entrada de plata), withdrawal como "sell"
+      // (salida). Es la analogía más cercana — si la cambia algún día, ajustar.
+      if (filterOperation === "buy") return opOrType === "deposit";
+      return opOrType === "withdrawal";
+    };
+
+    // 1) Positions
+    if (filterType === "all" || filterType !== "cash") {
+      let posRows = [...(positions || [])];
+      // Filtro tipo (solo si no es "all" ni "cash")
+      if (filterType !== "all" && filterType !== "cash") {
+        if (filterType === "bond") {
+          posRows = posRows.filter((p) =>
+            p.instrument_type === "bond_ars" || p.instrument_type === "bond_usd"
+          );
+        } else {
+          posRows = posRows.filter((p) => p.instrument_type === filterType);
+        }
+      }
+      for (const p of posRows) {
+        if (!matchesOpFilter("position", p.operation_type)) continue;
+        if (dateFrom && (p.entry_date || "") < dateFrom) continue;
+        if (dateTo && (p.entry_date || "") > dateTo) continue;
+        items.push({
+          _kind: "position",
+          item: p,
+          sortDate: p.entry_date || "",
+          sortCreated: p.created_at || "",
+        });
       }
     }
-    // Filtro op
-    if (filterOperation !== "all") {
-      if (filterOperation === "buy") {
-        rows = rows.filter((p) => p.operation_type !== "sell");
-      } else {
-        rows = rows.filter((p) => p.operation_type === "sell");
+
+    // 2) Cash movements manuales
+    if (filterType === "all" || filterType === "cash") {
+      for (const m of manualMovements) {
+        if (!matchesOpFilter("cash_movement", m.movement_type)) continue;
+        if (dateFrom && (m.movement_date || "") < dateFrom) continue;
+        if (dateTo && (m.movement_date || "") > dateTo) continue;
+        items.push({
+          _kind: "cash_movement",
+          item: m,
+          sortDate: m.movement_date || "",
+          sortCreated: m.created_at || "",
+        });
       }
     }
-    // Filtro fecha desde
-    if (dateFrom) {
-      rows = rows.filter((p) => p.entry_date >= dateFrom);
-    }
-    // Filtro fecha hasta
-    if (dateTo) {
-      rows = rows.filter((p) => p.entry_date <= dateTo);
-    }
-    // Sort por fecha desc, luego created_at desc
-    rows.sort((a, b) => {
-      const da = a.entry_date || "";
-      const db = b.entry_date || "";
-      if (da !== db) return db.localeCompare(da);
-      return (b.created_at || "").localeCompare(a.created_at || "");
+
+    // Sort por fecha desc, created_at desc como tiebreaker
+    items.sort((a, b) => {
+      if (a.sortDate !== b.sortDate) return b.sortDate.localeCompare(a.sortDate);
+      return (b.sortCreated || "").localeCompare(a.sortCreated || "");
     });
-    return rows;
-  }, [positions, filterType, filterOperation, dateFrom, dateTo]);
+
+    return items;
+  }, [positions, manualMovements, filterType, filterOperation, dateFrom, dateTo]);
 
   const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
   const pagedRows = useMemo(() => {
@@ -1210,7 +1258,12 @@ function LibroOperacionesView() {
         Libro de operaciones
       </h1>
       <p style={{ fontSize: 13, color: C.muted, marginTop: 0, marginBottom: 24 }}>
-        Registro completo de todos tus movimientos — {positions?.length || 0} operaciones en total.
+        Registro completo de todos tus movimientos — {(positions?.length || 0) + manualMovements.length} en total
+        {manualMovements.length > 0 && (
+          <span style={{ color: C.dim }}>
+            {" "}({positions?.length || 0} operaciones · {manualMovements.length} movimientos de efectivo)
+          </span>
+        )}.
       </p>
 
       {/* Filtros */}
@@ -1240,7 +1293,7 @@ function LibroOperacionesView() {
             <FilterChip
               active={filterType === "all"}
               onClick={() => setFilterType("all")}
-              label={`Todos (${positions?.length || 0})`}
+              label={`Todos (${(positions?.length || 0) + manualMovements.length})`}
             />
             {presentTypes.map((type) => {
               const meta = INSTRUMENT_TYPES[type];
@@ -1261,6 +1314,15 @@ function LibroOperacionesView() {
                 />
               );
             })}
+            {/* Chip especial "Efectivo": filtra solo cash movements manuales.
+                Solo se muestra si hay al menos uno cargado. */}
+            {manualMovements.length > 0 && (
+              <FilterChip
+                active={filterType === "cash"}
+                onClick={() => setFilterType("cash")}
+                label={`Efectivo (${manualMovements.length})`}
+              />
+            )}
           </div>
         </div>
 
@@ -1278,12 +1340,12 @@ function LibroOperacionesView() {
             <FilterChip
               active={filterOperation === "buy"}
               onClick={() => setFilterOperation("buy")}
-              label="Compras"
+              label="Compras / Ingresos"
             />
             <FilterChip
               active={filterOperation === "sell"}
               onClick={() => setFilterOperation("sell")}
-              label="Ventas"
+              label="Ventas / Retiros"
             />
           </div>
         </div>
@@ -1378,17 +1440,19 @@ function LibroOperacionesView() {
             color: C.dim,
           }}
         >
-          {positions?.length === 0
-            ? "Todavía no cargaste ninguna operación."
-            : "No hay operaciones que coincidan con los filtros aplicados."}
+          {(positions?.length === 0 && manualMovements.length === 0)
+            ? "Todavía no cargaste ninguna operación ni movimiento de efectivo."
+            : "No hay registros que coincidan con los filtros aplicados."}
         </div>
       ) : (
         <PositionsTable
-          positions={pagedRows}
+          rows={pagedRows}
           bondPrices={bondPricesState.prices}
           onEdit={(p) => setEditingPosition(p)}
           onDelete={(p) => setConfirmingDelete(p)}
           onUpdatePrice={handleUpdateCurrentPrice}
+          onEditCashMovement={(m) => setEditingCashMovement(m)}
+          onDeleteCashMovement={(m) => setConfirmingDeleteCash(m)}
         />
       )}
 
@@ -1440,6 +1504,31 @@ function LibroOperacionesView() {
             } finally {
               setConfirmingDelete(null);
             }
+          }}
+        />
+      )}
+
+      {/* Modal de edición de cash movement (reusado del dashboard) */}
+      {editingCashMovement && (
+        <CashMovementModal
+          type={editingCashMovement.movement_type}
+          editingMovement={editingCashMovement}
+          onCancel={() => setEditingCashMovement(null)}
+          onSubmit={async (payload) => {
+            await cashState.updateManualMovement(editingCashMovement.id, payload);
+            setEditingCashMovement(null);
+          }}
+        />
+      )}
+
+      {/* Modal de confirmación de borrado de cash movement */}
+      {confirmingDeleteCash && (
+        <DeleteCashMovementModal
+          movement={confirmingDeleteCash}
+          onCancel={() => setConfirmingDeleteCash(null)}
+          onConfirm={async () => {
+            await cashState.deleteManualMovement(confirmingDeleteCash.id);
+            setConfirmingDeleteCash(null);
           }}
         />
       )}
