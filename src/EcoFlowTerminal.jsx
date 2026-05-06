@@ -2699,34 +2699,141 @@ function useUserPositions() {
 
 /**
  * Tipos de instrumento que disparan un cash_movement automático al
- * crear/editar una compra o venta.
+ * crear/editar una operación.
+ *
+ * Bonos / ON / Stocks / CEDEARs:
+ *   - Compra → purchase_cost = qty × price (con /100 para bonos/ON)
+ *   - Venta  → sale_proceeds = qty × price (con /100 para bonos/ON)
+ *   - Settlement determina la fecha del cash (CI = mismo día, T1 = +1 hábil)
+ *
+ * Futuros (lógica especial):
+ *   - Compra (apertura) → NO genera cash. Es un compromiso a futuro;
+ *     no hay desembolso real (solo garantías que la app no trackea).
+ *   - Venta (cierre parcial o total contra una compra previa) → genera
+ *     sale_proceeds POSITIVO o NEGATIVO en ARS por el P&L del par cerrado.
+ *     La fecha siempre es entry_date + 1 día hábil (ROFEX liquida T+1
+ *     siempre, sin importar settlement de la position).
+ *   - Si la venta es short puro (sin compras previas), se trata como
+ *     apertura — no genera cash hasta que hayan compras que neteen.
  */
-const CASH_AUTO_TYPES = new Set(["bond_ars", "bond_usd", "on", "stock", "cedear"]);
+const CASH_AUTO_TYPES = new Set(["bond_ars", "bond_usd", "on", "stock", "cedear", "future"]);
 
 /**
- * Calcula el monto de cash (siempre positivo) que mueve una operación.
- * Para bonos / ON cotizan al 100 → (qty × price) / 100.
- * Para acciones / CEDEARs → qty × price.
+ * Calcula el P&L realizado de una venta de futuro contra las compras
+ * previas del mismo ticker (PPP cronológico). Si la venta es la primera
+ * operación o las compras previas no alcanzan a cubrir la cantidad,
+ * devuelve null (no podemos calcular cash todavía).
  *
- * @returns {number|null}  Monto positivo, o null si no se puede calcular
- *                          (faltan datos o el tipo no aplica).
+ * @param {Object}   sellPosition  La operación de venta recién cargada
+ * @param {Array}    allPositions  Todas las positions del usuario en BD
+ *                                 (incluye o no a sellPosition; la función
+ *                                  excluye su propio id para evitar contar
+ *                                  la venta como parte del histórico)
+ * @returns {number|null}  P&L en ARS (puede ser negativo), o null si
+ *                         no hay compras suficientes para netear
  */
-function computeCashAmount(position) {
+function computeFuturePnLForSell(sellPosition, allPositions) {
+  if (sellPosition.instrument_type !== "future") return null;
+  if (sellPosition.operation_type !== "sell") return null;
+
+  const ticker = (sellPosition.ticker || "").toUpperCase();
+  // Filtrar mismas operaciones del ticker excluyendo la venta misma.
+  const others = (allPositions || []).filter((p) =>
+    p.id !== sellPosition.id &&
+    (p.ticker || "").toUpperCase() === ticker &&
+    p.instrument_type === "future"
+  );
+
+  // Ordenar cronológicamente para calcular PPP "al momento de esta venta"
+  const sellDate = sellPosition.entry_date || "9999-12-31";
+  const sellCreated = sellPosition.created_at || "";
+  const priorOps = others.filter((p) => {
+    const pd = p.entry_date || "9999-12-31";
+    if (pd < sellDate) return true;
+    if (pd > sellDate) return false;
+    return (p.created_at || "") < sellCreated;
+  });
+
+  let cumQty = 0;
+  let cumValue = 0;
+  for (const p of priorOps) {
+    const qty = Number(p.quantity) || 0;
+    const price = Number(p.entry_price) || 0;
+    if (p.operation_type === "sell") {
+      // Una venta previa redujo el lote. Mantenemos PPP, descontamos qty.
+      const ppp = cumQty > 0 ? cumValue / cumQty : null;
+      if (ppp != null) {
+        const consumed = Math.min(qty, cumQty);
+        cumQty -= consumed;
+        cumValue -= consumed * ppp;
+      }
+    } else {
+      cumQty += qty;
+      cumValue += qty * price;
+    }
+  }
+
+  if (cumQty <= 0) return null; // sin compras previas, no hay cierre
+
+  const ppp = cumValue / cumQty;
+  const sellQty = Number(sellPosition.quantity) || 0;
+  const sellPrice = Number(sellPosition.entry_price) || 0;
+  if (sellQty <= 0 || sellPrice <= 0) return null;
+
+  // Solo se puede netear hasta cumQty (por encima sería short)
+  const closedQty = Math.min(sellQty, cumQty);
+  const mult = FUTURE_MULTIPLIER_DEFAULT;
+
+  // P&L = qty × multiplicador × (precio_venta − PPP)
+  return closedQty * mult * (sellPrice - ppp);
+}
+
+/**
+ * Calcula el monto de cash (POSITIVO) que mueve una operación, junto
+ * con el tipo de movement que corresponde.
+ *
+ * Para bonos / ON / stocks / cedears: monto bruto de la operación.
+ * Para futuros: P&L del par cerrado (solo si es venta neteable).
+ *
+ * @returns {{amount: number, movement_type: string} | null}
+ */
+function computeCashAmountAndType(position, allPositions) {
   if (!position) return null;
   if (!CASH_AUTO_TYPES.has(position.instrument_type)) return null;
   const qty = Number(position.quantity);
   const price = Number(position.entry_price);
   if (!qty || !price || qty <= 0 || price <= 0) return null;
 
-  if (position.instrument_type === "bond_ars" || position.instrument_type === "bond_usd" || position.instrument_type === "on") {
-    return (qty * price) / 100;
+  // Caso futuros: solo ventas que netean contra compras previas
+  if (position.instrument_type === "future") {
+    if (position.operation_type !== "sell") return null;
+    const pnl = computeFuturePnLForSell(position, allPositions);
+    if (pnl == null) return null;
+    // Convertimos a tipo y amount POSITIVO (el signo lo da el tipo)
+    return pnl >= 0
+      ? { amount: pnl,         movement_type: "sale_proceeds" }
+      : { amount: -pnl,        movement_type: "purchase_cost" };
   }
-  return qty * price;
+
+  // Bonos / ON: precio cada 100 VN
+  let amount;
+  if (position.instrument_type === "bond_ars" || position.instrument_type === "bond_usd" || position.instrument_type === "on") {
+    amount = (qty * price) / 100;
+  } else {
+    // Stocks, CEDEARs: qty × price directo
+    amount = qty * price;
+  }
+  const movement_type = position.operation_type === "sell" ? "sale_proceeds" : "purchase_cost";
+  return { amount, movement_type };
 }
 
 /**
  * Devuelve la fecha efectiva en la que el cash impacta el saldo, dada
  * una position con su settlement.
+ *
+ * Para bonos/stocks/etc: respeta settlement (CI = mismo día, T1 = +1 hábil).
+ * Para futuros: SIEMPRE T+1 (ROFEX liquida así independientemente del
+ * settlement registrado, que para futuros es semánticamente irrelevante).
  *
  * @returns {string|null}  YYYY-MM-DD, o null si la position no tiene fecha.
  */
@@ -2738,6 +2845,11 @@ function computeMovementDate(position) {
     ? position.entry_date.slice(0, 10)
     : new Date(position.entry_date).toISOString().slice(0, 10);
 
+  // Futuros: siempre T+1 (acreditación ROFEX al día hábil siguiente)
+  if (position.instrument_type === "future") {
+    return addBusinessDays(baseDate, 1);
+  }
+
   if (position.settlement === "T1") {
     return addBusinessDays(baseDate, 1);
   }
@@ -2746,31 +2858,35 @@ function computeMovementDate(position) {
 }
 
 /**
- * Determina el tipo de cash_movement (sale_proceeds o purchase_cost)
- * a partir del operation_type de una position.
- */
-function cashMovementTypeFor(position) {
-  return position.operation_type === "sell" ? "sale_proceeds" : "purchase_cost";
-}
-
-/**
  * Construye el payload completo de un cash_movement para una position.
  * Devuelve null si la position no debe generar movement (tipo no incluido,
- * datos faltantes, etc.).
+ * compra de futuro, venta de futuro sin neteo, datos faltantes, etc.).
+ *
+ * @param {Object} position      La operación recién creada/editada
+ * @param {string} userId        UUID del usuario
+ * @param {Array}  allPositions  Todas las positions del usuario (necesario
+ *                               solo para futuros, para calcular P&L del par)
  */
-function buildCashMovementPayload(position, userId) {
+function buildCashMovementPayload(position, userId, allPositions) {
   if (!CASH_AUTO_TYPES.has(position.instrument_type)) return null;
-  const amount = computeCashAmount(position);
+  const cashInfo = computeCashAmountAndType(position, allPositions);
+  if (!cashInfo) return null;
   const movementDate = computeMovementDate(position);
-  if (amount == null || !movementDate) return null;
+  if (!movementDate) return null;
+  // Para futuros la moneda del cash siempre es ARS (ROFEX liquida en pesos)
+  const currency = position.instrument_type === "future"
+    ? "ARS"
+    : (position.entry_currency || "ARS");
   return {
     user_id: userId,
     movement_date: movementDate,
-    movement_type: cashMovementTypeFor(position),
-    currency: position.entry_currency || "ARS",
-    amount,
+    movement_type: cashInfo.movement_type,
+    currency,
+    amount: cashInfo.amount,
     related_position_id: position.id,
-    notes: null,
+    notes: position.instrument_type === "future"
+      ? `P&L cierre futuro ${position.ticker || ""}`
+      : null,
   };
 }
 
@@ -2902,14 +3018,18 @@ function useCashMovements() {
    * no debe generar movement (tipo no incluido), borra el movement
    * existente (caso edge: cambiaste el tipo de una posición de bono a
    * futuro al editarla).
+   *
+   * Para futuros, necesitamos `allPositions` para calcular el P&L del par
+   * cerrado (PPP cronológico contra todas las compras previas del ticker).
+   * Para no-futuros allPositions es opcional (no se usa).
    */
-  const syncForPosition = useCallback(async (position) => {
+  const syncForPosition = useCallback(async (position, allPositions) => {
     if (!user) throw new Error("No hay sesión activa");
     if (!position?.id) return;
 
     // Buscar movement existente en el state local
     const existing = movements.find((m) => m.related_position_id === position.id);
-    const payload = buildCashMovementPayload(position, user.id);
+    const payload = buildCashMovementPayload(position, user.id, allPositions);
 
     if (!payload) {
       // Position no debe generar movement → borrar el existente si lo hay
@@ -5007,6 +5127,40 @@ function computeLiquidityBreakdown(positions, fx, valuationCurrency, windowKey, 
         result[cur] += g.valueAtMarket;
       }
     }
+
+    // 3c) P&L mark-to-market de FUTUROS que vencen en ventana.
+    //
+    // Lógica ROFEX: el P&L mark-to-market del futuro se acredita en cash
+    // ARS al día hábil siguiente del cierre/vencimiento. Si el contrato
+    // vence dentro de la ventana, asumimos que el P&L actual va a quedar
+    // realizado (best estimate al precio actual). Sumarlo aquí hace que
+    // Liquidez Proyectada coincida con el Total cuando todos los activos
+    // vencen en ventana — es decir, "tu cartera HOY converge a este cash
+    // si todo se mantiene a precio actual hasta vencer".
+    //
+    // Importante: solo entran las posiciones futuras ABIERTAS. Las cerradas
+    // ya tienen su P&L realizado fluyendo como cash_movement (item 2).
+    const futures = positions.filter((p) => p.instrument_type === "future");
+    if (futures.length > 0) {
+      const futureGroups = consolidatePositions(futures, bondPrices);
+      for (const g of futureGroups) {
+        if (g.isClosed) continue;          // cerrado → ya tiene su movement
+        if (g.netQty === 0) continue;       // neteo total → idem
+        if (g.valueAtMarket == null) continue;
+
+        const sample = g.operations[0];
+        if (!sample) continue;
+        const matDate = getPositionMaturity(sample);
+        if (!matDate) continue;
+        const md = new Date(matDate);
+        if (md < today || md > cutoff) continue;
+
+        // Para futuros, valueAtMarket = P&L mark-to-market (puede ser
+        // negativo). ROFEX siempre liquida en ARS, sin importar la
+        // moneda registrada.
+        result["ARS"] += g.valueAtMarket;
+      }
+    }
   }
 
   return result;
@@ -5988,11 +6142,13 @@ function PortfolioDashboard({ onNavigate }) {
     }
     // Sincronizar cash_movement asociado: si la position es de tipo
     // bond_ars/bond_usd/on/stock/cedear, inserta o actualiza el movement
-    // correspondiente. Si no, syncForPosition borra el movement existente
-    // (caso edge: cambiaste el tipo a futuro al editar).
+    // correspondiente. Para futuros, solo genera cash en ventas que netean
+    // contra compras previas (P&L del par cerrado, ARS, T+1).
+    // Si no aplica, syncForPosition borra el movement existente
+    // (caso edge: cambiaste el tipo a uno no soportado al editar).
     if (savedPosition) {
       try {
-        await cashState.syncForPosition(savedPosition);
+        await cashState.syncForPosition(savedPosition, positions);
       } catch (err) {
         // No bloqueamos al usuario si el cash sync falla — mostramos en consola
         // y la position queda guardada. Se puede reintentar abriendo y guardando
