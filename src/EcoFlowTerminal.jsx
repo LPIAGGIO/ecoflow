@@ -4252,8 +4252,8 @@ function FlowsSection({ positions, bondPrices, fx }) {
   }, [positions, bondPrices]);
 
   return (
-    <div style={cardBaseStyle()}>
-      <div className="flex items-center justify-between" style={{ marginBottom: 12 }}>
+    <div style={{ ...cardBaseStyle(), padding: "12px 14px", minHeight: 0 }}>
+      <div className="flex items-center justify-between" style={{ marginBottom: 8 }}>
         <span style={cardTitleStyle()}>Flujos proyectados</span>
         <span style={{ fontSize: 10, color: C.dim, fontFamily: "'Roboto', sans-serif" }}>
           Próximos 5 vencimientos
@@ -4261,7 +4261,7 @@ function FlowsSection({ positions, bondPrices, fx }) {
       </div>
 
       {upcomingMaturities.length === 0 ? (
-        <div style={{ fontSize: 12, color: C.dim, padding: "16px 0", textAlign: "center" }}>
+        <div style={{ fontSize: 12, color: C.dim, padding: "12px 0", textAlign: "center" }}>
           No hay vencimientos próximos en tu cartera
         </div>
       ) : (
@@ -4287,24 +4287,24 @@ function FlowsSection({ positions, bondPrices, fx }) {
                   }}
                 >
                   <td style={flowsTdStyle("left")}>
-                    <span style={{ fontSize: 12, color: C.text, fontFamily: "'JetBrains Mono', monospace", fontWeight: 600 }}>
+                    <span style={{ fontSize: 11.5, color: C.text, fontFamily: "'JetBrains Mono', monospace", fontWeight: 600 }}>
                       {e.ticker}
                     </span>
                   </td>
                   <td style={flowsTdStyle("left")}>
-                    <span style={{ fontSize: 12, color: C.muted, fontFamily: "'Roboto', sans-serif" }}>
+                    <span style={{ fontSize: 11, color: C.muted, fontFamily: "'Roboto', sans-serif" }}>
                       {e.type}
                     </span>
                   </td>
                   <td style={flowsTdStyle("right")}>
-                    <span style={{ fontSize: 12, color: C.muted, fontFamily: "'JetBrains Mono', monospace" }}>
+                    <span style={{ fontSize: 11.5, color: C.muted, fontFamily: "'JetBrains Mono', monospace" }}>
                       {fmtNumber(e.quantity, { maxDecimals: 0 })}
                     </span>
                   </td>
                   <td style={flowsTdStyle("right")}>
                     {e.amount != null ? (
                       <div className="flex flex-col items-end" style={{ gap: 1 }}>
-                        <span style={{ fontSize: 12, color: C.text, fontFamily: "'JetBrains Mono', monospace", fontWeight: 500 }}>
+                        <span style={{ fontSize: 11.5, color: C.text, fontFamily: "'JetBrains Mono', monospace", fontWeight: 500 }}>
                           {fmtNumber(e.amount, { maxDecimals: 2 })}
                         </span>
                         {e.amountSource === "cost" && (
@@ -4315,22 +4315,22 @@ function FlowsSection({ positions, bondPrices, fx }) {
                       </div>
                     ) : e.amountNote ? (
                       <div className="flex flex-col items-end" style={{ gap: 1 }}>
-                        <span style={{ color: C.dim, fontSize: 12 }}>—</span>
+                        <span style={{ color: C.dim, fontSize: 11.5 }}>—</span>
                         <span style={{ fontSize: 9, color: C.dim, letterSpacing: "0.05em", textTransform: "uppercase" }}>
                           {e.amountNote}
                         </span>
                       </div>
                     ) : (
-                      <span style={{ color: C.dim, fontSize: 12 }}>—</span>
+                      <span style={{ color: C.dim, fontSize: 11.5 }}>—</span>
                     )}
                   </td>
                   <td style={flowsTdStyle("center")}>
-                    <span style={{ fontSize: 12, color: C.muted, fontFamily: "'Roboto', sans-serif" }}>
+                    <span style={{ fontSize: 11, color: C.muted, fontFamily: "'Roboto', sans-serif" }}>
                       {e.currency}
                     </span>
                   </td>
                   <td style={flowsTdStyle("right")}>
-                    <span style={{ fontSize: 12, color: C.muted, fontFamily: "'JetBrains Mono', monospace" }}>
+                    <span style={{ fontSize: 11.5, color: C.muted, fontFamily: "'JetBrains Mono', monospace" }}>
                       {fmtMaturityShort(e.date)}
                     </span>
                   </td>
@@ -4345,12 +4345,11 @@ function FlowsSection({ positions, bondPrices, fx }) {
 }
 
 function flowsThStyle(align) {
-  // Mantenemos en sync con PTh dense para que Flujos proyectados se vea
-  // con la misma densidad Bloomberg que Posiciones consolidadas, cerradas
-  // y Últimas operaciones.
+  // Header compacto (mismo padding vertical que las cells del cuerpo
+  // para mantener proporciones).
   return {
     textAlign: align,
-    padding: "5px 14px",
+    padding: "4px 12px",
     fontSize: 9,
     fontWeight: 600,
     color: C.dim,
@@ -4362,13 +4361,11 @@ function flowsThStyle(align) {
 }
 
 function flowsTdStyle(align) {
-  // Idéntico a PTd dense (padding 4×14, font 12, vertical-align middle).
-  // Antes faltaban fontSize/color y la fila quedaba ~3px más alta de lo
-  // que se ve en las otras tablas.
+  // Padding ajustado para ganar densidad (antes 4×14, ahora 3×12).
   return {
     textAlign: align,
-    padding: "4px 14px",
-    fontSize: 12,
+    padding: "3px 12px",
+    fontSize: 11.5,
     color: C.text,
     verticalAlign: "middle",
   };
@@ -6066,7 +6063,6 @@ function DataSourcesFooter({
 
 
 function PortfolioDashboard({ onNavigate }) {
-  const { user } = useAuth();
   const { positions, loading, error, addPosition, updatePosition, deletePosition } = useUserPositions();
 
   // Hook de cash: trackea movements (deposits, withdrawals, sale_proceeds,
@@ -6173,13 +6169,6 @@ function PortfolioDashboard({ onNavigate }) {
     }
   }, [updatePosition]);
 
-  const displayName =
-    user?.user_metadata?.full_name ||
-    user?.user_metadata?.name ||
-    user?.email?.split("@")[0] ||
-    "Usuario";
-  const firstName = displayName.split(" ")[0];
-
   // Filtrado de posiciones
   const filteredPositions = useMemo(() => {
     if (filter === "all") return positions;
@@ -6268,25 +6257,6 @@ function PortfolioDashboard({ onNavigate }) {
         <span>Portfolio IA</span>
         <span style={{ color: C.faint }}>·</span>
         <span>Beta</span>
-      </div>
-
-      <div style={{ marginBottom: 26 }}>
-        <h1
-          style={{
-            fontFamily: "'Raleway', sans-serif",
-            fontSize: 26,
-            fontWeight: 700,
-            color: C.text,
-            letterSpacing: "-0.015em",
-            margin: 0,
-            marginBottom: 6,
-          }}
-        >
-          Hola, {firstName}
-        </h1>
-        <p style={{ fontSize: 13, color: C.muted, margin: 0, maxWidth: 640 }}>
-          Cargá tus posiciones para ver tu cartera consolidada y descubrir oportunidades.
-        </p>
       </div>
 
       {/* Estado de error */}
