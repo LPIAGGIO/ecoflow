@@ -1855,61 +1855,150 @@ function fmtMaturityShort(isoDate) {
  *   devuelve mode="input" (libre) para stock/cedear/on.
  * @returns {{ mode: 'select' | 'input', options: Array<{value, label}> }}
  */
+/**
+ * Detecta si un ticker LOOKS como bono soberano del Tesoro/Estado argentino,
+ * para excluirlo del dropdown de Acciones / CEDEARs / ONs / Futuros donde
+ * no corresponde.
+ *
+ * Tickers que matchean (heurística por patrón):
+ *   - Lecaps / Boncaps:  S29Y6, T30J6, TTM26, TTJ26, etc.
+ *   - Hard-dollar:       AL30, GD30, AE38, GE39, etc.
+ *   - Variantes plaza:   AL30C, AL30D (sufijos C/D para CCL/MEP).
+ *
+ * Si está en BOND_REGISTRY o matchea uno de estos patrones, lo consideramos
+ * "looks like a sovereign bond" y lo filtramos del catálogo dinámico.
+ *
+ * Esta heurística es DEFENSIVA, no autoritativa: si la BD viene bien
+ * categorizada el filtro no excluye nada legítimo. Si la BD viene sucia
+ * (caso actual con boncaps clasificados como stock), el filtro los oculta.
+ */
+function looksLikeSovereignBond(ticker) {
+  if (!ticker || typeof ticker !== "string") return false;
+  const t = ticker.toUpperCase().trim();
+  if (BOND_REGISTRY[t]) return true;
+  // Lecaps/Boncaps Tesoro: S29Y6, T30J6, TTJ26, etc.
+  if (/^(S\d{2}[A-Z]\d|T\d{2}[A-Z]\d|TT[A-Z]\d{2})$/.test(t)) return true;
+  // Hard-dollar Bonares/Globales (con o sin sufijo C/D de plaza):
+  // AL29, AL30, AE38, GD30, GE29, etc.
+  if (/^(AL|AE|GD|GE)\d{2,3}[CD]?$/.test(t)) return true;
+  // Bonos legacy: TVPA/TVPE/TVPP/TVPY (cupones PBI), TX26/TX28/TX31 (Boncer),
+  // PR/DI/DA/PB/PA (Discount/Par y derivados). Suelen aparecer mal
+  // categorizados como stock_arg en data912.
+  if (/^TVP[A-Z]?[CD]?$/.test(t)) return true;
+  if (/^TX\d{2}[CD]?$/.test(t)) return true;
+  if (/^(PR|DI|DA|PB|PA)\d/.test(t)) return true;
+  return false;
+}
+
+/**
+ * Patrón de Bonares (AL) y Globales (GD) hard-dollar, con sufijos C/D
+ * opcionales que indican plaza (CCL/MEP).
+ */
+const BONAR_PATTERN = /^AL\d{2,3}[CD]?$/;
+const GLOBAL_PATTERN = /^GD\d{2,3}[CD]?$/;
+const HARD_DOLLAR_OTHER = /^(AE|GE)\d{2,3}[CD]?$/;
+
 function getTickerOptions(instrumentType, currentTicker, catalog) {
-  // Bonos: combino el registry de pesos hardcoded (filtrando duales según
-  // shouldIgnoreTicker) con bonos USD del catálogo dinámico (o el hardcoded
-  // popular como fallback).
+  // ─── Bonos: agrupados con optgroup por subtipo ─────────────────────
+  // Lecaps / Boncaps / Duales vienen del registry hardcoded (BOND_REGISTRY).
+  // Bonares / Globales / otros hard-dollar vienen del catálogo dinámico
+  // (filtrando lo que no calza con los patrones esperados, para evitar
+  // que la BD sucia filtre tickers extra como TVPA, TX26, TVPP, etc).
   if (instrumentType === "bond" || instrumentType === "bond_ars" || instrumentType === "bond_usd") {
-    const arsBonds = Object.entries(BOND_REGISTRY)
-      .filter(([t]) => !shouldIgnoreTicker(t))
-      .map(([t, info]) => ({
-        ticker: t,
-        sortKey: info.maturityDate || "9999-12-31",
+    // Particionar BOND_REGISTRY por subtipo
+    const lecaps = [];
+    const boncaps = [];
+    const duales = [];
+    for (const [t, info] of Object.entries(BOND_REGISTRY)) {
+      if (shouldIgnoreTicker(t)) continue;
+      const opt = {
+        value: t,
         label: `${t} — ${info.type.toUpperCase()} · vto ${fmtMaturityShort(info.maturityDate)}`,
-      }))
-      .sort((a, b) => a.sortKey.localeCompare(b.sortKey));
+        sortKey: info.maturityDate || "9999-12-31",
+      };
+      if (info.type === "lecap") lecaps.push(opt);
+      else if (info.type === "boncap") boncaps.push(opt);
+      else if (info.type === "dual") duales.push(opt);
+    }
+
+    // Particionar catálogo dinámico USD en Bonares / Globales / Otros
+    // hard-dollar. Cualquier ticker que NO matchee uno de los 3 patrones
+    // se descarta (filtro contra BD sucia).
+    const bonares = [];
+    const globales = [];
+    const otrosUsd = [];
 
     const dynamicUsdBonds = catalog?.bond_usd?.length ? catalog.bond_usd : null;
-    const usdBonds = dynamicUsdBonds
-      ? dynamicUsdBonds.map((b) => {
-          // El endpoint enriquece description con sufijo legible:
-          //   AL30  → "Bonar 2030"
-          //   AL30D → "Bonar 2030 · MEP"
-          //   AL30C → "Bonar 2030 · CCL"
-          // Y metadata.maturityDate hereda del ticker base.
-          const maturity = b.metadata?.maturityDate;
-          const plaza = b.metadata?.plaza || "ars";
-          const desc = b.description;
-          let label;
-          if (desc && maturity) {
-            label = `${b.ticker} — ${desc} · vto ${fmtMaturityShort(maturity)}`;
-          } else if (desc) {
-            label = `${b.ticker} — ${desc}`;
-          } else {
-            label = b.ticker;
-          }
-          // Sort: agrupamos las 3 variantes (puro/D/C) consecutivas por
-          // ticker base. Para eso tomamos el ticker sin último char si es
-          // C o D, y agregamos un sub-orden ARS=0, MEP=1, CCL=2.
-          const plazaOrder = plaza === "ars" ? "0" : plaza === "mep" ? "1" : "2";
-          const sortKey = maturity
-            ? `${maturity}_${plazaOrder}`
-            : `Z_${b.ticker}`;
-          return { ticker: b.ticker, sortKey, label };
-        })
-      : BONDS_USD_POPULAR.map((b) => ({
-          ticker: b.ticker,
-          sortKey: `Z_${b.ticker}`,
-          label: `${b.ticker} — ${b.description}`,
-        }));
+    const usdSource = dynamicUsdBonds || BONDS_USD_POPULAR.map((b) => ({
+      ticker: b.ticker,
+      description: b.description,
+      metadata: null,
+    }));
 
-    const all = [...arsBonds, ...usdBonds].sort((a, b) =>
-      a.sortKey.localeCompare(b.sortKey)
-    );
-    return ensureCurrentInOptions(all, currentTicker, "select");
+    for (const b of usdSource) {
+      const t = (b.ticker || "").toUpperCase();
+      const maturity = b.metadata?.maturityDate;
+      const desc = b.description;
+      let label;
+      if (desc && maturity) {
+        label = `${b.ticker} — ${desc} · vto ${fmtMaturityShort(maturity)}`;
+      } else if (desc) {
+        label = `${b.ticker} — ${desc}`;
+      } else {
+        label = b.ticker;
+      }
+      const opt = {
+        value: b.ticker,
+        label,
+        sortKey: maturity ? `${maturity}_${t}` : `Z_${t}`,
+      };
+
+      if (BONAR_PATTERN.test(t)) {
+        bonares.push(opt);
+      } else if (GLOBAL_PATTERN.test(t)) {
+        globales.push(opt);
+      } else if (HARD_DOLLAR_OTHER.test(t)) {
+        otrosUsd.push(opt);
+      }
+      // Si no matchea ningún patrón hard-dollar conocido, se descarta:
+      // probablemente es un ticker mal clasificado en BD (TVPA, TX26, etc.).
+    }
+
+    // Sort interno de cada grupo por su sortKey (vencimiento ascendente)
+    const sortByKey = (a, b) => a.sortKey.localeCompare(b.sortKey);
+    lecaps.sort(sortByKey);
+    boncaps.sort(sortByKey);
+    duales.sort(sortByKey);
+    bonares.sort(sortByKey);
+    globales.sort(sortByKey);
+    otrosUsd.sort(sortByKey);
+
+    // Construir grupos (omitir los vacíos)
+    const groups = [];
+    if (lecaps.length)   groups.push({ label: "Lecaps",   options: lecaps   });
+    if (boncaps.length)  groups.push({ label: "Boncaps",  options: boncaps  });
+    if (duales.length)   groups.push({ label: "Duales",   options: duales   });
+    if (bonares.length)  groups.push({ label: "Bonares",  options: bonares  });
+    if (globales.length) groups.push({ label: "Globales", options: globales });
+    if (otrosUsd.length) groups.push({ label: "Otros USD", options: otrosUsd });
+
+    // Si el ticker actual no está en ningún grupo (caso edición de
+    // posición vieja con ticker custom), lo agregamos en un grupo especial
+    // al final para no romper la edición.
+    const allValues = new Set();
+    for (const g of groups) for (const o of g.options) allValues.add(o.value);
+    if (currentTicker && currentTicker.trim() && !allValues.has(currentTicker)) {
+      groups.push({
+        label: "Otros",
+        options: [{ value: currentTicker, label: `${currentTicker} — (cargado manualmente)` }],
+      });
+    }
+
+    return { mode: "select", groups };
   }
 
-  // Futuros: hardcoded en DLR_REGISTRY (data912 no los provee).
+  // ─── Futuros: hardcoded en DLR_REGISTRY ─────────────────────────────
+  // No usa catálogo dinámico, así que no hay riesgo de tickers extraños.
   if (instrumentType === "future") {
     const opts = DLR_REGISTRY.map((c) => ({
       ticker: c.ticker,
@@ -1919,11 +2008,15 @@ function getTickerOptions(instrumentType, currentTicker, catalog) {
     return ensureCurrentInOptions(opts, currentTicker, "select");
   }
 
-  // Stock / CEDEAR / ON: usar catálogo dinámico si está poblado, sino input libre.
+  // ─── Stock / CEDEAR / ON: catálogo dinámico filtrado ────────────────
+  // El catálogo a veces viene contaminado con tickers de bonos (Boncaps
+  // clasificados como stock, etc.). Filtramos defensivamente para que
+  // no se cuelen en estos dropdowns.
   if (instrumentType === "stock" || instrumentType === "cedear" || instrumentType === "on") {
     const list = catalog?.[instrumentType];
     if (list && list.length > 0) {
       const opts = list
+        .filter((row) => !looksLikeSovereignBond(row.ticker))
         .map((row) => ({
           ticker: row.ticker,
           sortKey: row.ticker,
@@ -1932,7 +2025,6 @@ function getTickerOptions(instrumentType, currentTicker, catalog) {
         .sort((a, b) => a.sortKey.localeCompare(b.sortKey));
       return ensureCurrentInOptions(opts, currentTicker, "select");
     }
-    // Catálogo vacío todavía (cargando o BD sin datos): input libre.
     return { mode: "input", options: [] };
   }
 
@@ -9147,21 +9239,20 @@ function AddPositionDrawer({ editingPosition, onClose, onSubmit }) {
            * está caído, stock/cedear/on caen a Input libre como fallback.
            */}
           {(() => {
-            const { mode, options } = getTickerOptions(
+            const result = getTickerOptions(
               form.instrument_type,
               form.ticker,
               instrumentCatalog,
             );
-            if (mode === "select") {
+            if (result.mode === "select") {
               return (
                 <FormSection label="Ticker" error={errors.ticker}>
                   <Select
                     value={form.ticker}
                     onChange={handleTickerChange}
-                    options={[
-                      { value: "", label: "Elegí un ticker..." },
-                      ...options,
-                    ]}
+                    placeholder="Elegí un ticker..."
+                    groups={result.groups}
+                    options={result.options}
                     hasError={Boolean(errors.ticker)}
                   />
                 </FormSection>
@@ -9603,7 +9694,19 @@ function MoneyInput({ value, onChange, placeholder, hasError }) {
   );
 }
 
-function Select({ value, onChange, options, hasError, disabled }) {
+/**
+ * Select nativo con soporte opcional para `<optgroup>`.
+ *
+ * Modo plano (legacy):
+ *   <Select options={[{value, label}, ...]} />
+ *
+ * Modo agrupado:
+ *   <Select groups={[{ label: "Grupo A", options: [{value, label}, ...] }, ...]} />
+ *
+ * Cuando se pasa `groups` se ignora `options` (excepto para una opción
+ * placeholder al inicio que el caller puede pasar como `placeholder`).
+ */
+function Select({ value, onChange, options, groups, placeholder, hasError, disabled }) {
   return (
     <select
       value={value}
@@ -9622,7 +9725,23 @@ function Select({ value, onChange, options, hasError, disabled }) {
         opacity: disabled ? 0.7 : 1,
       }}
     >
-      {options.map((opt) => (
+      {/* Placeholder opcional al inicio (ej: "Elegí un ticker...") */}
+      {placeholder && (
+        <option value="">{placeholder}</option>
+      )}
+
+      {/* Modo agrupado: cada group renderiza un <optgroup> */}
+      {groups && groups.length > 0 && groups.map((g, idx) => (
+        <optgroup key={`grp_${idx}_${g.label}`} label={g.label}>
+          {g.options.map((opt) => (
+            <option key={opt.value} value={opt.value}>{opt.label}</option>
+          ))}
+        </optgroup>
+      ))}
+
+      {/* Modo plano: lista directa de options. Si vino tanto groups como
+          options, options solo se renderiza si NO hay groups. */}
+      {(!groups || groups.length === 0) && options && options.map((opt) => (
         <option key={opt.value} value={opt.value}>{opt.label}</option>
       ))}
     </select>
