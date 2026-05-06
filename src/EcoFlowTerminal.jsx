@@ -3239,15 +3239,6 @@ function DashboardOverview({ positions, fxState, bondPricesState, cashState, onI
   // CUÁNTO TENÉS DISPONIBLE HOY antes que cuánto vas a recibir adelante.
   const [liquidityWindow, setLiquidityWindow] = useState("CI");
 
-  // El botón "Actualizar" refresca AMBAS fuentes de datos: FX + precios bonos
-  const handleRefreshAll = useCallback(() => {
-    refreshFx();
-    refreshBondPrices();
-  }, [refreshFx, refreshBondPrices]);
-
-  // Loading combinado: muestra el estado más conservador (loader si ALGO carga)
-  const anyLoading = fxLoading || pricesLoading;
-
   return (
     <div style={{ marginBottom: 32 }}>
       {/* 1. Toggle moneda de valuación */}
@@ -3301,13 +3292,9 @@ function DashboardOverview({ positions, fxState, bondPricesState, cashState, onI
 
       {/* 3. Línea de cotizaciones (entre las cards principales y los
             flujos proyectados — ahí queda visualmente integrada con la
-            zona de saldo + liquidez). */}
-      <FxLine
-        fx={fx}
-        loading={anyLoading}
-        error={fxError}
-        onRefresh={handleRefreshAll}
-      />
+            zona de saldo + liquidez). El botón Actualizar global vive
+            ahora en el header de Posiciones consolidadas. */}
+      <FxLine fx={fx} error={fxError} />
 
       {/* 4. Flujos proyectados (V1: lista simple) */}
       <FlowsSection positions={positions} bondPrices={bondPrices} fx={fx} />
@@ -3333,7 +3320,7 @@ function DashboardOverview({ positions, fxState, bondPricesState, cashState, onI
  *     la operativa de la fintech AR)
  */
 
-function FxLine({ fx, loading, error, onRefresh }) {
+function FxLine({ fx, error }) {
   const items = [
     { key: "mayorista", label: "Dólar Spot" },
     { key: "mep",       label: "Dólar MEP"  },
@@ -3346,20 +3333,22 @@ function FxLine({ fx, loading, error, onRefresh }) {
       style={{
         backgroundColor: C.panel,
         border: `1px solid ${C.border}`,
-        marginBottom: 18,
+        marginBottom: 14,
       }}
     >
-      {/* Header del bloque con label tipo dashboard + botón actualizar */}
+      {/* Header del bloque con label tipo dashboard.
+       *  Compacto: padding chico, sin botón actualizar (el botón global vive
+       *  ahora en el header de Posiciones consolidadas, al lado de Agregar).
+       */}
       <div
-        className="flex items-center justify-between"
         style={{
-          padding: "8px 14px",
+          padding: "5px 12px",
           borderBottom: `1px solid ${C.border}`,
         }}
       >
         <span
           style={{
-            fontSize: 9,
+            fontSize: 8.5,
             letterSpacing: "0.22em",
             color: C.dim,
             textTransform: "uppercase",
@@ -3369,29 +3358,9 @@ function FxLine({ fx, loading, error, onRefresh }) {
         >
           Cotizaciones del día
         </span>
-        <button
-          onClick={onRefresh}
-          className="eco-refresh-btn"
-          disabled={loading}
-          style={{
-            backgroundColor: "transparent",
-            border: `1px solid ${C.border}`,
-            color: C.muted,
-            padding: "3px 9px",
-            fontSize: 10,
-            fontFamily: "'Roboto', sans-serif",
-            cursor: loading ? "wait" : "pointer",
-            display: "flex",
-            alignItems: "center",
-            gap: 6,
-          }}
-        >
-          <RefreshCw size={10} strokeWidth={1.8} className={loading ? "eco-spin" : undefined} />
-          {loading ? "Cargando" : "Actualizar"}
-        </button>
       </div>
 
-      {/* Grid de 4 cotizaciones con separadores verticales */}
+      {/* Grid de 4 cotizaciones con separadores verticales — ahora más compacto */}
       <div
         className="grid"
         style={{
@@ -3408,17 +3377,17 @@ function FxLine({ fx, loading, error, onRefresh }) {
             <div
               key={it.key}
               style={{
-                padding: "12px 16px",
+                padding: "8px 12px",
                 borderRight: idx < items.length - 1 ? `1px solid ${C.border}` : "none",
                 display: "flex",
                 flexDirection: "column",
-                gap: 8,
+                gap: 5,
               }}
             >
               {/* Nombre del dólar */}
               <span
                 style={{
-                  fontSize: 9,
+                  fontSize: 8.5,
                   letterSpacing: "0.18em",
                   color: C.muted,
                   textTransform: "uppercase",
@@ -3430,14 +3399,14 @@ function FxLine({ fx, loading, error, onRefresh }) {
               </span>
 
               {empty ? (
-                <span style={{ fontSize: 16, color: C.dim, fontFamily: "'JetBrains Mono', monospace" }}>—</span>
+                <span style={{ fontSize: 13, color: C.dim, fontFamily: "'JetBrains Mono', monospace" }}>—</span>
               ) : (
-                /* Dos columnas: Compra | Venta, con jerarquía visual */
-                <div className="flex items-baseline" style={{ gap: 18 }}>
-                  <div className="flex flex-col" style={{ gap: 2 }}>
+                /* Dos columnas: Compra | Venta, formato compacto inline */
+                <div className="flex items-baseline" style={{ gap: 14 }}>
+                  <div className="flex flex-col" style={{ gap: 1 }}>
                     <span
                       style={{
-                        fontSize: 9,
+                        fontSize: 8,
                         color: C.dim,
                         letterSpacing: "0.06em",
                         textTransform: "uppercase",
@@ -3448,7 +3417,7 @@ function FxLine({ fx, loading, error, onRefresh }) {
                     </span>
                     <span
                       style={{
-                        fontSize: 14,
+                        fontSize: 12,
                         color: C.muted,
                         fontFamily: "'JetBrains Mono', monospace",
                         fontWeight: 500,
@@ -3458,10 +3427,10 @@ function FxLine({ fx, loading, error, onRefresh }) {
                       {buy != null ? fmtCurrencyValue(buy, "ARS") : "—"}
                     </span>
                   </div>
-                  <div className="flex flex-col" style={{ gap: 2 }}>
+                  <div className="flex flex-col" style={{ gap: 1 }}>
                     <span
                       style={{
-                        fontSize: 9,
+                        fontSize: 8,
                         color: C.dim,
                         letterSpacing: "0.06em",
                         textTransform: "uppercase",
@@ -3472,7 +3441,7 @@ function FxLine({ fx, loading, error, onRefresh }) {
                     </span>
                     <span
                       style={{
-                        fontSize: 14,
+                        fontSize: 12,
                         color: C.text,
                         fontFamily: "'JetBrains Mono', monospace",
                         fontWeight: 600,
@@ -6023,6 +5992,125 @@ function applyConventionToValue(instrumentType, qty, price) {
  *
  * El dashboard "tipo Balanz" con KPIs arriba viene en el Sub-paso 3.
  */
+/* ─────────────── DataSourcesFooter ───────────────
+ *
+ * Footer minimalista que se ubica al final del Portfolio dashboard
+ * (después de "Últimas operaciones"). Muestra:
+ *
+ *   - FUENTES: las APIs externas que alimentan el dashboard (data912
+ *     para precios de bonos, dolarapi para FX).
+ *   - AUTO-REFRESH: cada cuánto se reactualizan los datos.
+ *     Detecta automáticamente si estamos en horario de mercado
+ *     (10:00-17:00 ART, día hábil BYMA) y muestra 5 MIN o 30 MIN.
+ *   - ÚLTIMA ACT: tiempo relativo desde la actualización más reciente
+ *     (toma el max entre FX y bondPrices). Se re-renderiza cada
+ *     segundo para que el contador siga corriendo en pantalla.
+ *
+ * Estilo: replica el footer del módulo Carry Trade (mismo padding,
+ * mismas separaciones por bullet, mismas tipografías).
+ */
+function DataSourcesFooter({ fxLastUpdated, pricesLastFetch }) {
+  // Re-render cada segundo para que el "hace Xs" siga avanzando aunque
+  // no haya cambios en las props.
+  const [, setNowTick] = useState(0);
+  useEffect(() => {
+    const id = setInterval(() => setNowTick((n) => n + 1), 1000);
+    return () => clearInterval(id);
+  }, []);
+
+  // Detectar horario de mercado para mostrar "EN HORARIO" o "FUERA DE HORARIO"
+  // y la frecuencia de auto-refresh (5 min vs 30 min).
+  const { intervalLabel, statusLabel } = useMemo(() => {
+    const now = new Date();
+    const arDateStr = now.toLocaleDateString("en-CA", {
+      timeZone: "America/Argentina/Buenos_Aires",
+    });
+    const arHourStr = now.toLocaleTimeString("en-GB", {
+      timeZone: "America/Argentina/Buenos_Aires",
+      hour12: false,
+    });
+    const arHour = parseInt(arHourStr.slice(0, 2), 10);
+    const isMarketHours = arHour >= 10 && arHour < 17;
+    const isBizDay = !isNonBusinessDay(arDateStr);
+    const onMarket = isMarketHours && isBizDay;
+    return {
+      intervalLabel: onMarket ? "5 MIN" : "30 MIN",
+      statusLabel: onMarket ? "EN HORARIO" : "FUERA DE HORARIO",
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [/* recalcula con cada tick gracias al re-render del setNowTick */]);
+
+  // Última actualización: el timestamp más reciente entre FX y bondPrices.
+  // Si ninguno cargó todavía, mostramos "—".
+  const lastActLabel = useMemo(() => {
+    const fx = fxLastUpdated ? new Date(fxLastUpdated).getTime() : 0;
+    const px = pricesLastFetch ? new Date(pricesLastFetch).getTime() : 0;
+    const latest = Math.max(fx, px);
+    if (!latest) return "—";
+    const diffSec = Math.max(0, Math.floor((Date.now() - latest) / 1000));
+    if (diffSec < 60) return `HACE ${diffSec}S`;
+    if (diffSec < 3600) return `HACE ${Math.floor(diffSec / 60)}M`;
+    if (diffSec < 86400) return `HACE ${Math.floor(diffSec / 3600)}H`;
+    return `HACE ${Math.floor(diffSec / 86400)}D`;
+    // dependencias declaradas explícitamente; el tick fuerza re-render
+    // pero estos memos sólo recalculan si cambian las props o el tiempo
+    // efectivamente computado adentro.
+  }, [fxLastUpdated, pricesLastFetch]);
+
+  // Estilo de cada label "etiqueta: valor" en la línea.
+  const sepStyle = {
+    color: C.dim,
+    margin: "0 8px",
+    fontSize: 9,
+  };
+  const tagStyle = {
+    color: C.dim,
+    fontSize: 9,
+    letterSpacing: "0.18em",
+    fontWeight: 500,
+  };
+  const valueStyle = {
+    color: C.muted,
+    fontSize: 9,
+    letterSpacing: "0.14em",
+    fontWeight: 600,
+    marginLeft: 6,
+  };
+
+  return (
+    <div
+      style={{
+        marginTop: 18,
+        padding: "10px 14px",
+        backgroundColor: C.deep,
+        border: `1px solid ${C.border}`,
+        fontFamily: "'Roboto', sans-serif",
+        textTransform: "uppercase",
+        whiteSpace: "nowrap",
+        overflow: "hidden",
+      }}
+    >
+      <span style={tagStyle}>FUENTES:</span>
+      <span style={valueStyle}>DATA912.COM</span>
+      <span style={sepStyle}>·</span>
+      <span style={valueStyle}>DOLARAPI.COM</span>
+
+      <span style={sepStyle}>·</span>
+
+      <span style={tagStyle}>AUTO-REFRESH:</span>
+      <span style={valueStyle}>{intervalLabel}</span>
+      <span style={sepStyle}>·</span>
+      <span style={valueStyle}>{statusLabel}</span>
+
+      <span style={sepStyle}>·</span>
+
+      <span style={tagStyle}>ÚLTIMA ACT:</span>
+      <span style={valueStyle}>{lastActLabel}</span>
+    </div>
+  );
+}
+
+
 function PortfolioDashboard({ onNavigate }) {
   const { user } = useAuth();
   const { positions, loading, error, addPosition, updatePosition, deletePosition } = useUserPositions();
@@ -6038,6 +6126,68 @@ function PortfolioDashboard({ onNavigate }) {
   // (un solo fetch en lugar de duplicarlo).
   const fxState = useDashboardFx();
   const bondPricesState = useBondPrices();
+
+  // Refresh global: el botón "Actualizar" en el header de Posiciones
+  // consolidadas (y el auto-refresh inteligente) refresca AMBAS fuentes:
+  // FX + precios de bonos. Loading combinado se usa para mostrar el
+  // estado en el botón.
+  const handleRefreshAll = useCallback(() => {
+    fxState.refresh();
+    bondPricesState.refresh();
+  }, [fxState, bondPricesState]);
+  const anyLoading = fxState.loading || bondPricesState.loading;
+
+  // ─────────────── Auto-refresh inteligente ───────────────
+  //
+  // Refresca FX + precios de bonos automáticamente con frecuencia que
+  // depende del horario:
+  //
+  //   - Día hábil entre 10:00 y 17:00 ART (mercado abierto BYMA/ROFEX):
+  //     refresh cada 5 minutos. Los precios cambian rápido y el usuario
+  //     necesita data fresca para tomar decisiones.
+  //
+  //   - Resto del tiempo (fines de semana, feriados, fuera de horario):
+  //     refresh cada 30 minutos. Solo para mantener algo de frescura
+  //     sin gastar API calls innecesarios — el mercado está cerrado.
+  //
+  // El cálculo del horario se hace en zona horaria Argentina (no la
+  // del navegador) para que un usuario fuera del país vea el mismo
+  // comportamiento que uno local. Detectamos día hábil con
+  // isNonBusinessDay() que ya excluye fines de semana + feriados BYMA.
+  //
+  // El intervalo se recalcula cada vez que cambia la hora (al cruzar
+  // las 10:00 o las 17:00, o al cambiar de día), gracias al useEffect
+  // que se reejecuta con `tick`.
+  const [tick, setTick] = useState(0);
+
+  useEffect(() => {
+    // Determinar frecuencia según horario actual
+    const now = new Date();
+    const arDateStr = now.toLocaleDateString("en-CA", {
+      timeZone: "America/Argentina/Buenos_Aires",
+    });
+    const arHourStr = now.toLocaleTimeString("en-GB", {
+      timeZone: "America/Argentina/Buenos_Aires",
+      hour12: false,
+    });
+    const arHour = parseInt(arHourStr.slice(0, 2), 10);
+
+    const isMarketHours = arHour >= 10 && arHour < 17;
+    const isBizDay = !isNonBusinessDay(arDateStr);
+
+    const intervalMs = (isMarketHours && isBizDay)
+      ? 5 * 60 * 1000   // 5 min en horario de mercado
+      : 30 * 60 * 1000; // 30 min fuera de horario
+
+    const id = setInterval(() => {
+      handleRefreshAll();
+      // Forzamos re-evaluación del intervalo por si cambió el horario
+      // (ej: a las 17:00 cruzamos de "mercado abierto" a "cerrado")
+      setTick((t) => t + 1);
+    }, intervalMs);
+
+    return () => clearInterval(id);
+  }, [tick, handleRefreshAll]);
 
   // Estados UI
   const [drawerOpen, setDrawerOpen] = useState(false);
@@ -6234,6 +6384,8 @@ function PortfolioDashboard({ onNavigate }) {
             onDelete={(p) => setConfirmingDelete(p)}
             onUpdatePrice={handleUpdateCurrentPrice}
             onAdd={openCreate}
+            onRefresh={handleRefreshAll}
+            refreshing={anyLoading}
           />
 
           {/* Historial de operaciones (Modelo A): lista cruda de cada
@@ -6249,6 +6401,14 @@ function PortfolioDashboard({ onNavigate }) {
             onEditCashMovement={(m) => setEditingCashMovement(m)}
             onDeleteCashMovement={(m) => setConfirmingDeleteCash(m)}
             onNavigateToLibro={onNavigate ? () => onNavigate("libro-operaciones") : null}
+          />
+
+          {/* Footer informativo: fuentes de datos + estado auto-refresh.
+              Replica el estilo de Carry Trade. La "última actualización"
+              toma el timestamp más reciente entre FX y precios de bonos. */}
+          <DataSourcesFooter
+            fxLastUpdated={fxState.lastUpdated}
+            pricesLastFetch={bondPricesState.lastFetch}
           />
         </>
       )}
@@ -6415,6 +6575,8 @@ function ConsolidatedSection({
   onDelete,
   onUpdatePrice,
   onAdd,
+  onRefresh,
+  refreshing,
 }) {
   // Consolidamos sobre TODAS las positions filtradas (incluyendo cerradas).
   // Después separamos en `open` y `closed` para que cada una vaya a su
@@ -6445,41 +6607,83 @@ function ConsolidatedSection({
           Posiciones consolidadas ({open.length})
         </span>
 
-        {/* Botón "Agregar posición" — vive acá (al lado del header de la
-            sección) porque es la acción principal de Posiciones
-            consolidadas. Antes estaba arriba al lado del saludo, pero
-            visualmente queda mejor anclado a la sección donde produce
-            efecto directo. */}
-        {onAdd && (
-          <button
-            onClick={onAdd}
-            className="flex items-center gap-2"
-            style={{
-              backgroundColor: C.accent,
-              color: C.bg,
-              border: "none",
-              padding: "8px 14px",
-              cursor: "pointer",
-              fontSize: 12.5,
-              fontWeight: 600,
-              fontFamily: "'Roboto', sans-serif",
-              letterSpacing: "0.01em",
-              transition: "transform 120ms ease, box-shadow 120ms ease",
-              whiteSpace: "nowrap",
-            }}
-            onMouseEnter={(e) => {
-              e.currentTarget.style.transform = "translateY(-1px)";
-              e.currentTarget.style.boxShadow = `0 4px 12px ${C.accentGlow}`;
-            }}
-            onMouseLeave={(e) => {
-              e.currentTarget.style.transform = "translateY(0)";
-              e.currentTarget.style.boxShadow = "none";
-            }}
-          >
-            <Plus size={14} strokeWidth={2.2} />
-            Agregar posición
-          </button>
-        )}
+        <div className="flex items-center gap-2">
+          {/* Botón "Actualizar" (secundario): refresca FX + bondPrices.
+              Reemplaza al botón que vivía en el header de Cotizaciones
+              del día. Acción global de refresh manual. */}
+          {onRefresh && (
+            <button
+              onClick={onRefresh}
+              disabled={refreshing}
+              className="flex items-center gap-2"
+              style={{
+                backgroundColor: "transparent",
+                border: `1px solid ${C.border}`,
+                color: C.muted,
+                padding: "7px 12px",
+                cursor: refreshing ? "wait" : "pointer",
+                fontSize: 11.5,
+                fontWeight: 500,
+                fontFamily: "'Roboto', sans-serif",
+                letterSpacing: "0.01em",
+                transition: "all 120ms ease",
+                whiteSpace: "nowrap",
+              }}
+              onMouseEnter={(e) => {
+                if (refreshing) return;
+                e.currentTarget.style.color = C.text;
+                e.currentTarget.style.borderColor = C.borderStrong;
+              }}
+              onMouseLeave={(e) => {
+                e.currentTarget.style.color = C.muted;
+                e.currentTarget.style.borderColor = C.border;
+              }}
+            >
+              <RefreshCw
+                size={12}
+                strokeWidth={1.8}
+                className={refreshing ? "eco-spin" : undefined}
+              />
+              {refreshing ? "Actualizando" : "Actualizar"}
+            </button>
+          )}
+
+          {/* Botón "Agregar posición" — vive acá (al lado del header de la
+              sección) porque es la acción principal de Posiciones
+              consolidadas. Antes estaba arriba al lado del saludo, pero
+              visualmente queda mejor anclado a la sección donde produce
+              efecto directo. */}
+          {onAdd && (
+            <button
+              onClick={onAdd}
+              className="flex items-center gap-2"
+              style={{
+                backgroundColor: C.accent,
+                color: C.bg,
+                border: "none",
+                padding: "8px 14px",
+                cursor: "pointer",
+                fontSize: 12.5,
+                fontWeight: 600,
+                fontFamily: "'Roboto', sans-serif",
+                letterSpacing: "0.01em",
+                transition: "transform 120ms ease, box-shadow 120ms ease",
+                whiteSpace: "nowrap",
+              }}
+              onMouseEnter={(e) => {
+                e.currentTarget.style.transform = "translateY(-1px)";
+                e.currentTarget.style.boxShadow = `0 4px 12px ${C.accentGlow}`;
+              }}
+              onMouseLeave={(e) => {
+                e.currentTarget.style.transform = "translateY(0)";
+                e.currentTarget.style.boxShadow = "none";
+              }}
+            >
+              <Plus size={14} strokeWidth={2.2} />
+              Agregar posición
+            </button>
+          )}
+        </div>
       </div>
 
       {/* Filtros (chips por tipo) */}
