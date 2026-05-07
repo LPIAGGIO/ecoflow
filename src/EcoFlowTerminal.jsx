@@ -3590,10 +3590,11 @@ function useDashboardFx() {
  *   - /api/letras (lecaps, boncaps, duales) — endpoint /live/arg_notes
  *   - /api/bonos  (bonos USD soberanos)     — endpoint /live/arg_bonds
  *
- * data912 NO expone histórico ni cierre del día anterior, así que la
- * variación "día" V1 la calculamos versus entry_price (P&L histórico
- * acumulado). Cuando implementemos snapshots diarios en Supabase
- * (pendiente B1), reemplazaremos esto por la variación real del día.
+ * data912 expone `pct_change` (variación % vs cierre anterior) que
+ * usamos para derivar el cierre del día anterior matemáticamente
+ * (cierre_ayer = price / (1 + pct_change/100)). Eso permite calcular
+ * P&L diario sin necesidad de snapshots históricos en BD.
+ * Para BYMA, viene `previousClose` directo y `changePct` ya pre-calculado.
  *
  * Cache:
  *   - sessionStorage con TTL de 5 minutos: si los datos son recientes
@@ -3735,18 +3736,36 @@ function useBondPrices() {
         // Priorizamos letras si hay duplicados (su data es más
         // específica). El campo `c` es el último precio operado; si no
         // hay, usamos `px_ask` como fallback (consistente con CarryTrade).
+        // data912 expone `pct_change` (variación % vs cierre anterior) —
+        // de ahí derivamos el cierre anterior matemáticamente para
+        // calcular P&L diario sin necesidad de snapshots históricos.
         for (const item of [...letrasArr, ...bondsArr]) {
           if (!item?.symbol) continue;
           const ticker = String(item.symbol).trim().toUpperCase();
           if (map[ticker]) continue; // BYMA gana si ya estaba
           const price = item.c ?? item.px_ask ?? null;
           if (price == null || price <= 0) continue;
+
+          // Derivar cierre anterior desde pct_change cuando viene.
+          // Fórmula: cierre_ayer = price / (1 + pct_change/100)
+          let changePct = null;
+          let previousClose = null;
+          if (item.pct_change != null && Number.isFinite(Number(item.pct_change))) {
+            changePct = Number(item.pct_change);
+            const denom = 1 + changePct / 100;
+            if (denom > 0) {
+              previousClose = Number(price) / denom;
+            }
+          }
+
           map[ticker] = {
             price: Number(price),
             bid: item.px_bid != null ? Number(item.px_bid) : null,
             ask: item.px_ask != null ? Number(item.px_ask) : null,
             volume: item.q_op != null ? Number(item.q_op) : null,
             source: "data912",
+            changePct,
+            previousClose,
           };
         }
 
@@ -3772,6 +3791,118 @@ function useBondPrices() {
     })();
 
     return () => { mounted = false; };
+  }, [refreshKey]);
+
+  const refresh = useCallback(() => setRefreshKey((k) => k + 1), []);
+
+  return { prices, loading, error, lastFetch, refresh };
+}
+
+
+/* ─────────────── Hook: useStockPrices ───────────────
+ *
+ * Lee precios actualizados de acciones argentinas + CEDEARs desde
+ * data912 vía:
+ *   - /api/acciones (panel general BYMA)         → /live/arg_stocks
+ *   - /api/cedears  (todos los CEDEARs operados) → /live/arg_cedears
+ *
+ * data912 expone `pct_change` (variación % vs cierre anterior). Igual
+ * que useBondPrices, derivamos el cierre anterior matemáticamente:
+ *   previousClose = price / (1 + pct_change/100)
+ * Eso permite calcular P&L diario sin snapshots históricos.
+ *
+ * Auto-refresh cada 5 minutos en horario activo, manual fuera.
+ */
+function useStockPrices() {
+  const [prices, setPrices] = useState({});
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+  const [lastFetch, setLastFetch] = useState(null);
+  const [refreshKey, setRefreshKey] = useState(0);
+
+  useEffect(() => {
+    let mounted = true;
+    let timeoutId;
+
+    const fetchAll = async () => {
+      try {
+        setLoading(true);
+        const bust = `?_=${Date.now()}`;
+
+        const [stocksRes, cedearsRes] = await Promise.all([
+          fetch(`/api/acciones${bust}`),
+          fetch(`/api/cedears${bust}`),
+        ]);
+
+        const stocksArr = stocksRes.ok ? await stocksRes.json() : [];
+        const cedearsArr = cedearsRes.ok ? await cedearsRes.json() : [];
+
+        const map = {};
+
+        const parseItem = (item) => {
+          if (!item?.symbol) return;
+          const ticker = String(item.symbol).trim().toUpperCase();
+          if (map[ticker]) return;
+
+          const price = item.c ?? item.px_ask ?? null;
+          if (price == null || Number(price) <= 0) return;
+
+          let changePct = null;
+          let previousClose = null;
+          if (item.pct_change != null && Number.isFinite(Number(item.pct_change))) {
+            changePct = Number(item.pct_change);
+            const denom = 1 + changePct / 100;
+            if (denom > 0) {
+              previousClose = Number(price) / denom;
+            }
+          }
+
+          map[ticker] = {
+            price: Number(price),
+            bid: item.px_bid != null ? Number(item.px_bid) : null,
+            ask: item.px_ask != null ? Number(item.px_ask) : null,
+            volume: item.v != null ? Number(item.v) : null,
+            source: "data912",
+            changePct,
+            previousClose,
+          };
+        };
+
+        for (const item of stocksArr) parseItem(item);
+        for (const item of cedearsArr) parseItem(item);
+
+        if (!mounted) return;
+        const now = new Date().toISOString();
+        setPrices(map);
+        setLastFetch(now);
+        setLoading(false);
+        setError(null);
+
+        console.info(
+          `[useStockPrices] ${Object.keys(map).length} tickers cargados ` +
+          `(stocks: ${stocksArr.length}, cedears: ${cedearsArr.length})`
+        );
+      } catch (e) {
+        if (!mounted) return;
+        setError(e.message || "Error cargando precios de acciones");
+        setLoading(false);
+      }
+    };
+
+    fetchAll();
+
+    const scheduleNext = () => {
+      const intervalMs = isActiveMarketWindow() ? 5 * 60 * 1000 : 30 * 60 * 1000;
+      timeoutId = setTimeout(() => {
+        fetchAll().finally(scheduleNext);
+      }, intervalMs);
+    };
+    scheduleNext();
+
+    return () => {
+      mounted = false;
+      if (timeoutId) clearTimeout(timeoutId);
+    };
   }, [refreshKey]);
 
   const refresh = useCallback(() => setRefreshKey((k) => k + 1), []);
@@ -4529,12 +4660,15 @@ function fmtDateShort(iso) {
  * y los números reales los conectamos al final.
  */
 
-function DashboardOverview({ positions, fxState, bondPricesState, futurePricesState, cashState, onIngresar, onRetirar }) {
+function DashboardOverview({ positions, fxState, bondPricesState, futurePricesState, stockPricesState, cashState, onIngresar, onRetirar }) {
   const { fx, loading: fxLoading, error: fxError, lastUpdated: fxLastUpdated, refresh: refreshFx } = fxState;
   const { prices: bondPrices, loading: pricesLoading, error: pricesError, lastFetch: pricesLastFetch, refresh: refreshBondPrices } = bondPricesState;
   // futurePricesState viene de PortfolioDashboard (un solo hook compartido
   // entre Dashboard y ConsolidatedSection para evitar dos pollings duplicados).
   const futurePrices = futurePricesState?.prices || {};
+  // stockPricesState viene del nivel PortfolioDashboard (un único hook
+  // useStockPrices compartido). Si no llega (caso edge), usamos {} vacío.
+  const stockPrices = stockPricesState?.prices || {};
   const balanceByCurrency = cashState?.balanceByCurrency || { "ARS": 0, "USD-MEP": 0, "USD-CCL": 0 };
   const movements = cashState?.movements || [];
 
@@ -4576,6 +4710,7 @@ function DashboardOverview({ positions, fxState, bondPricesState, futurePricesSt
           fx={fx}
           bondPrices={bondPrices}
           futurePrices={futurePrices}
+          stockPrices={stockPrices}
           valuationCurrency={valuationCurrency}
           balanceByCurrency={balanceByCurrency}
           onIngresar={onIngresar}
@@ -4916,7 +5051,7 @@ function ValuationToggle({ value, onChange }) {
 
 /* ─────────────── Card 1: Total de cartera ─────────────── */
 
-function TotalCard({ positions, fx, bondPrices, futurePrices, valuationCurrency, balanceByCurrency, onIngresar, onRetirar }) {
+function TotalCard({ positions, fx, bondPrices, futurePrices, stockPrices, valuationCurrency, balanceByCurrency, onIngresar, onRetirar }) {
   // V2: ahora usamos precios de mercado de data912 cuando están disponibles.
   // El P&L se calcula como market - cost. Si no hay precio actualizado para
   // alguna posición, esa cae al fallback "a costo" y aparece en pricesFromCost.
@@ -4924,6 +5059,54 @@ function TotalCard({ positions, fx, bondPrices, futurePrices, valuationCurrency,
     () => computePortfolioTotals(positions, fx, valuationCurrency, bondPrices, futurePrices),
     [positions, fx, valuationCurrency, bondPrices, futurePrices]
   );
+
+  // P&L del día (variación intra-día desde el cierre anterior). Se suma
+  // posición por posición usando computeDailyPnL, que devuelve el P&L
+  // en moneda de la posición. Después convertimos a la valuationCurrency.
+  // Posiciones sin pct_change disponible se ignoran (no rompen el total).
+  const dailyTotals = useMemo(() => {
+    if (!fx || !positions) return { pnl: null, base: 0, hasAny: false };
+    let pnlInValuation = 0;
+    let prevValueInValuation = 0;
+    let hasAny = false;
+
+    for (const p of positions) {
+      const d = computeDailyPnL(p, bondPrices, futurePrices, stockPrices);
+      if (!d || d.pnl == null || !Number.isFinite(d.pnl)) continue;
+
+      // Moneda de la posición (igual lógica que en computePortfolioTotals)
+      const cur = p.currency || "ARS";
+      const conv = convertValue(d.pnl, cur, valuationCurrency, fx);
+      if (conv == null) continue;
+      pnlInValuation += conv;
+      hasAny = true;
+
+      // Valor "ayer" de la posición (para % vs cierre anterior).
+      // Aproximamos como valor_actual - pnl_diario en la misma moneda.
+      const valNow = positionValueAtMarket(p, bondPrices, futurePrices, stockPrices);
+      if (valNow?.value != null) {
+        const valNowConv = convertValue(valNow.value, cur, valuationCurrency, fx);
+        if (valNowConv != null) {
+          // valor_ayer = valor_hoy - pnl_diario
+          prevValueInValuation += (valNowConv - conv);
+        }
+      }
+    }
+
+    return {
+      pnl: hasAny ? pnlInValuation : null,
+      base: prevValueInValuation,
+      hasAny,
+    };
+  }, [positions, bondPrices, futurePrices, stockPrices, fx, valuationCurrency]);
+
+  const showDaily = dailyTotals.hasAny && dailyTotals.pnl != null;
+  const dailyIsPositive = showDaily && dailyTotals.pnl >= 0;
+  const dailyColor = !showDaily ? C.dim : dailyIsPositive ? C.green : C.red;
+  const dailySymbol = !showDaily ? "" : dailyIsPositive ? "+" : "";
+  const dailyPct = (showDaily && dailyTotals.base > 0)
+    ? (dailyTotals.pnl / dailyTotals.base) * 100
+    : null;
 
   // Cash neto en la moneda activa: convertimos el saldo de cada moneda
   // a la valuationCurrency seleccionada y los sumamos. Si el saldo de
@@ -4994,7 +5177,7 @@ function TotalCard({ positions, fx, bondPrices, futurePrices, valuationCurrency,
       {/* P&L: aparece solo si hay precio de mercado real para al menos
           una posición. Si no, mostramos las mini-stats de antes. */}
       {showPnl ? (
-        <div className="flex items-center gap-2" style={{ marginBottom: 12 }}>
+        <div className="flex items-center gap-2" style={{ marginBottom: 6 }}>
           <span
             style={{
               fontSize: 13,
@@ -5025,11 +5208,51 @@ function TotalCard({ positions, fx, bondPrices, futurePrices, valuationCurrency,
           </span>
         </div>
       ) : (
-        <div style={{ fontSize: 11, color: C.dim, marginBottom: 12, fontFamily: "'Roboto', sans-serif" }}>
+        <div style={{ fontSize: 11, color: C.dim, marginBottom: 6, fontFamily: "'Roboto', sans-serif" }}>
           {totals.pricesFromMarket === 0
             ? "P&L disponible cuando haya precios actualizados"
             : "—"}
         </div>
+      )}
+
+      {/* P&L del día (variación intra-día vs cierre anterior). Línea
+          secundaria: usa los mismos colores que P&L total pero más chica.
+          Si no hay datos para ninguna posición (todas son cauciones, FCI,
+          etc.), no la mostramos. */}
+      {showDaily && (
+        <div className="flex items-center gap-2" style={{ marginBottom: 12 }}>
+          <span
+            style={{
+              fontSize: 12,
+              fontWeight: 500,
+              color: dailyColor,
+              fontFamily: "'JetBrains Mono', monospace",
+            }}
+          >
+            {dailySymbol}{fmtCurrencyValue(dailyTotals.pnl, valuationCurrency === "ARS" ? "ARS" : "USD")}
+          </span>
+          {dailyPct != null && (
+            <span
+              style={{
+                fontSize: 10,
+                fontWeight: 500,
+                color: dailyColor,
+                fontFamily: "'JetBrains Mono', monospace",
+                backgroundColor: dailyIsPositive ? "rgba(74,222,128,0.10)" : "rgba(248,113,113,0.10)",
+                padding: "1px 6px",
+                borderRadius: 2,
+              }}
+            >
+              {dailySymbol}{dailyPct.toFixed(2)}%
+            </span>
+          )}
+          <span style={{ fontSize: 10, color: C.dim, fontFamily: "'Roboto', sans-serif" }}>
+            hoy
+          </span>
+        </div>
+      )}
+      {!showDaily && showPnl && (
+        <div style={{ marginBottom: 12 }} />
       )}
 
       {tcLine && (
@@ -5752,7 +5975,7 @@ function convertValue(amount, fromCurrency, toCurrency, fx) {
  *
  * @returns {{ price: number, source: 'primary'|'manual'|'byma'|'data912'|'market'|'cost' } | null}
  */
-function resolvePositionPrice(p, bondPrices, futurePrices) {
+function resolvePositionPrice(p, bondPrices, futurePrices, stockPrices) {
   const ticker = (p.ticker || "").trim().toUpperCase();
 
   // 1) Para futuros, intentamos Primary primero. Si tiene un precio fresco
@@ -5789,9 +6012,137 @@ function resolvePositionPrice(p, bondPrices, futurePrices) {
     }
   }
 
+  // 3b) Para acciones / CEDEARs leemos del hook useStockPrices (data912).
+  //     Para variantes de plaza (AAPLD/AAPLC) intentamos también el ticker
+  //     base (AAPL) como fallback — data912 expone el base, las variantes
+  //     no tienen feed propio en muchos casos.
+  if (
+    stockPrices &&
+    ticker &&
+    (p.instrument_type === "stock" || p.instrument_type === "cedear")
+  ) {
+    let m = stockPrices[ticker];
+    if (!m?.price) {
+      // Intentar base sin sufijo D/C (variante MEP/CCL → ARS base)
+      const last = ticker.slice(-1);
+      if ((last === "D" || last === "C") && ticker.length > 2) {
+        const base = ticker.slice(0, -1);
+        m = stockPrices[base];
+      }
+    }
+    if (m?.price > 0) {
+      return { price: m.price, source: "data912" };
+    }
+  }
+
   if (p.entry_price != null) {
     return { price: Number(p.entry_price), source: "cost" };
   }
+  return null;
+}
+
+/**
+ * Calcula el P&L diario de una posición (variación del día desde el cierre
+ * anterior). Usa pct_change/previousClose del feed de precios:
+ *   - Bonos / ONs: bondPrices[ticker].previousClose o changePct.
+ *   - Acciones / CEDEARs: stockPrices[ticker] (con fallback a base sin sufijo).
+ *   - Futuros: precio actual (LA) - settlement anterior (SE).
+ *
+ * Retorna { pnl, pct } o null si no hay datos suficientes.
+ *   - pnl: monto absoluto en moneda de la posición (sin convertir).
+ *   - pct: porcentaje vs cierre anterior.
+ *
+ * Para posiciones tipo "future", el P&L diario es:
+ *   (precio_actual - settlement) × cantidad × multiplier
+ * Para el resto:
+ *   (precio_actual - cierre_ayer) × cantidad
+ *
+ * Si la posición no tiene precio de mercado (cae a `cost` o `manual`),
+ * o si la fuente no expone cierre anterior, retorna null → la UI debe
+ * mostrar "—".
+ */
+function computeDailyPnL(p, bondPrices, futurePrices, stockPrices) {
+  if (!p || !p.ticker) return null;
+  const ticker = (p.ticker || "").trim().toUpperCase();
+  const qty = Number(p.quantity) || 0;
+  if (qty === 0) return null;
+
+  // ─── Futuros ──────────────────────────────────────────────
+  if (p.instrument_type === "future" && futurePrices) {
+    const fp = futurePrices[ticker];
+    if (fp?.price != null && fp?.settlement != null && !fp.error) {
+      const last = Number(fp.price);
+      const settle = Number(fp.settlement);
+      if (Number.isFinite(last) && Number.isFinite(settle) && settle > 0) {
+        const multiplier = Number(p.extra?.contract_size) || 1000;
+        // signo: COMPRA gana si sube, VENTA gana si baja.
+        const sign = (p.operation_type === "venta") ? -1 : 1;
+        const diffPerUnit = last - settle;
+        const pnl = sign * diffPerUnit * qty * multiplier;
+        const pct = (diffPerUnit / settle) * 100;
+        return { pnl, pct };
+      }
+    }
+    return null;
+  }
+
+  // ─── Bonos / ONs ──────────────────────────────────────────
+  if (
+    bondPrices &&
+    (p.instrument_type === "bond_ars" ||
+      p.instrument_type === "bond_usd" ||
+      p.instrument_type === "on")
+  ) {
+    const m = bondPrices[ticker];
+    if (m?.price > 0) {
+      let prev = m.previousClose;
+      if (prev == null && m.changePct != null) {
+        const denom = 1 + Number(m.changePct) / 100;
+        if (denom > 0) prev = Number(m.price) / denom;
+      }
+      if (prev != null && prev > 0) {
+        // Bonos cotizan cada 100 VN. P&L unidad = (price - prev) / 100 × cantidad
+        const diffPer100 = m.price - prev;
+        const sign = (p.operation_type === "venta") ? -1 : 1;
+        const pnl = sign * (diffPer100 / 100) * qty;
+        const pct = (diffPer100 / prev) * 100;
+        return { pnl, pct };
+      }
+    }
+    return null;
+  }
+
+  // ─── Acciones / CEDEARs ────────────────────────────────────
+  if (
+    stockPrices &&
+    (p.instrument_type === "stock" || p.instrument_type === "cedear")
+  ) {
+    let m = stockPrices[ticker];
+    if (!m?.price) {
+      const last = ticker.slice(-1);
+      if ((last === "D" || last === "C") && ticker.length > 2) {
+        const base = ticker.slice(0, -1);
+        m = stockPrices[base];
+      }
+    }
+    if (m?.price > 0) {
+      let prev = m.previousClose;
+      if (prev == null && m.changePct != null) {
+        const denom = 1 + Number(m.changePct) / 100;
+        if (denom > 0) prev = Number(m.price) / denom;
+      }
+      if (prev != null && prev > 0) {
+        const diffPerUnit = m.price - prev;
+        const sign = (p.operation_type === "venta") ? -1 : 1;
+        const pnl = sign * diffPerUnit * qty;
+        const pct = (diffPerUnit / prev) * 100;
+        return { pnl, pct };
+      }
+    }
+    return null;
+  }
+
+  // Otros tipos (caucion, fci, option, etc.): no tienen P&L diario por ahora.
   return null;
 }
 
@@ -5973,7 +6324,7 @@ function applyPriceToPosition(p, price) {
  *
  * Retorna `{ value, source }` o null si no se puede valuar.
  */
-function positionValueAtMarket(p, bondPrices, futurePrices) {
+function positionValueAtMarket(p, bondPrices, futurePrices, stockPrices) {
   // Cauciones: el valor es directamente la cantidad (es plata)
   if (p.instrument_type === "caucion") {
     return { value: Number(p.quantity) || 0, source: "cost" };
@@ -5983,7 +6334,7 @@ function positionValueAtMarket(p, bondPrices, futurePrices) {
   if (p.instrument_type === "future") {
     return positionFuturePnL(p, bondPrices, futurePrices);
   }
-  const resolved = resolvePositionPrice(p, bondPrices, futurePrices);
+  const resolved = resolvePositionPrice(p, bondPrices, futurePrices, stockPrices);
   if (!resolved) return null;
   return {
     value: applyPriceToPosition(p, resolved.price),
@@ -7415,6 +7766,9 @@ function PortfolioDashboard({ onNavigate }) {
   // (un solo fetch en lugar de duplicarlo).
   const fxState = useDashboardFx();
   const bondPricesState = useBondPrices();
+  // Precios de acciones argentinas + CEDEARs desde data912 con pct_change
+  // para calcular P&L diario sin snapshots históricos.
+  const stockPricesState = useStockPrices();
 
   // Tickers de futuros únicos en cartera para suscribirse a Primary API.
   // Los calculamos a este nivel (PortfolioDashboard) en vez de DashboardOverview
@@ -7648,6 +8002,7 @@ function PortfolioDashboard({ onNavigate }) {
             fxState={fxState}
             bondPricesState={bondPricesState}
             futurePricesState={futurePricesState}
+            stockPricesState={stockPricesState}
             cashState={cashState}
             onIngresar={() => setCashModalType("deposit")}
             onRetirar={() => setCashModalType("withdrawal")}
@@ -7659,6 +8014,7 @@ function PortfolioDashboard({ onNavigate }) {
             filteredPositions={filteredPositions}
             bondPrices={bondPricesState.prices}
             futurePrices={futurePricesState.prices}
+            stockPrices={stockPricesState.prices}
             filter={filter}
             setFilter={setFilter}
             presentTypes={presentTypes}
@@ -7858,6 +8214,7 @@ function ConsolidatedSection({
   filteredPositions,
   bondPrices,
   futurePrices,
+  stockPrices,
   filter,
   setFilter,
   presentTypes,
@@ -8020,6 +8377,9 @@ function ConsolidatedSection({
       ) : (
         <ConsolidatedTable
           consolidated={open}
+          bondPrices={bondPrices}
+          futurePrices={futurePrices}
+          stockPrices={stockPrices}
           onEdit={onEdit}
           onDelete={onDelete}
           onUpdatePrice={onUpdatePrice}
@@ -8112,6 +8472,9 @@ function ClosedPositionsSection({ closed, onEdit, onDelete, onUpdatePrice }) {
         <div style={{ marginTop: 0 }}>
           <ConsolidatedTable
             consolidated={closed}
+            bondPrices={bondPrices}
+            futurePrices={futurePrices}
+            stockPrices={stockPrices}
             onEdit={onEdit}
             onDelete={onDelete}
             onUpdatePrice={onUpdatePrice}
@@ -8318,7 +8681,7 @@ function OperationsHistorySection({
  * Las acciones (editar, borrar, cambiar precio) operan sobre las ops
  * individuales y delegan al callback del padre.
  */
-function ConsolidatedTable({ consolidated, onEdit, onDelete, onUpdatePrice, variant = "open" }) {
+function ConsolidatedTable({ consolidated, bondPrices, futurePrices, stockPrices, onEdit, onDelete, onUpdatePrice, variant = "open" }) {
   const [expanded, setExpanded] = useState(new Set());
   const isClosed = variant === "closed";
 
@@ -8349,7 +8712,8 @@ function ConsolidatedTable({ consolidated, onEdit, onDelete, onUpdatePrice, vari
               <PTh dense align="right">Cantidad neta</PTh>
               <PTh dense align="right">PPP</PTh>
               <PTh dense align="right">{isClosed ? "Último precio" : "Precio actual"}</PTh>
-              <PTh dense align="right">P&amp;L</PTh>
+              {!isClosed && <PTh dense align="right">P&amp;L Hoy</PTh>}
+              <PTh dense align="right">{isClosed ? "P&L" : "P&L Total"}</PTh>
               <PTh dense align="right">Total</PTh>
               <PTh dense>Moneda</PTh>
               <PTh dense align="right">Ops</PTh>
@@ -8360,6 +8724,9 @@ function ConsolidatedTable({ consolidated, onEdit, onDelete, onUpdatePrice, vari
               <ConsolidatedRow
                 key={g.groupKey}
                 group={g}
+                bondPrices={bondPrices}
+                futurePrices={futurePrices}
+                stockPrices={stockPrices}
                 expanded={expanded.has(g.groupKey)}
                 onToggle={() => toggle(g.groupKey)}
                 onEdit={onEdit}
@@ -8376,7 +8743,7 @@ function ConsolidatedTable({ consolidated, onEdit, onDelete, onUpdatePrice, vari
 }
 
 
-function ConsolidatedRow({ group, expanded, onToggle, onEdit, onDelete, onUpdatePrice, readOnlyPrice = false }) {
+function ConsolidatedRow({ group, bondPrices, futurePrices, stockPrices, expanded, onToggle, onEdit, onDelete, onUpdatePrice, readOnlyPrice = false }) {
   const meta = INSTRUMENT_TYPES[group.instrument_type] || {};
   const TypeIcon = meta.icon || Activity;
   const typeColor = meta.color ? C.cat[meta.color] : C.muted;
@@ -8388,6 +8755,61 @@ function ConsolidatedRow({ group, expanded, onToggle, onEdit, onDelete, onUpdate
 
   const pnlColor = group.pnl == null ? C.dim : group.pnl >= 0 ? C.green : C.red;
   const pnlSign = group.pnl == null ? "" : group.pnl >= 0 ? "+" : "";
+
+  // P&L diario del grupo: sumamos el P&L diario de cada operación viva.
+  // Para futuros usamos LA-SE; para bonos/acciones/CEDEARs usamos
+  // pct_change (derivamos cierre anterior). Si ninguna op del grupo tiene
+  // datos para calcularlo (típico: caucion, fci, opciones), dailyPnl=null.
+  const { dailyPnl, dailyPct } = useMemo(() => {
+    if (!group.operations || group.operations.length === 0) {
+      return { dailyPnl: null, dailyPct: null };
+    }
+
+    // Para todos los tipos no-future, el P&L diario por unidad es el mismo
+    // (depende solo del precio actual y cierre anterior). Calculamos UN
+    // delta y lo multiplicamos por la cantidad neta del grupo (signed):
+    // así una posición SHORT genera P&L negativo si el precio sube.
+    if (group.instrument_type !== "future") {
+      // Tomamos cualquier op del grupo (todas tienen el mismo ticker)
+      // pero le inyectamos la cantidad NETA del grupo (con signo) y un
+      // operation_type 'compra' — el signo ya queda capturado por netQty.
+      const sampleOp = {
+        ...group.operations[0],
+        quantity: group.netQty,
+        operation_type: "compra",
+      };
+      const d = computeDailyPnL(sampleOp, bondPrices, futurePrices, stockPrices);
+      if (!d) return { dailyPnl: null, dailyPct: null };
+      return { dailyPnl: d.pnl, dailyPct: d.pct };
+    }
+
+    // Futuros: cada operación tiene sign distinto (long/short).
+    // Para el P&L diario del grupo agregado: usamos precio actual y
+    // settlement del feed Primary, y aplicamos la cantidad NETA del grupo
+    // (positiva si net long, negativa si net short).
+    const ticker = (group.ticker || "").toUpperCase();
+    const fp = futurePrices?.[ticker];
+    if (!fp || fp.price == null || fp.settlement == null || fp.error) {
+      return { dailyPnl: null, dailyPct: null };
+    }
+    const last = Number(fp.price);
+    const settle = Number(fp.settlement);
+    if (!Number.isFinite(last) || !Number.isFinite(settle) || settle <= 0) {
+      return { dailyPnl: null, dailyPct: null };
+    }
+    // Multiplier: tomamos del primer op (asumimos consistente en el grupo)
+    const multiplier = Number(group.operations[0]?.extra?.contract_size) || 1000;
+    const netQty = Number(group.netQty) || 0;
+    if (netQty === 0) return { dailyPnl: null, dailyPct: null };
+    const diffPerUnit = last - settle;
+    return {
+      dailyPnl: diffPerUnit * netQty * multiplier,
+      dailyPct: (diffPerUnit / settle) * 100,
+    };
+  }, [group, bondPrices, futurePrices, stockPrices]);
+
+  const dailyColor = dailyPnl == null ? C.dim : dailyPnl >= 0 ? C.green : C.red;
+  const dailySign = dailyPnl == null ? "" : dailyPnl >= 0 ? "+" : "";
 
   // Para la celda de precio editable: como el grupo puede tener varias
   // operaciones, anclamos el current_price a la operación más reciente
@@ -8547,6 +8969,34 @@ function ConsolidatedRow({ group, expanded, onToggle, onEdit, onDelete, onUpdate
           )}
         </PTd>
         <PTd dense align="right">
+          {!readOnlyPrice && (
+            dailyPnl != null ? (
+              <div className="flex flex-col items-end" style={{ gap: 1 }}>
+                <span
+                  className="eco-mono"
+                  style={{ color: dailyColor, fontWeight: 500 }}
+                >
+                  {dailySign}{fmtNumber(dailyPnl, { maxDecimals: 2 })}
+                </span>
+                {dailyPct != null && (
+                  <span
+                    style={{
+                      fontSize: 9,
+                      fontWeight: 500,
+                      color: dailyColor,
+                      fontFamily: "'JetBrains Mono', monospace",
+                    }}
+                  >
+                    {dailySign}{dailyPct.toFixed(2)}%
+                  </span>
+                )}
+              </div>
+            ) : (
+              <span style={{ color: C.dim }}>—</span>
+            )
+          )}
+        </PTd>
+        <PTd dense align="right">
           {group.pnl != null ? (
             <div className="flex flex-col items-end" style={{ gap: 1 }}>
               <span
@@ -8613,7 +9063,7 @@ function ConsolidatedRow({ group, expanded, onToggle, onEdit, onDelete, onUpdate
       {/* Fila expandida: muestra cada operación individual del grupo */}
       {expanded && (
         <tr style={{ borderBottom: `1px solid ${C.border}` }}>
-          <td colSpan={10} style={{ padding: 0, backgroundColor: C.deep }}>
+          <td colSpan={readOnlyPrice ? 10 : 11} style={{ padding: 0, backgroundColor: C.deep }}>
             {/* Padding-left grande para que la columna OP del sub-table
                 arranque alineada con TICKER del header padre.
                 Refuerza visualmente que es un sub-grupo dentro de la fila. */}
