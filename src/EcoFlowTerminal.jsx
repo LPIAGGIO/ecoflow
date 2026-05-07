@@ -2030,7 +2030,7 @@ const STOCK_REGISTRY = {
   "VALO":    "Banco de Valores",
   "YPFD":    "YPF",
 
-  // Panel general (selección de las más operadas)
+  // Panel general
   "AGRO":    "Agrometal",
   "AUSO":    "Autopistas del Sol",
   "BHIP":    "Banco Hipotecario",
@@ -2043,27 +2043,38 @@ const STOCK_REGISTRY = {
   "CELU":    "Celulosa Argentina",
   "CGPA2":   "Camuzzi Gas Pampeana",
   "CTIO":    "Consultatio",
+  "DGCE":    "Distribuidora de Gas Cuyana (Clase E)",
   "DGCU2":   "Distribuidora Gas Cuyana",
   "DOME":    "Domec",
   "DYCA":    "Dycasa",
+  "ECOG":    "Ecogas Inversiones",
+  "EDSH":    "Edesur Holdings",
   "FERR":    "Ferrum",
   "FIPL":    "Fiplasto",
+  "GAMI":    "Garovaglio y Zorraquín",
+  "GARO":    "Garovaglio y Zorraquín",
   "GBAN":    "Gas Natural BAN",
   "GCDI":    "Grupo Concesionario del Oeste",
   "GCLA":    "Grupo Clarín",
   "GRIM":    "Grimoldi",
   "HAVA":    "Havanna",
+  "HSAT":    "Hidroeléctrica Sat",
+  "IEB":     "I.E.B. (Inversora Eléctrica Buenos Aires)",
   "INAG":    "Instituto Rosenbusch",
+  "INTR":    "Compañía Introductora de Buenos Aires",
   "INVJ":    "Inversora Juramento",
   "IRSA":    "IRSA Inversiones y Representaciones",
   "LEDE":    "Ledesma",
   "LONG":    "Longvie",
+  "MERA":    "Meranol",
   "MOLA":    "Molinos Agro",
   "MOLI":    "Molinos Río de la Plata",
   "MORI":    "Morixe",
   "OEST":    "Oeste Editorial",
   "PATA":    "Importadora y Exportadora de la Patagonia",
   "POLL":    "Polledo",
+  "RAGH":    "Rosario Administradora",
+  "REGE":    "Regente Bursátil",
   "RICH":    "Laboratorios Richmond",
   "RIGO":    "Rigolleau",
   "ROSE":    "Instituto Rosenbusch",
@@ -2071,6 +2082,31 @@ const STOCK_REGISTRY = {
   "SEMI":    "Semino",
   "TGLT":    "TGLT",
   "A3":      "A3 Mercados",
+};
+
+
+/* ─────────────── STOCK_PLAZA_ALIASES ─────────────
+ *
+ * Tickers de plaza USD que NO siguen el patrón estándar (ticker_base + D
+ * o ticker_base + C). Algunas empresas tienen sus variantes plaza con
+ * codificación distinta porque el ticker base tiene número o sufijo
+ * que se trunca.
+ *
+ * Ejemplos del catálogo BYMA:
+ *   TECO2 (Telecom Argentina ARS)  →  TECOD (MEP) — el "2" se cae
+ *   TGNO4 (TGN ARS)                →  TGN4D (MEP) — re-shuffle
+ *   TGSU2 (TGS ARS)                →  TGSUD (MEP) — el "2" se cae
+ *
+ * Mapping ticker_variant → { base, plaza }. detectPlaza() consulta
+ * primero acá antes de aplicar la heurística genérica de sufijo.
+ */
+const STOCK_PLAZA_ALIASES = {
+  "TECOD":   { base: "TECO2", plaza: "USD-MEP" },
+  "TECOC":   { base: "TECO2", plaza: "USD-CCL" },
+  "TGN4D":   { base: "TGNO4", plaza: "USD-MEP" },
+  "TGN4C":   { base: "TGNO4", plaza: "USD-CCL" },
+  "TGSUD":   { base: "TGSU2", plaza: "USD-MEP" },
+  "TGSUC":   { base: "TGSU2", plaza: "USD-CCL" },
 };
 
 
@@ -2088,7 +2124,7 @@ const STOCK_REGISTRY = {
  * Acá listamos solo el ticker base ARS. Las variantes USD se derivan.
  */
 const CEDEAR_REGISTRY = {
-  // Tech (FAANG + grandes)
+  // Big Tech / FAANG / Hardware
   "AAPL":  "Apple Inc.",
   "MSFT":  "Microsoft Corp.",
   "GOOGL": "Alphabet (Google) Class A",
@@ -2106,69 +2142,291 @@ const CEDEAR_REGISTRY = {
   "SHOP":  "Shopify Inc.",
   "UBER":  "Uber Technologies",
   "PLTR":  "Palantir Technologies",
-  "NIO":   "NIO Inc.",
   "BABA":  "Alibaba Group",
   "TSM":   "Taiwan Semiconductor",
   "MELI":  "MercadoLibre",
   "SPOT":  "Spotify Technology",
   "SNAP":  "Snap Inc.",
   "PINS":  "Pinterest Inc.",
-  "SQ":    "Block Inc. (Square)",
   "ZM":    "Zoom Video",
   "ROKU":  "Roku Inc.",
   "TWLO":  "Twilio Inc.",
+  "ABNB":  "Airbnb Inc.",
+  "DOCU":  "DocuSign Inc.",
+  "SNOW":  "Snowflake Inc.",
+  "PATH":  "UiPath Inc.",
+  "EBAY":  "eBay Inc.",
+  "ETSY":  "Etsy Inc.",
+  "BIDU":  "Baidu Inc.",
+  "JD":    "JD.com Inc.",
+  "PDD":   "PDD Holdings (Pinduoduo)",
+  "NTES":  "NetEase Inc.",
+  "JOYY":  "JOYY Inc.",
+  "TCOM":  "Trip.com Group",
+  "BIIB":  "Biogen Inc.",
+  "GLOB":  "Globant S.A.",
+  "ASML":  "ASML Holding",
+  "AVGO":  "Broadcom Inc.",
+  "QCOM":  "Qualcomm Inc.",
+  "TXN":   "Texas Instruments",
+  "MU":    "Micron Technology",
+  "AMAT":  "Applied Materials",
+  "LRCX":  "Lam Research",
+  "ADI":   "Analog Devices",
+  "MRVL":  "Marvell Technology",
+  "INFY":  "Infosys Ltd.",
+  "WBO":   "Warner Bros. Discovery",
+  "CSCO":  "Cisco Systems",
+  "IBM":   "IBM Corp.",
+  "HPQ":   "HP Inc.",
+  "DELL":  "Dell Technologies",
+  "ADP":   "Automatic Data Processing",
+  "MSI":   "Motorola Solutions",
+  "NOW":   "ServiceNow Inc.",
+  "TEAM":  "Atlassian Corp.",
+  "WDAY":  "Workday Inc.",
+  "VRSN":  "VeriSign Inc.",
+  "PANW":  "Palo Alto Networks",
+  "FSLR":  "First Solar Inc.",
+  "SE":    "Sea Limited",
+  "NIO":   "NIO Inc.",
+  "XPEV":  "XPeng Inc.",
+  "RBLX":  "Roblox Corp.",
+  "U":     "Unity Software",
+  "COIN":  "Coinbase Global",
+  "RIOT":  "Riot Platforms",
+  "MSTR":  "MicroStrategy",
+  "MARA":  "Marathon Digital",
+  "HUT":   "Hut 8 Mining",
+  "IREN":  "Iris Energy",
+  "SATL":  "Satellogic",
+  "ASTS":  "AST SpaceMobile",
+  "RKLB":  "Rocket Lab USA",
+  "JMIA":  "Jumia Technologies",
+  "GRMN":  "Garmin Ltd.",
+  "EA":    "Electronic Arts",
+  "SWKS":  "Skyworks Solutions",
+  "SE_":   "Sea Limited",
+  "ARM":   "Arm Holdings",
+  "DECK":  "Deckers Outdoor",
+  "ANF":   "Abercrombie & Fitch",
+  "URBN":  "Urban Outfitters",
+  "RGTI":  "Rigetti Computing",
+  "OKLO":  "Oklo Inc.",
+  "BMNR":  "Bitmine Immersion",
+  "ADS":   "Alliance Data Systems",
+  "CEG":   "Constellation Energy",
+  "FDX":   "FedEx Corp.",
+  "HWM":   "Howmet Aerospace",
+  "KGC":   "Kinross Gold",
+  "LVS":   "Las Vegas Sands",
+  "UL":    "Unilever PLC",
+  "UNH":   "UnitedHealth Group",
+  "UNP":   "Union Pacific",
+  "CLS":   "Celestica Inc.",
+  "CRWV":  "CoreWeave",
+  "TEM":   "Tempus AI",
+  "VST":   "Vistra Corp.",
+  "TRVV":  "Trivve Inc.",
+  "AI":    "C3.ai Inc.",
+  "ALAB":  "Astera Labs",
+  "PD":    "PagerDuty",
+  "UPST":  "Upstart Holdings",
+  "TRIP":  "TripAdvisor",
+  "BX":    "Blackstone",
+  "BKNG":  "Booking Holdings",
+  "EXPE":  "Expedia Group",
+  "CSCO_":  "Cisco Systems",
 
-  // Financieras
-  "JPM":   "JPMorgan Chase & Co.",
+  // Bancos / Financieras
+  "JPM":   "JPMorgan Chase",
   "BAC":   "Bank of America",
-  "WFC":   "Wells Fargo & Co.",
+  "WFC":   "Wells Fargo",
   "C":     "Citigroup Inc.",
-  "GS":    "Goldman Sachs Group",
+  "GS":    "Goldman Sachs",
   "MS":    "Morgan Stanley",
   "V":     "Visa Inc.",
   "MA":    "Mastercard Inc.",
   "AXP":   "American Express",
   "BRKB":  "Berkshire Hathaway B",
+  "USB":   "U.S. Bancorp",
+  "SCHW":  "Charles Schwab",
+  "BK":    "Bank of New York Mellon",
+  "AIG":   "American International Group",
+  "AEG":   "Aegon N.V.",
+  "ALL":   "Allstate Corp.",
+  "TROW":  "T. Rowe Price",
+  "LNC":   "Lincoln National",
+  "STT":   "State Street",
+  "FNMA":  "Fannie Mae",
+  "BCS":   "Barclays plc",
+  "ING":   "ING Group",
+  "DB":    "Deutsche Bank",
+  "HSB":   "HSBC Holdings",
+  "BBV":   "BBVA",
+  "SAN":   "Banco Santander",
+  "LYG":   "Lloyds Banking Group",
+  "MUFG":  "Mitsubishi UFJ Financial",
+  "MFG":   "Mizuho Financial",
+  "NMR":   "Nomura Holdings",
+  "KB":    "KB Financial Group",
+  "TD":    "Toronto-Dominion Bank",
+  "RY":    "Royal Bank of Canada",
+  "BMO":   "Bank of Montreal",
+  "BNS":   "Bank of Nova Scotia",
+  "CM":    "Canadian Imperial Bank",
+  "ITUB":  "Itaú Unibanco",
+  "ITUB3": "Itaú Unibanco PN (B3)",
+  "BBD":   "Banco Bradesco",
+  "BBDC":  "Banco Bradesco",
+  "BBDC3": "Banco Bradesco PN (B3)",
+  "BSBR":  "Banco Santander Brasil",
+  "BBAS3": "Banco do Brasil (B3)",
+  "BCS_":   "Barclays",
+  "WF":    "Woori Financial Group",
+  "GL":    "Globe Life Inc.",
+  "SPGI":  "S&P Global Inc.",
 
-  // Industrial / Consumo
+  // Healthcare / Pharma
+  "JNJ":   "Johnson & Johnson",
+  "PFE":   "Pfizer Inc.",
+  "MRK":   "Merck & Co.",
+  "ABBV":  "AbbVie Inc.",
+  "BMY":   "Bristol-Myers Squibb",
+  "LLY":   "Eli Lilly & Co.",
+  "AMGN":  "Amgen Inc.",
+  "GILD":  "Gilead Sciences",
+  "MRNA":  "Moderna Inc.",
+  "VRTX":  "Vertex Pharmaceuticals",
+  "REGN":  "Regeneron Pharmaceuticals",
+  "ISRG":  "Intuitive Surgical",
+  "DHR":   "Danaher Corp.",
+  "TMO":   "Thermo Fisher Scientific",
+  "MDT":   "Medtronic plc",
+  "ABT":   "Abbott Laboratories",
+  "CVS":   "CVS Health",
+  "CAH":   "Cardinal Health",
+  "SYY":   "Sysco Corp.",
+  "GSK":   "GlaxoSmithKline",
+  "AZN":   "AstraZeneca",
+  "NVS":   "Novartis AG",
+  "NOVO":  "Novo Nordisk",
+  "SIEGY": "Siemens AG",
+
+  // Consumo / Retail
   "KO":    "Coca-Cola Co.",
   "PEP":   "PepsiCo Inc.",
   "WMT":   "Walmart Inc.",
   "MCD":   "McDonald's Corp.",
   "NKE":   "Nike Inc.",
   "DIS":   "Walt Disney Co.",
+  "DISN":  "Walt Disney Co.",
   "SBUX":  "Starbucks Corp.",
   "PG":    "Procter & Gamble",
-  "JNJ":   "Johnson & Johnson",
-  "PFE":   "Pfizer Inc.",
-  "MRK":   "Merck & Co.",
-  "ABBV":  "AbbVie Inc.",
-  "BMY":   "Bristol-Myers Squibb",
   "VZ":    "Verizon Communications",
   "T":     "AT&T Inc.",
+  "TMUS":  "T-Mobile US",
   "F":     "Ford Motor Co.",
   "GM":    "General Motors",
+  "STLA":  "Stellantis N.V.",
+  "TM":    "Toyota Motor",
+  "HMY":   "Harmony Gold Mining",
+  "HMC":   "Honda Motor",
+  "RACE":  "Ferrari N.V.",
   "BA":    "Boeing Co.",
   "CAT":   "Caterpillar Inc.",
+  "DE":    "Deere & Company",
   "GE":    "General Electric",
   "MMM":   "3M Company",
-  "HD":    "Home Depot Inc.",
+  "HD":    "Home Depot",
   "LOW":   "Lowe's Companies",
   "TGT":   "Target Corp.",
   "COST":  "Costco Wholesale",
+  "MDLZ":  "Mondelez International",
+  "MO":    "Altria Group",
+  "PM":    "Philip Morris International",
+  "CL":    "Colgate-Palmolive",
+  "KMB":   "Kimberly-Clark",
+  "HSY":   "Hershey Co.",
+  "DEO":   "Diageo plc",
+  "FMX":   "Fomento Económico Mexicano",
+  "ABEV":  "Ambev S.A.",
+  "ABEV3": "Ambev (B3)",
+  "FD":    "Fluence Energy",
+  "TJX":   "TJX Companies",
+  "ROST":  "Ross Stores",
+  "JCI":   "Johnson Controls",
+  "MS_":    "Morgan Stanley",
+  "CAR":   "Avis Budget Group",
+  "DAL":   "Delta Air Lines",
+  "UAL":   "United Airlines",
+  "AAL":   "American Airlines",
+  "LUV":   "Southwest Airlines",
+  "CCL":   "Carnival Corporation",
+  "RCL":   "Royal Caribbean Cruises",
+  "NCLH":  "Norwegian Cruise Line",
+  "MAR":   "Marriott International",
+  "HOG":   "Harley-Davidson",
+  "GIL":   "Gildan Activewear",
+  "AAP":   "Advance Auto Parts",
+  "AVY":   "Avery Dennison",
+  "ACN":   "Accenture plc",
+  "PCAR":  "PACCAR Inc.",
 
-  // Energía / Materiales
-  "XOM":   "Exxon Mobil Corp.",
+  // Energía / Oil & Gas
+  "XOM":   "Exxon Mobil",
   "CVX":   "Chevron Corp.",
+  "BP":    "BP p.l.c.",
+  "SHEL":  "Shell plc",
+  "TTE":   "TotalEnergies SE",
+  "EQNR":  "Equinor ASA",
+  "PBR":   "Petrobras",
+  "PETR":  "Petrobras",
+  "PETR3": "Petrobras (B3)",
+  "VIST":  "Vista Energy",
+  "OXY":   "Occidental Petroleum",
+  "SLB":   "Schlumberger Ltd.",
+  "BKR":   "Baker Hughes",
+  "HAL":   "Halliburton Co.",
+  "MOS":   "Mosaic Co.",
+  "PSX":   "Phillips 66",
+  "VAL3":  "Vale (B3)",
   "VALE":  "Vale S.A.",
+  "VALE3": "Vale (B3)",
   "RIO":   "Rio Tinto plc",
   "FCX":   "Freeport-McMoRan",
-  "GOLD":  "Barrick Gold Corp.",
-  "GLOB":  "Globant S.A.",
+  "GOLD":  "Barrick Gold",
+  "AEM":   "Agnico Eagle Mines",
+  "NEM":   "Newmont Corp.",
+  "GFI":   "Gold Fields Ltd.",
+  "HL":    "Hecla Mining",
+  "PAAS":  "Pan American Silver",
+  "CDE":   "Coeur Mining",
+  "MUX":   "McEwen Mining",
+  "BHP":   "BHP Group",
+  "BAK":   "Braskem S.A.",
+  "DD":    "DuPont de Nemours",
+  "DOW":   "Dow Inc.",
+  "ECL":   "Ecolab Inc.",
+  "IFF":   "International Flavors & Fragrances",
+  "SCCO":  "Southern Copper",
+  "GGB":   "Gerdau S.A.",
+  "SUZ":   "Suzano S.A.",
+  "SUZB3": "Suzano (B3)",
+  "CSNA3": "CSN (B3)",
+  "SID":   "Companhia Siderúrgica Nacional",
+  "CX":    "CEMEX S.A.B.",
+  "ELP":   "Companhia Paranaense de Energía",
+  "SBS":   "SABESP",
+  "SBSP3": "SABESP (B3)",
+  "EBR":   "Eletrobras",
+  "ERI":   "Eli Lilly Argentina S.A.",
+  "ERJ":   "Embraer S.A.",
+  "EMBJ":  "Embraer (B3)",
 
-  // Argentinas listadas en NY (CEDEARs domésticos)
+  // Argentinas / Latinoamericanas en NYSE
   "YPFD":  "YPF S.A. (NYSE)",
-  "GGAL":  "Grupo Galicia (NYSE)",
+  "GGAL":  "Galicia (NYSE)",
   "BMA":   "Banco Macro (NYSE)",
   "BBAR":  "BBVA Argentina (NYSE)",
   "PAM":   "Pampa Energía (NYSE)",
@@ -2178,64 +2436,355 @@ const CEDEAR_REGISTRY = {
   "IRS":   "IRSA (NYSE)",
   "LOMA":  "Loma Negra (NYSE)",
   "CRESY": "Cresud (NASDAQ)",
+  "CRES_": "Cresud (NASDAQ)",
   "SUPV":  "Supervielle (NYSE)",
   "CEPU":  "Central Puerto (NYSE)",
+  "CAAP":  "Corporación América Airports",
+  "BIOX":  "Bioceres Crop Solutions",
+  "TIMB":  "TIM S.A.",
+  "TIMS3": "TIM S.A. (B3)",
+  "ARCO":  "Arcos Dorados",
+  "GPRK":  "GeoPark Ltd.",
+  "AMX":   "América Móvil",
+  "TV":    "Grupo Televisa",
+  "ASR":   "Grupo Aeroportuario del Sureste",
+  "PA":    "Pampa Energía",
+  "BPA11": "Banco Patagonia (BDR)",
+
+  // Brasil / Latam (B3)
+  "MGLU3": "Magazine Luiza (B3)",
+  "VIVT3": "Telefônica Brasil (B3)",
+  "WEGE3": "WEG S.A. (B3)",
+  "RENT3": "Localiza Rent a Car (B3)",
+  "LREN3": "Lojas Renner (B3)",
+  "NATU3": "Natura & Co (B3)",
+  "TIMS3": "TIM S.A. (B3)",
+  "PRIO3": "PetroRio (B3)",
+  "HAPV3": "Hapvida (B3)",
+  "NU":    "Nubank Holdings",
+  "NAT3":  "Natura & Co",
+  "STNE":  "StoneCo Ltd.",
+  "PAGS":  "PagSeguro Digital",
+  "INT":   "Interconexión Eléctrica",
+  "VIV":   "Telefônica Brasil",
+  "UGP":   "Ultrapar Participações",
+
+  // Otros internacionales / ADRs
+  "SAP":   "SAP SE",
+  "SONY":  "Sony Group",
+  "TXR":   "Tower Semiconductor",
+  "VOD":   "Vodafone Group",
+  "VC":    "Visteon Corp.",
+  "NGG":   "National Grid plc",
+  "PHG":   "Koninklijke Philips",
+  "BAYN":  "Bayer AG",
+  "KEP":   "Korea Electric Power",
+  "SMSN":  "Samsung Electronics",
+  "NOKA":  "Nokia Corp.",
+  "AKO.B": "Embotelladora Andina Class B",
+  "AKOB":  "Embotelladora Andina B",
+  "FNMA_": "Fannie Mae",
+  "GT":    "Goodyear Tire & Rubber",
+  "WBA":   "Walgreens Boots Alliance",
+  "NUE":   "Nucor Corp.",
+  "INFY_": "Infosys Ltd.",
+  "HOG_":   "Harley-Davidson",
+  "ADGO":  "Ado Properties / Adagene",
+  "BB":    "BlackBerry Ltd.",
+  "ETSY_": "Etsy Inc.",
+  "OXY_":   "Occidental Petroleum",
+  "PKS":   "PHX Minerals",
+  "X":     "United States Steel",
+  "RTX":   "Raytheon Technologies",
+  "HON":   "Honeywell International",
+  "IBN":   "ICICI Bank",
+  "HDB":   "HDFC Bank",
+  "HM":    "Hartford Financial",
+  "JCI_":  "Johnson Controls",
+  "LMT":   "Lockheed Martin",
+  "NOC":   "Northrop Grumman",
+  "ITA":   "iShares Aerospace & Defense",
+  "IP":    "International Paper",
+  "LN":    "Lennar Corporation",
+  "VLO":   "Valero Energy",
+  "OXY1":  "Occidental Petroleum",
+  "URBN_": "Urban Outfitters",
+  "DECK_": "Deckers Outdoor",
+  "EFX":   "Equifax Inc.",
+  "PG_":   "Procter & Gamble",
+  "MO_":    "Altria",
+  "FXI":   "iShares China Large-Cap",
+  "XL":    "XL Group",
+  "XYZ":   "Block Inc. (Square)",
+  "XPEV_": "XPeng",
+  "AM":    "Antero Midstream",
+  "ALA":   "AltaGas Ltd.",
+  "ETR":   "Entergy Corp.",
+  "EQT":   "EQT Corporation",
+  "ENB":   "Enbridge Inc.",
+  "TRP":   "TC Energy",
+  "TC":    "TuanChe Limited",
+  "CC":    "Chemours Company",
+  "CL_":    "Colgate-Palmolive",
+  "GLW":   "Corning Inc.",
+  "CIBR":  "First Trust NASDAQ Cybersecurity ETF",
+  "PA_":    "Pampa Energía",
+  "PD_":    "PagerDuty",
+  "B":     "Barnes Group",
+  "E":     "ENI S.p.A.",
+  "FC":    "Franchise Group",
+  "NG":    "NovaGold Resources",
+  "OXY_2": "Occidental Petroleum",
+  "RBLX_": "Roblox Corp.",
+  "ROST_": "Ross Stores",
+  "BNG":   "BPR Bonos Globales",
+  "AXIA":  "Axia Inc.",
+  "BPA":   "Banco Patagonia (ADR)",
+  "TXR_":  "Tower Semiconductor",
+  "FD_":    "Fluence Energy",
+  "KEEL":  "Keel Brands",
+  "KOFM":  "Coca-Cola Femsa",
+  "KOFL":  "Coca-Cola Femsa L",
+  "SI":    "Silvergate Capital",
+  "SDA":   "SunHydrogen Inc.",
+  "SH":    "ProShares Short S&P 500",
+  "SNA":   "Snap-on Inc.",
+  "NXE":   "NexGen Energy Ltd.",
+  "TEN":   "Tenneco Inc.",
+  "PBI":   "Pitney Bowes Inc.",
+  "VD":    "Visa Inc. (variant)",
+  "ORLY":  "O'Reilly Automotive",
+  "PSX_":   "Phillips 66",
+  "ITUB3_": "Itaú Unibanco PN",
+  "PETR3_": "Petrobras PN",
+  "BBAS3_": "Banco do Brasil",
+  "WEGE3_": "WEG S.A.",
+  "MFG_":   "Mizuho Financial",
 
   // ETFs populares
   "SPY":   "SPDR S&P 500 ETF",
   "QQQ":   "Invesco QQQ (NASDAQ-100)",
+  "TQQQ":  "ProShares UltraPro QQQ",
+  "SPXL":  "Direxion Daily S&P 500 Bull 3X",
   "DIA":   "SPDR Dow Jones ETF",
   "IWM":   "iShares Russell 2000",
   "EEM":   "iShares MSCI Emerging Markets",
+  "IEMG":  "iShares Core MSCI Emerging Markets",
   "EWZ":   "iShares MSCI Brazil",
+  "EWY":   "iShares MSCI South Korea",
+  "EWJ":   "iShares MSCI Japan",
+  "EFA":   "iShares MSCI EAFE",
+  "VEA":   "Vanguard FTSE Developed Markets",
+  "ACWI":  "iShares MSCI ACWI",
   "GLD":   "SPDR Gold Trust",
   "SLV":   "iShares Silver Trust",
   "TLT":   "iShares 20+ Year Treasury",
   "VTI":   "Vanguard Total Stock Market",
   "VOO":   "Vanguard S&P 500",
+  "VO":    "Vanguard Mid-Cap ETF",
+  "IVV":   "iShares Core S&P 500",
+  "IVE":   "iShares S&P 500 Value",
+  "IVW":   "iShares S&P 500 Growth",
+  "IJH":   "iShares Core S&P Mid-Cap",
+  "IBB":   "iShares Biotechnology",
+  "ARKK":  "ARK Innovation ETF",
+  "USO":   "United States Oil Fund",
+  "URA":   "Global X Uranium ETF",
+  "GDX":   "VanEck Gold Miners ETF",
+  "ICLN":  "iShares Global Clean Energy",
+  "IEUR":  "iShares Core MSCI Europe",
+  "ILF":   "iShares Latin America 40",
+  "SMH":   "VanEck Semiconductor ETF",
+  "SPHQ":  "Invesco S&P 500 Quality",
+  "ESGU":  "iShares ESG Aware MSCI USA",
+  "RSP":   "Invesco S&P 500 Equal Weight",
+  "PSQ":   "ProShares Short QQQ",
+  "VXX":   "iPath VIX Short-Term Futures",
+  "VIG":   "Vanguard Dividend Appreciation",
+  "XLE":   "Energy Select Sector SPDR",
+  "XLF":   "Financial Select Sector SPDR",
+  "XLK":   "Technology Select Sector SPDR",
+  "XLV":   "Health Care Select Sector SPDR",
+  "XLI":   "Industrial Select Sector SPDR",
+  "XLP":   "Consumer Staples Select SPDR",
+  "XLY":   "Consumer Discretionary SPDR",
+  "XLU":   "Utilities Select Sector SPDR",
+  "XLRE":  "Real Estate Select Sector SPDR",
+  "XLB":   "Materials Select Sector SPDR",
+  "XLC":   "Communication Services SPDR",
+  "XME":   "SPDR S&P Metals & Mining",
+  "COPX":  "Global X Copper Miners ETF",
+  "ETHA":  "iShares Ethereum Trust",
+  "IBIT":  "iShares Bitcoin Trust",
+  "SPCE":  "Virgin Galactic",
+  "LAR":   "Larimar Therapeutics",
+  "LAC":   "Lithium Americas Corp.",
+  "EWZ_":   "iShares MSCI Brazil",
+  "MRSH":  "Marsh & McLennan",
+  "YELP":  "Yelp Inc.",
+  "MC":    "Moelis & Company",
+
+  // Otros
+  "AKO.B": "Embotelladora Andina B",
+  "BA.C":  "Boeing CCL",
+  "GOGL":  "Golden Ocean Group",
+  "TRIP":  "TripAdvisor",
+  "PAGS":  "PagSeguro Digital",
+  "NOK":   "Nokia",
+  "PCRX":  "Pacira BioSciences",
+  "HOOD":  "Robinhood Markets",
+  "HOO":   "Robinhood Markets",
+  "BKC*":  "Restaurant Brands International",
+  "XROX":  "Xerox Holdings",
+  "XP":    "XP Inc.",
 };
 
 
-/* ─────────────── ON_REGISTRY (Obligaciones Negociables) ─────────────
+/* ─────────────── ON_ISSUER_PREFIX (Obligaciones Negociables) ─────────────
  *
- * ONs son bonos corporativos. Las descripciones varían mucho — ponemos
- * los emisores principales con sus emisiones más operadas. Si no está
- * en el registry, mostramos solo el ticker.
+ * Las ONs (Obligaciones Negociables, bonos corporativos) tienen códigos
+ * compuestos donde:
+ *   - Las primeras 3 letras identifican el EMISOR (YMC = YPF, AER =
+ *     Aeropuertos, MGC = Pampa Energía, etc.)
+ *   - Las siguientes letras/números identifican la clase y plaza:
+ *     - Sufijo O: ARS
+ *     - Sufijo D: USD-MEP
+ *     - Sufijo C: USD-CCL
  *
- * El catálogo dinámico de Supabase tiene una lista mucho más grande
- * — el registry acá es para enriquecer las descripciones más comunes.
+ * Ejemplos:
+ *   ARC1O = Aeropuertos Arg 2000 Clase 1 ARS
+ *   ARC1D = Aeropuertos Arg 2000 Clase 1 USD-MEP
+ *   ARC1C = Aeropuertos Arg 2000 Clase 1 USD-CCL
+ *
+ * Por eso indexamos por PREFIJO (las primeras 2-3 letras del emisor)
+ * en vez de ticker exacto. detectONIssuer() recorre los prefijos
+ * conocidos para encontrar el emisor. Esto cubre cientos de variantes
+ * con solo decenas de entradas en el registry.
+ *
+ * Si no se encuentra el prefijo, el ON cae a "Otros" del dropdown.
  */
-const ON_REGISTRY = {
-  // YPF
-  "YMCQO":   "YPF Clase XXIX (USD)",
-  "YMCJO":   "YPF Clase XX (USD)",
-  "YMCHO":   "YPF Clase XVII (USD)",
-  // Pampa Energía
-  "MGC9O":   "Pampa Energía Clase 9",
-  "MGC2O":   "Pampa Energía Clase 2",
-  // Telecom
-  "TLCDO":   "Telecom Argentina (USD)",
-  "TLCMO":   "Telecom Argentina",
-  // IRSA
-  "IRCFO":   "IRSA (USD)",
-  "IRCKO":   "IRSA",
-  // Vista Energy
-  "VSCRO":   "Vista Energy",
-  "VSCJO":   "Vista Energy (USD)",
-  // Tecpetrol
-  "TTC1O":   "Tecpetrol (USD)",
-  // Cresud
-  "CSDO":    "Cresud",
-  // Banco Galicia
-  "BGCAO":   "Banco Galicia (USD)",
-  // Aeropuertos
-  "ARC1O":   "Aeropuertos Argentina 2000",
-  // Albanesi / GENNEIA
-  "GNCXO":   "Genneia (USD)",
-  // CGC
-  "CGC5O":   "Compañía General de Combustibles",
-  "CGC8O":   "Compañía General de Combustibles 8",
+const ON_ISSUER_PREFIX = {
+  // YPF S.A. — series con prefijos YMC, YFC, YM3, YM4
+  "YMC": "YPF",
+  "YFC": "YPF",
+  "YM3": "YPF",
+  "YM4": "YPF",
+  "YPC": "YPF",
+  "YMR": "YPF (Reapertura)",
+
+  // Pampa Energía — prefijo MGC
+  "MGC": "Pampa Energía",
+
+  // Vista Energy — VSC
+  "VSC": "Vista Energy",
+  "VST": "Vista Energy",
+
+  // Telecom Argentina — TLC
+  "TLC": "Telecom Argentina",
+
+  // Mastellone Hnos. — MRC, MR3, MR4
+  "MRC": "Mastellone Hnos.",
+  "MR3": "Mastellone Hnos.",
+  "MR4": "Mastellone Hnos.",
+
+  // Aeropuertos Argentina 2000 — AER, ARC
+  "AER": "Aeropuertos Argentina 2000",
+  "ARC": "Aeropuertos Argentina 2000",
+
+  // IRSA — IRC
+  "IRC": "IRSA Inv. y Representaciones",
+
+  // Banco Patagonia — BPC
+  "BPC": "Banco Patagonia",
+
+  // Tecpetrol — TTC
+  "TTC": "Tecpetrol",
+
+  // Cresud — CSD, CS3, CS4, CS5, CS6
+  "CSD": "Cresud",
+  "CS3": "Cresud",
+  "CS4": "Cresud",
+  "CS5": "Cresud",
+  "CS6": "Cresud",
+
+  // Genneia — GNC, GN4
+  "GNC": "Genneia",
+  "GN4": "Genneia",
+
+  // Compañía General de Combustibles (CGC)
+  "CGC": "CGC (Compañía General de Combustibles)",
+
+  // Banco Galicia — BGC
+  "BGC": "Banco Galicia",
+
+  // Capex S.A. — emisora de energía
+  "CAC": "Capex S.A.",
+
+  // Loma Negra — LOC
+  "LOC": "Loma Negra",
+
+  // Banco Comafi — BAC (es uno de los códigos de emisión)
+  "BAC": "Banco Comafi",
+
+  // Banco BBVA Argentina — BYC
+  "BYC": "BBVA Argentina",
+
+  // Banco Hipotecario — BHC
+  "BHC": "Banco Hipotecario",
+
+  // Newsan — emisora de electrodomésticos / energía
+  "NPC": "Newsan",
+
+  // Toyota Compañía Financiera Argentina — TY3
+  "TY3": "Toyota Compañía Financiera",
+
+  // John Deere Credit Argentina — JNC
+  "JNC": "John Deere Credit",
+
+  // MSU Energy — MSS
+  "MSS": "MSU Energy",
 };
+
+/**
+ * Para un ticker de ON, devuelve el nombre del emisor si lo identifica,
+ * sino null. Recorre ON_ISSUER_PREFIX buscando el prefijo más largo
+ * que matchee al ticker — esto es necesario porque emitents como YPF
+ * usan prefijos de 3 chars (YMC) pero hay otros con 2 chars (CS, BF).
+ *
+ * Sort: probamos primero los prefijos MÁS LARGOS para evitar falsos
+ * positivos (ej: "YMC" debe matchear "YMC", no "YM").
+ */
+function detectONIssuer(ticker) {
+  if (!ticker) return null;
+  const t = ticker.toUpperCase().trim();
+  // Probar prefijos de 4 chars primero (BF35, BF36...), después 3 (YMC, AER),
+  // después 2 (CS, BF) — pero los de 2 son raros y se cubren con los de 3.
+  // Iteramos sobre las claves del registry ordenadas por longitud descendente.
+  const sortedPrefixes = Object.keys(ON_ISSUER_PREFIX).sort((a, b) => b.length - a.length);
+  for (const prefix of sortedPrefixes) {
+    if (t.startsWith(prefix)) {
+      return ON_ISSUER_PREFIX[prefix];
+    }
+  }
+  return null;
+}
+
+
+/**
+ * Para un ticker de ON, devuelve la plaza inferida del último char.
+ *   *O → ARS
+ *   *D → USD-MEP
+ *   *C → USD-CCL
+ *
+ * Si el último char no matchea, devuelve "ARS" como default.
+ */
+function detectONPlaza(ticker) {
+  if (!ticker) return "ARS";
+  const last = ticker.toUpperCase().trim().slice(-1);
+  if (last === "D") return "USD-MEP";
+  if (last === "C") return "USD-CCL";
+  return "ARS"; // O u otro
+}
 
 
 /**
@@ -2256,7 +2805,14 @@ function detectPlaza(ticker, baseRegistry) {
   if (!ticker) return { base: ticker, plaza: "ARS" };
   const t = ticker.toUpperCase().trim();
 
-  // Caso especial: ticker.D (con punto) — siempre es plaza MEP
+  // 1) Aliases específicos para tickers que NO siguen el patrón estándar.
+  //    Ej: "TECOD" → { base: "TECO2", plaza: "USD-MEP" } (el "2" se cae).
+  //    Solo aplicamos para acciones — los CEDEARs y ONs siguen el patrón.
+  if (baseRegistry === STOCK_REGISTRY && STOCK_PLAZA_ALIASES[t]) {
+    return STOCK_PLAZA_ALIASES[t];
+  }
+
+  // 2) Caso especial: ticker.D (con punto) — siempre es plaza MEP
   if (t.endsWith(".D")) {
     const base = t.slice(0, -2);
     return { base, plaza: "USD-MEP" };
@@ -2266,14 +2822,14 @@ function detectPlaza(ticker, baseRegistry) {
     return { base, plaza: "USD-CCL" };
   }
 
-  // Si el ticker completo está en el registry, NO le sacamos sufijo
-  // (ej: AMD, AMD es la base real). Esto evita falsos positivos.
+  // 3) Si el ticker completo está en el registry, NO le sacamos sufijo
+  //    (ej: AMD, AMD es la base real). Esto evita falsos positivos.
   if (baseRegistry[t]) {
     return { base: t, plaza: "ARS" };
   }
 
-  // Si termina en D o C y al sacar el sufijo el resultado SÍ está en el
-  // registry, entonces sí es una variante de plaza.
+  // 4) Si termina en D o C y al sacar el sufijo el resultado SÍ está en el
+  //    registry, entonces sí es una variante de plaza.
   if (t.endsWith("D") && t.length > 2) {
     const base = t.slice(0, -1);
     if (baseRegistry[base]) {
@@ -2418,17 +2974,14 @@ function getTickerOptions(instrumentType, currentTicker, catalog) {
   //   - USD-MEP   (sufijo D o .D)
   //   - USD-CCL   (sufijo C o .C)
   //   - Otros     (no identificados en el registry)
-  if (instrumentType === "stock" || instrumentType === "cedear" || instrumentType === "on") {
+  if (instrumentType === "stock" || instrumentType === "cedear") {
     const list = catalog?.[instrumentType];
     if (!list || list.length === 0) {
       return { mode: "input", options: [] };
     }
 
     // Elegir el registry según el tipo
-    const registry =
-      instrumentType === "stock"  ? STOCK_REGISTRY  :
-      instrumentType === "cedear" ? CEDEAR_REGISTRY :
-      ON_REGISTRY;
+    const registry = instrumentType === "stock" ? STOCK_REGISTRY : CEDEAR_REGISTRY;
 
     // Construimos opts con ordenación por DESCRIPCIÓN de empresa para que
     // las 3 plazas del mismo emisor queden contiguas:
@@ -2463,18 +3016,12 @@ function getTickerOptions(instrumentType, currentTicker, catalog) {
         ? `${ticker} — ${desc}${plazaSuffix}`
         : ticker;
 
-      // sortKey para "conocidos": alfabético por descripción, después
-      // plaza (ARS antes de MEP antes de CCL), después ticker como
-      // tiebreaker final.
       const sortKey = desc
         ? `${desc.toLowerCase()}__${plazaOrder[plaza] || "9"}__${ticker}`
-        : `~~~${ticker}`; // sin desc nunca llega acá
+        : `~~~${ticker}`;
 
       const opt = { value: ticker, label, sortKey };
 
-      // Si el base NO está en el registry → "Otros (sin descripción)".
-      // Esto sirve como visual cue de que el catálogo está sin
-      // enriquecer para ese ticker.
       if (!registry[base]) {
         otros.push({ ...opt, sortKey: ticker });
       } else {
@@ -2485,27 +3032,91 @@ function getTickerOptions(instrumentType, currentTicker, catalog) {
     conocidos.sort((a, b) => a.sortKey.localeCompare(b.sortKey));
     otros.sort((a, b) => a.sortKey.localeCompare(b.sortKey));
 
-    // Solo dos grupos: "Conocidos" (sin label visible si es el único) y "Otros".
-    // Si NO hay otros, el optgroup de conocidos no aporta — devolvemos
-    // options plano. Si hay otros, los separamos en grupos para que el
-    // usuario distinga lo que está enriquecido de lo que no.
     if (otros.length === 0) {
-      // Solo conocidos: lista plana, con placeholder.
       return { mode: "select", options: conocidos };
     }
 
     const groups = [];
     if (conocidos.length) {
-      const knownLabel =
-        instrumentType === "stock"  ? "Acciones" :
-        instrumentType === "cedear" ? "CEDEARs"  :
-        "ON";
-      groups.push({ label: knownLabel, options: conocidos });
+      groups.push({
+        label: instrumentType === "stock" ? "Acciones" : "CEDEARs",
+        options: conocidos,
+      });
     }
     groups.push({ label: "Otros (sin descripción)", options: otros });
 
-    // Si el ticker actual no está en ningún grupo (caso edición), lo
-    // agregamos como grupo "Editando" al final.
+    const allValues = new Set();
+    for (const g of groups) for (const o of g.options) allValues.add(o.value);
+    if (currentTicker && currentTicker.trim() && !allValues.has(currentTicker)) {
+      groups.push({
+        label: "Editando",
+        options: [{ value: currentTicker, label: `${currentTicker} — (cargado manualmente)` }],
+      });
+    }
+
+    return { mode: "select", groups };
+  }
+
+  // ─── ON (Obligaciones Negociables): emisor por prefijo ────────────────
+  // Las ONs tienen códigos compuestos donde las primeras 2-3 letras
+  // identifican el emisor (YMC, AER, MGC, VSC, etc.). El último char
+  // identifica la plaza (O=ARS, D=MEP, C=CCL).
+  // detectONIssuer() busca el emisor por prefijo más largo que matchee.
+  if (instrumentType === "on") {
+    const list = catalog?.[instrumentType];
+    if (!list || list.length === 0) {
+      return { mode: "input", options: [] };
+    }
+
+    const conocidos = [];
+    const otros = [];
+    const plazaOrder = { "ARS": "0", "USD-MEP": "1", "USD-CCL": "2" };
+
+    for (const row of list) {
+      const ticker = (row.ticker || "").toUpperCase().trim();
+      if (!ticker) continue;
+      if (looksLikeSovereignBond(ticker)) continue;
+
+      const issuer = detectONIssuer(ticker);
+      const plaza = detectONPlaza(ticker);
+
+      const plazaSuffix =
+        plaza === "USD-MEP" ? " · MEP" :
+        plaza === "USD-CCL" ? " · CCL" :
+        "";
+
+      // Para ONs, el label es: TICKER — Emisor [· plaza]
+      // El ticker mismo identifica la clase específica (AER1O, AER9O, AERAO
+      // son clases distintas del mismo emisor — el usuario sabe cuál busca).
+      const label = issuer
+        ? `${ticker} — ${issuer}${plazaSuffix}`
+        : ticker;
+
+      // Sort: por emisor primero (alfabético), después plaza, después ticker.
+      const sortKey = issuer
+        ? `${issuer.toLowerCase()}__${plazaOrder[plaza] || "9"}__${ticker}`
+        : `~~~${ticker}`;
+
+      const opt = { value: ticker, label, sortKey };
+
+      if (!issuer) {
+        otros.push({ ...opt, sortKey: ticker });
+      } else {
+        conocidos.push(opt);
+      }
+    }
+
+    conocidos.sort((a, b) => a.sortKey.localeCompare(b.sortKey));
+    otros.sort((a, b) => a.sortKey.localeCompare(b.sortKey));
+
+    if (otros.length === 0) {
+      return { mode: "select", options: conocidos };
+    }
+
+    const groups = [];
+    if (conocidos.length) groups.push({ label: "ON", options: conocidos });
+    groups.push({ label: "Otros (sin descripción)", options: otros });
+
     const allValues = new Set();
     for (const g of groups) for (const o of g.options) allValues.add(o.value);
     if (currentTicker && currentTicker.trim() && !allValues.has(currentTicker)) {
