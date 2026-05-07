@@ -2458,7 +2458,6 @@ const CEDEAR_REGISTRY = {
   "RENT3": "Localiza Rent a Car (B3)",
   "LREN3": "Lojas Renner (B3)",
   "NATU3": "Natura & Co (B3)",
-  "TIMS3": "TIM S.A. (B3)",
   "PRIO3": "PetroRio (B3)",
   "HAPV3": "Hapvida (B3)",
   "NU":    "Nubank Holdings",
@@ -2625,11 +2624,8 @@ const CEDEAR_REGISTRY = {
   "MC":    "Moelis & Company",
 
   // Otros
-  "AKO.B": "Embotelladora Andina B",
   "BA.C":  "Boeing CCL",
   "GOGL":  "Golden Ocean Group",
-  "TRIP":  "TripAdvisor",
-  "PAGS":  "PagSeguro Digital",
   "NOK":   "Nokia",
   "PCRX":  "Pacira BioSciences",
   "HOOD":  "Robinhood Markets",
