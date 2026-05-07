@@ -3582,9 +3582,10 @@ function useDashboardFx() {
 
 /* ─────────────── Hook: useBondPrices ───────────────
  *
- * Lee precios actualizados de bonos ARS y USD desde data912 vía:
- *   - /api/letras (lecaps, boncaps, duales) — endpoint /live/arg_notes
- *   - /api/bonos  (bonos USD soberanos)     — endpoint /live/arg_bonds
+ * Lee precios actualizados de bonos ARS y USD desde data912 vía
+ * el endpoint consolidado /api/data912?type=...:
+ *   - type=letras → /live/arg_notes  (Lecaps / Boncaps / Duales)
+ *   - type=bonos  → /live/arg_bonds  (bonos USD soberanos)
  *
  * data912 expone `pct_change` (variación % vs cierre anterior) que
  * usamos para derivar el cierre del día anterior matemáticamente
@@ -3722,8 +3723,8 @@ function useBondPrices() {
         }
 
         const [bondsRes, letrasRes] = await Promise.all([
-          fetch(`/api/bonos${bust}`, fetchOpts),
-          fetch(`/api/letras${bust}`, fetchOpts),
+          fetch(`/api/data912?type=bonos&_=${Date.now()}`, fetchOpts),
+          fetch(`/api/data912?type=letras&_=${Date.now()}`, fetchOpts),
         ]);
 
         const bondsArr = bondsRes.ok ? await bondsRes.json() : [];
@@ -3798,9 +3799,9 @@ function useBondPrices() {
 /* ─────────────── Hook: useStockPrices ───────────────
  *
  * Lee precios actualizados de acciones argentinas + CEDEARs desde
- * data912 vía:
- *   - /api/acciones (panel general BYMA)         → /live/arg_stocks
- *   - /api/cedears  (todos los CEDEARs operados) → /live/arg_cedears
+ * data912 vía el endpoint consolidado /api/data912?type=...:
+ *   - type=acciones → /live/arg_stocks   (panel general BYMA)
+ *   - type=cedears  → /live/arg_cedears  (todos los CEDEARs operados)
  *
  * data912 expone `pct_change` (variación % vs cierre anterior). Igual
  * que useBondPrices, derivamos el cierre anterior matemáticamente:
@@ -3826,8 +3827,8 @@ function useStockPrices() {
         const bust = `?_=${Date.now()}`;
 
         const [stocksRes, cedearsRes] = await Promise.all([
-          fetch(`/api/acciones${bust}`),
-          fetch(`/api/cedears${bust}`),
+          fetch(`/api/data912?type=acciones&_=${Date.now()}`),
+          fetch(`/api/data912?type=cedears&_=${Date.now()}`),
         ]);
 
         const stocksArr = stocksRes.ok ? await stocksRes.json() : [];
@@ -4650,10 +4651,9 @@ function fmtDateShort(iso) {
  * Recibe `positions` desde el padre (PortfolioDashboard) para no duplicar
  * la lectura de Supabase. Las cotizaciones FX se traen con useDashboardFx().
  *
- * Para precios actuales de bonos (cálculo del valor de cartera) usaremos
- * en futuras iteraciones data912 vía /api/bonos y /api/letras. Por ahora
- * V1 valúa todo a entry_price (costo) — sirve para tener layout funcional
- * y los números reales los conectamos al final.
+ * Para precios actuales de bonos usamos data912 vía /api/data912?type=
+ * (consolidado para no llenar el cupo de funciones serverless). El hook
+ * useBondPrices se encarga de fetchear y cachear esos precios.
  */
 
 function DashboardOverview({ positions, fxState, bondPricesState, futurePricesState, stockPricesState, cashState, onIngresar, onRetirar }) {
@@ -12937,8 +12937,8 @@ function CarryTradeModule() {
     try {
       // 1) Bonos (data912 /arg_bonds) + Letras (data912 /arg_notes) en paralelo
       const [bondsRes, letrasRes] = await Promise.all([
-        fetch("/api/bonos"),
-        fetch("/api/letras"),
+        fetch("/api/data912?type=bonos"),
+        fetch("/api/data912?type=letras"),
       ]);
       if (!bondsRes.ok) throw new Error("API bonos respondió " + bondsRes.status);
 
