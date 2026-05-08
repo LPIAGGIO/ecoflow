@@ -4090,6 +4090,27 @@ function useFutureAdjustments(positions, futurePrices) {
     // 1) Posiciones de futuros abiertas (consolidando)
     if (!positions || positions.length === 0) return;
 
+    // Tickers únicos de futuros que tiene el usuario.
+    const futureTickersInPortfolio = Array.from(new Set(
+      positions
+        .filter((p) => p.instrument_type === "future" && p.ticker)
+        .map((p) => p.ticker.toUpperCase().trim())
+    ));
+    if (futureTickersInPortfolio.length === 0) return;
+
+    // Si NINGÚN ticker tiene precio en el feed Primary aún, esperamos al
+    // próximo render. Esto evita generar filas pending con curr_settle
+    // incorrecto (cayendo al fallback 3 = prev_settle = entry_price).
+    // Una vez que useFuturePrices haya hecho su fetch, este hook se
+    // re-ejecutará via dep array y procesará bien.
+    const haveAnyLivePrice = futureTickersInPortfolio.some(
+      (t) => futurePrices?.[t]?.price != null
+    );
+    if (!haveAnyLivePrice) {
+      console.info("[useFutureAdjustments] Esperando feed Primary antes de generar...");
+      return;
+    }
+
     // Agrupamos por ticker para sumar netQty.
     const futureGroups = {};
     for (const p of positions) {
@@ -12687,7 +12708,7 @@ function ComparaDolarModule() {
 
       let usdtRows = [];
       try {
-        const r = await fetch("/api/usdt");
+        const r = await fetch("/api/cripto?type=usdt");
         if (r.ok) {
           const j = await r.json();
           usdtRows = Object.entries(j)
@@ -12705,7 +12726,7 @@ function ComparaDolarModule() {
 
       let usdcRows = [];
       try {
-        const r = await fetch("/api/usdc");
+        const r = await fetch("/api/cripto?type=usdc");
         if (r.ok) {
           const j = await r.json();
           usdcRows = Object.entries(j)
@@ -14008,7 +14029,7 @@ function CarryTradeModule() {
 
       // 3) REM tipo de cambio
       try {
-        const remRes = await fetch("/api/rem-tipo-cambio");
+        const remRes = await fetch("/api/bcra-rem?type=tipo_cambio");
         if (remRes.ok) {
           const remData = await remRes.json();
           const map = {};
@@ -14021,7 +14042,7 @@ function CarryTradeModule() {
 
       // 4) REM IPC
       try {
-        const ipcRes = await fetch("/api/rem-ipc");
+        const ipcRes = await fetch("/api/bcra-rem?type=ipc");
         if (ipcRes.ok) {
           const ipcData = await ipcRes.json();
           const map = {};
@@ -15930,7 +15951,7 @@ function FuturosVsCaucionModule() {
 
       // 2) REM tipo de cambio (publicación mensual — fetch único)
       try {
-        const remRes = await fetch("/api/rem-tipo-cambio");
+        const remRes = await fetch("/api/bcra-rem?type=tipo_cambio");
         if (remRes.ok) {
           const remData = await remRes.json();
           const map = {};
