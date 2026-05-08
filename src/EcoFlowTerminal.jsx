@@ -4313,36 +4313,49 @@ function useFutureAdjustments(positions, futurePrices) {
       const monto = Number(actualAmount);
       if (!Number.isFinite(monto)) throw new Error("Monto inválido");
 
-      // 1) Crear cash_movement (en ARS, fecha = adjustment_date)
-      // Tipo: 'deposit' si monto > 0 (te acreditan), 'withdrawal' si < 0 (te debitan).
-      // Si es 0 igual creamos el movement para tener traza del día.
-      const movementType = monto >= 0 ? "deposit" : "withdrawal";
-      const notes = `Ajuste futuro ${adj.ticker} (${adj.adjustment_date})`;
+      // El modelo de cash_movements requiere amount > 0 (constraint
+      // cash_movements_amount_positive). El signo se expresa via
+      // movement_type: 'deposit' suma al saldo, 'withdrawal' resta.
+      //
+      //   monto > 0  → deposit (te acreditan ARS por ganancia)
+      //   monto < 0  → withdrawal (te debitan ARS por pérdida)
+      //   monto === 0 → NO creamos movement (sería violación del constraint
+      //                 y un movement de $0 no aporta nada al libro).
+      //                 La fila queda confirmed sin cash_movement asociado.
+      let cashMovementId = null;
+      if (monto !== 0) {
+        const movementType = monto > 0 ? "deposit" : "withdrawal";
+        const absAmount = Math.abs(monto);
+        const notes = `Ajuste futuro ${adj.ticker} (${adj.adjustment_date})`;
 
-      const { data: cm, error: cmErr } = await supabase
-        .from("cash_movements")
-        .insert({
-          user_id: user.id,
-          movement_date: adj.adjustment_date,
-          currency: "ARS",
-          amount: monto, // signed: positivo = deposit, negativo = withdrawal
-          movement_type: movementType,
-          related_position_id: adj.position_id,
-          notes,
-        })
-        .select()
-        .single();
+        const { data: cm, error: cmErr } = await supabase
+          .from("cash_movements")
+          .insert({
+            user_id: user.id,
+            movement_date: adj.adjustment_date,
+            currency: "ARS",
+            amount: absAmount, // siempre positivo, signo via movement_type
+            movement_type: movementType,
+            related_position_id: adj.position_id,
+            notes,
+          })
+          .select()
+          .single();
 
-      if (cmErr) throw cmErr;
+        if (cmErr) throw cmErr;
+        cashMovementId = cm.id;
+      }
 
-      // 2) Actualizar la fila de ajuste
+      // 2) Actualizar la fila de ajuste — guardamos el monto signed
+      //    en actual_amount (queremos preservar el signo para futuras
+      //    queries y el P&L Acreditado del Tramo 4).
       const { error: uErr } = await supabase
         .from("futures_daily_adjustments")
         .update({
           actual_amount: monto,
           status: "confirmed",
           confirmed_at: new Date().toISOString(),
-          cash_movement_id: cm.id,
+          cash_movement_id: cashMovementId, // null si monto === 0
         })
         .eq("id", adjustmentId);
 
@@ -4350,7 +4363,7 @@ function useFutureAdjustments(positions, futurePrices) {
 
       // 3) Refrescar
       setRefreshKey((k) => k + 1);
-      return cm;
+      return { cashMovementId, amount: monto };
     },
     [user, pendingAdjustments]
   );
