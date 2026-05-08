@@ -4022,6 +4022,369 @@ function useFuturePrices(tickers) {
 }
 
 
+/* ─────────────── Hook: useFutureAdjustments ───────────────
+ *
+ * Maneja los ajustes diarios MTM de futuros ROFEX/A3.
+ *
+ * Modelo:
+ *   ROFEX/A3 liquida diariamente la diferencia entre el settlement de
+ *   hoy y el de ayer × cantidad × multiplier. Esa plata se acredita
+ *   al día hábil siguiente en la cuenta comitente del usuario en su
+ *   broker (Cocos en este caso).
+ *
+ *   Como Primary expone solo el settlement actual (no histórico),
+ *   tenemos un cron diario que captura los settlements en la tabla
+ *   futures_settlements_history. A partir de ahí, este hook genera
+ *   filas en futures_daily_adjustments con status='pending' por cada
+ *   posición × día sin ajuste registrado.
+ *
+ *   El usuario después confirma cada ajuste (puede editarlo si Cocos
+ *   le liquidó un monto distinto) y eso crea el cash_movement asociado.
+ *
+ * Convenciones:
+ *   - Para el primer día de la posición (o cuando no hay prev_settle
+ *     en el histórico), se usa entry_price como prev_settle.
+ *   - Solo se generan ajustes para días hábiles (lun-vie, no feriados
+ *     BYMA) anteriores a hoy.
+ *   - "Posición abierta" = grupo consolidado con netQty != 0.
+ *   - Se ejecuta solo si es ≥9:00 AR (cuando ya tendría que haber
+ *     llegado la liquidación de Cocos).
+ *
+ * Estado expuesto:
+ *   - pendingAdjustments: array de filas pending listas para confirmar.
+ *   - confirmedAdjustments: filas ya confirmadas (para mostrar histórico).
+ *   - loading: durante el primer load.
+ *   - error: si algo falla.
+ *   - confirm(adjustmentId, actualAmount): confirma un ajuste creando
+ *     el cash_movement asociado.
+ *   - skip(adjustmentId): marca como skipped sin generar movement.
+ *   - refresh(): recarga + intenta generar ajustes nuevos.
+ */
+function useFutureAdjustments(positions, futurePrices) {
+  const { user } = useAuth();
+  const [pendingAdjustments, setPendingAdjustments] = useState([]);
+  const [confirmedAdjustments, setConfirmedAdjustments] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+  const [refreshKey, setRefreshKey] = useState(0);
+
+  // --- Helper: detecta si es ≥9:00 AR de un día hábil ----
+  const isPostMarketOpenAR = useCallback(() => {
+    const now = new Date();
+    const arDateStr = now.toLocaleDateString("en-CA", {
+      timeZone: "America/Argentina/Buenos_Aires",
+    });
+    const arHourStr = now.toLocaleTimeString("en-GB", {
+      timeZone: "America/Argentina/Buenos_Aires",
+      hour12: false,
+    });
+    const arHour = parseInt(arHourStr.slice(0, 2), 10);
+    if (arHour < 9) return false;
+    if (isNonBusinessDay(arDateStr)) return false;
+    return true;
+  }, []);
+
+  // --- Genera ajustes pendientes para posiciones de futuros abiertas ----
+  // Esta función NO toca filas existentes; solo crea las que faltan.
+  // Conservadora por diseño: se guarda solo si tenemos curr_settle.
+  const generateMissingAdjustments = useCallback(async () => {
+    if (!user) return;
+    if (!isPostMarketOpenAR()) return;
+
+    // 1) Posiciones de futuros abiertas (consolidando)
+    if (!positions || positions.length === 0) return;
+
+    // Agrupamos por ticker para sumar netQty.
+    const futureGroups = {};
+    for (const p of positions) {
+      if (p.instrument_type !== "future") continue;
+      const ticker = (p.ticker || "").toUpperCase().trim();
+      if (!ticker) continue;
+      if (!futureGroups[ticker]) {
+        futureGroups[ticker] = {
+          ticker,
+          ops: [],
+          netQty: 0,
+          earliestEntryDate: null,
+          earliestEntryPrice: null,
+          multiplier: getFutureMultiplier(p),
+        };
+      }
+      const sign = p.operation_type === "venta" ? -1 : 1;
+      const qty = Number(p.quantity) || 0;
+      futureGroups[ticker].netQty += sign * qty;
+      futureGroups[ticker].ops.push(p);
+
+      const entryDate = p.entry_date || p.created_at?.slice(0, 10) || null;
+      if (entryDate) {
+        if (
+          !futureGroups[ticker].earliestEntryDate ||
+          entryDate < futureGroups[ticker].earliestEntryDate
+        ) {
+          futureGroups[ticker].earliestEntryDate = entryDate;
+          futureGroups[ticker].earliestEntryPrice = Number(p.entry_price) || null;
+        }
+      }
+    }
+
+    // Filtrar grupos con netQty != 0 (es decir, posición no cerrada)
+    const openGroups = Object.values(futureGroups).filter((g) => g.netQty !== 0);
+    if (openGroups.length === 0) return;
+
+    // 2) Para cada grupo, traer settlements y calcular qué ajustes faltan
+    const todayAR = new Date().toLocaleDateString("en-CA", {
+      timeZone: "America/Argentina/Buenos_Aires",
+    });
+
+    const tickers = openGroups.map((g) => g.ticker);
+
+    // Traer todos los settlements de esos tickers en bloque
+    const { data: settles, error: sErr } = await supabase
+      .from("futures_settlements_history")
+      .select("ticker, settle_date, settlement")
+      .in("ticker", tickers)
+      .order("settle_date", { ascending: true });
+    if (sErr) {
+      console.warn("[useFutureAdjustments] Error trayendo settlements:", sErr);
+      return;
+    }
+
+    // Index por ticker
+    const settlesByTicker = {};
+    for (const s of settles || []) {
+      if (!settlesByTicker[s.ticker]) settlesByTicker[s.ticker] = [];
+      settlesByTicker[s.ticker].push(s);
+    }
+
+    // Traer ajustes existentes (para no duplicar)
+    const positionIds = [];
+    for (const g of openGroups) {
+      for (const op of g.ops) positionIds.push(op.id);
+    }
+    const { data: existing, error: eErr } = await supabase
+      .from("futures_daily_adjustments")
+      .select("position_id, adjustment_date")
+      .in("position_id", positionIds);
+    if (eErr) {
+      console.warn("[useFutureAdjustments] Error trayendo ajustes existentes:", eErr);
+      return;
+    }
+    const existingSet = new Set(
+      (existing || []).map((r) => `${r.position_id}__${r.adjustment_date}`)
+    );
+
+    // 3) Por cada grupo + cada day disponible en settlement → calcular fila
+    const rowsToInsert = [];
+
+    for (const g of openGroups) {
+      const tickerSettles = settlesByTicker[g.ticker] || [];
+      if (tickerSettles.length === 0) continue;
+
+      // Tomamos la op MÁS VIEJA del grupo (la que define entry_date más temprana)
+      // como "anchor" para el position_id. En realidad cualquier op del grupo
+      // sirve, pero usamos la más antigua para tener consistencia.
+      const anchorOp = g.ops.reduce(
+        (a, b) => {
+          const aD = a.entry_date || a.created_at?.slice(0, 10) || "9999-12-31";
+          const bD = b.entry_date || b.created_at?.slice(0, 10) || "9999-12-31";
+          return aD < bD ? a : b;
+        },
+        g.ops[0]
+      );
+      const anchorEntryDate =
+        anchorOp.entry_date || anchorOp.created_at?.slice(0, 10) || todayAR;
+      const anchorEntryPrice = Number(anchorOp.entry_price) || 0;
+
+      for (const s of tickerSettles) {
+        const adjDate = s.settle_date;
+
+        // Filtros:
+        // - adjDate debe ser >= entry_date de la posición
+        // - adjDate debe ser < hoy AR (no procesamos hoy hasta que cierre el mercado)
+        // - adjDate debe ser día hábil (ya lo es por como capturamos settlements)
+        if (adjDate < anchorEntryDate) continue;
+        if (adjDate >= todayAR) continue;
+
+        // ¿Ya existe un ajuste para esta posición × fecha?
+        const key = `${anchorOp.id}__${adjDate}`;
+        if (existingSet.has(key)) continue;
+
+        // prev_settle: settlement del día hábil anterior si existe; si no,
+        // usar entry_price.
+        let prevSettle = anchorEntryPrice;
+        // Buscar el settle anterior en orden cronológico
+        const prevSettles = tickerSettles.filter(
+          (x) => x.settle_date < adjDate
+        );
+        if (prevSettles.length > 0) {
+          prevSettle = Number(prevSettles[prevSettles.length - 1].settlement);
+        }
+
+        const currSettle = Number(s.settlement);
+        if (!Number.isFinite(currSettle) || !Number.isFinite(prevSettle)) continue;
+
+        const estimatedAmount =
+          (currSettle - prevSettle) * g.netQty * g.multiplier;
+
+        rowsToInsert.push({
+          user_id: user.id,
+          position_id: anchorOp.id,
+          ticker: g.ticker,
+          adjustment_date: adjDate,
+          prev_settle: prevSettle,
+          curr_settle: currSettle,
+          net_qty: g.netQty,
+          multiplier: g.multiplier,
+          estimated_amount: estimatedAmount,
+          status: "pending",
+        });
+      }
+    }
+
+    // 4) Insert (si hay algo que insertar)
+    if (rowsToInsert.length > 0) {
+      const { error: iErr } = await supabase
+        .from("futures_daily_adjustments")
+        .insert(rowsToInsert);
+      if (iErr) {
+        console.warn("[useFutureAdjustments] Error insertando ajustes:", iErr);
+      } else {
+        console.info(
+          `[useFutureAdjustments] Generados ${rowsToInsert.length} ajustes pendientes`
+        );
+      }
+    }
+  }, [user, positions, isPostMarketOpenAR]);
+
+  // --- Carga ajustes desde DB y dispara la generación ----
+  useEffect(() => {
+    if (!user) {
+      setLoading(false);
+      return;
+    }
+    let cancelled = false;
+
+    (async () => {
+      try {
+        setLoading(true);
+        // Primero generamos los que falten (no rompe si falla)
+        await generateMissingAdjustments();
+
+        // Después leemos todo lo que hay en DB
+        const { data, error: rErr } = await supabase
+          .from("futures_daily_adjustments")
+          .select("*")
+          .eq("user_id", user.id)
+          .order("adjustment_date", { ascending: false });
+
+        if (cancelled) return;
+        if (rErr) {
+          setError(rErr.message);
+          setLoading(false);
+          return;
+        }
+
+        const pending = (data || []).filter((r) => r.status === "pending");
+        const confirmed = (data || []).filter((r) => r.status === "confirmed");
+        setPendingAdjustments(pending);
+        setConfirmedAdjustments(confirmed);
+        setLoading(false);
+        setError(null);
+      } catch (e) {
+        if (cancelled) return;
+        setError(e.message);
+        setLoading(false);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [user, refreshKey, generateMissingAdjustments]);
+
+  // --- Confirmar un ajuste: edita la fila + crea cash_movement ----
+  const confirm = useCallback(
+    async (adjustmentId, actualAmount) => {
+      if (!user) throw new Error("No hay sesión");
+      const adj = pendingAdjustments.find((a) => a.id === adjustmentId);
+      if (!adj) throw new Error("Ajuste no encontrado");
+
+      const monto = Number(actualAmount);
+      if (!Number.isFinite(monto)) throw new Error("Monto inválido");
+
+      // 1) Crear cash_movement (en ARS, fecha = adjustment_date)
+      // Tipo: 'deposit' si monto > 0 (te acreditan), 'withdrawal' si < 0 (te debitan).
+      // Si es 0 igual creamos el movement para tener traza del día.
+      const movementType = monto >= 0 ? "deposit" : "withdrawal";
+      const notes = `Ajuste futuro ${adj.ticker} (${adj.adjustment_date})`;
+
+      const { data: cm, error: cmErr } = await supabase
+        .from("cash_movements")
+        .insert({
+          user_id: user.id,
+          movement_date: adj.adjustment_date,
+          currency: "ARS",
+          amount: monto, // signed: positivo = deposit, negativo = withdrawal
+          movement_type: movementType,
+          related_position_id: adj.position_id,
+          notes,
+        })
+        .select()
+        .single();
+
+      if (cmErr) throw cmErr;
+
+      // 2) Actualizar la fila de ajuste
+      const { error: uErr } = await supabase
+        .from("futures_daily_adjustments")
+        .update({
+          actual_amount: monto,
+          status: "confirmed",
+          confirmed_at: new Date().toISOString(),
+          cash_movement_id: cm.id,
+        })
+        .eq("id", adjustmentId);
+
+      if (uErr) throw uErr;
+
+      // 3) Refrescar
+      setRefreshKey((k) => k + 1);
+      return cm;
+    },
+    [user, pendingAdjustments]
+  );
+
+  // --- Skip: marcar como skipped sin crear cash_movement ----
+  const skip = useCallback(
+    async (adjustmentId) => {
+      if (!user) throw new Error("No hay sesión");
+      const { error: uErr } = await supabase
+        .from("futures_daily_adjustments")
+        .update({
+          status: "skipped",
+          confirmed_at: new Date().toISOString(),
+        })
+        .eq("id", adjustmentId);
+      if (uErr) throw uErr;
+      setRefreshKey((k) => k + 1);
+    },
+    [user]
+  );
+
+  const refresh = useCallback(() => setRefreshKey((k) => k + 1), []);
+
+  return {
+    pendingAdjustments,
+    confirmedAdjustments,
+    loading,
+    error,
+    confirm,
+    skip,
+    refresh,
+  };
+}
+
+
 /* ─────────────── Hook: useUserPositions ───────────────
  *
  * Encapsula toda la interacción con la tabla `public.positions` de Supabase.
@@ -4239,15 +4602,15 @@ function computeCashAmountAndType(position, allPositions) {
   const price = Number(position.entry_price);
   if (!qty || !price || qty <= 0 || price <= 0) return null;
 
-  // Caso futuros: solo ventas que netean contra compras previas
+  // Caso futuros: ya NO generamos cash_movement automático al cerrar par.
+  // El nuevo modelo (Tramo 2 de la migración a future_adjustments)
+  // requiere que cada ajuste diario MTM se confirme manualmente por el
+  // usuario, porque el monto que liquida Cocos suele no coincidir
+  // exactamente con el calculado matemáticamente.
+  // El cierre del par se considera "el último ajuste diario" y se
+  // confirma igual que el resto a través del modal de acreditaciones.
   if (position.instrument_type === "future") {
-    if (position.operation_type !== "sell") return null;
-    const pnl = computeFuturePnLForSell(position, allPositions);
-    if (pnl == null) return null;
-    // Convertimos a tipo y amount POSITIVO (el signo lo da el tipo)
-    return pnl >= 0
-      ? { amount: pnl,         movement_type: "sale_proceeds" }
-      : { amount: -pnl,        movement_type: "purchase_cost" };
+    return null;
   }
 
   // Bonos / ON: precio cada 100 VN
@@ -7782,6 +8145,12 @@ function PortfolioDashboard({ onNavigate }) {
   // Hook que pollea /api/primary-md cada 10s (horario hábil) o 30 min (fuera).
   // Si futureTickers está vacío, no hace ningún request.
   const futurePricesState = useFuturePrices(futureTickers);
+
+  // Hook que maneja ajustes diarios MTM de futuros (Tramo 2 del refactor
+  // de cash de futuros). Genera filas pending al cargar el dashboard
+  // (≥9 AM AR de día hábil) por cada posición × día sin ajuste.
+  // Expone confirm/skip que crean cash_movements al confirmar.
+  const futureAdjustmentsState = useFutureAdjustments(positions, futurePricesState.prices);
 
   // Refresh global: el botón "Actualizar" en el header de Posiciones
   // consolidadas (y el auto-refresh inteligente) refresca AMBAS fuentes:
