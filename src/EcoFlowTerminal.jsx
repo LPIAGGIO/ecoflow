@@ -49,6 +49,7 @@ import {
   Activity,
   RefreshCw,
   AlertTriangle,
+  AlertCircle,
   Loader2,
   Info,
   ArrowUp,
@@ -8380,6 +8381,7 @@ function PortfolioDashboard({ onNavigate }) {
             bondPrices={bondPricesState.prices}
             futurePrices={futurePricesState.prices}
             stockPrices={stockPricesState.prices}
+            futureAdjustmentsState={futureAdjustmentsState}
             filter={filter}
             setFilter={setFilter}
             presentTypes={presentTypes}
@@ -8570,6 +8572,524 @@ function FilterChip({ active, onClick, label, color }) {
 }
 
 
+/* ─────────────── FutureAdjustmentsBanner ───────────────
+ *
+ * Banner de alerta visible en la sección "Posiciones consolidadas"
+ * cuando hay ajustes diarios MTM de futuros pendientes de confirmación.
+ *
+ * Click → abre el modal de acreditación.
+ *
+ * Props:
+ *   count: número de ajustes pendientes.
+ *   totalEstimated: suma de estimated_amount (en ARS, signed).
+ *   onClick: handler del click.
+ */
+function FutureAdjustmentsBanner({ count, totalEstimated, onClick }) {
+  const isPositive = totalEstimated >= 0;
+  const sign = isPositive ? "+" : "";
+  // Color de borde: amarillo siempre (es una alerta de "atención necesaria",
+  // no es bueno ni malo en sí mismo).
+  const accent = "#eab308"; // tailwind amber-500
+
+  return (
+    <button
+      onClick={onClick}
+      className="flex items-center justify-between"
+      style={{
+        width: "100%",
+        backgroundColor: "rgba(234,179,8,0.08)",
+        border: `1px solid ${accent}`,
+        borderLeft: `3px solid ${accent}`,
+        padding: "12px 16px",
+        marginBottom: 12,
+        cursor: "pointer",
+        textAlign: "left",
+        transition: "background-color 120ms ease",
+      }}
+      onMouseEnter={(e) => {
+        e.currentTarget.style.backgroundColor = "rgba(234,179,8,0.14)";
+      }}
+      onMouseLeave={(e) => {
+        e.currentTarget.style.backgroundColor = "rgba(234,179,8,0.08)";
+      }}
+    >
+      <div className="flex items-center gap-3">
+        <AlertCircle size={16} strokeWidth={2} color={accent} />
+        <div className="flex flex-col">
+          <span style={{
+            fontSize: 12.5,
+            fontWeight: 600,
+            color: C.text,
+            fontFamily: "'Roboto', sans-serif",
+            letterSpacing: "0.01em",
+          }}>
+            {count === 1
+              ? "1 movimiento de futuros pendiente de acreditación"
+              : `${count} movimientos de futuros pendientes de acreditación`}
+          </span>
+          <span style={{
+            fontSize: 10.5,
+            color: C.dim,
+            fontFamily: "'Roboto', sans-serif",
+            marginTop: 2,
+          }}>
+            Total estimado:&nbsp;
+            <span
+              className="eco-mono"
+              style={{
+                color: isPositive ? C.green : C.red,
+                fontWeight: 500,
+              }}
+            >
+              {sign}{fmtNumber(totalEstimated, { maxDecimals: 2 })} ARS
+            </span>
+          </span>
+        </div>
+      </div>
+
+      <span style={{
+        fontSize: 11,
+        color: accent,
+        fontWeight: 600,
+        fontFamily: "'Roboto', sans-serif",
+        letterSpacing: "0.05em",
+      }}>
+        Revisar →
+      </span>
+    </button>
+  );
+}
+
+
+/* ─────────────── FutureAdjustmentsModal ───────────────
+ *
+ * Modal donde el user confirma cada ajuste diario MTM de futuros.
+ * Pre-carga el monto estimado en cada input. El user puede:
+ *   - Editar el monto (si Cocos liquidó distinto al estimado).
+ *   - Confirmar → crea cash_movement con la fecha del ajuste.
+ *   - Saltar → marca como skipped sin generar movement.
+ *
+ * Si hay varios ajustes pendientes, los muestra todos en una lista
+ * scrolleable. El usuario los confirma de a uno (no hay "confirmar
+ * todos" por ahora — agregar mostraría riesgo de confirmar montos
+ * mal sin querer).
+ *
+ * Props:
+ *   adjustments: array de filas pending desde futures_daily_adjustments.
+ *   onConfirm(id, actualAmount): callback al confirmar.
+ *   onSkip(id): callback al saltar.
+ *   onClose: cerrar el modal.
+ */
+function FutureAdjustmentsModal({ adjustments, onConfirm, onSkip, onClose }) {
+  // Estado local: { [adjustmentId]: { value: string, processing: bool, error: string } }
+  const [drafts, setDrafts] = useState(() => {
+    const init = {};
+    for (const a of adjustments) {
+      init[a.id] = {
+        value: String(Number(a.estimated_amount) || 0),
+        processing: false,
+        error: null,
+      };
+    }
+    return init;
+  });
+
+  // Si la lista de adjustments cambia (porque uno se confirmó/skipped y se
+  // reprodujo el fetch), filtramos los que ya no están del state local.
+  useEffect(() => {
+    setDrafts((prev) => {
+      const next = {};
+      for (const a of adjustments) {
+        next[a.id] = prev[a.id] || {
+          value: String(Number(a.estimated_amount) || 0),
+          processing: false,
+          error: null,
+        };
+      }
+      return next;
+    });
+  }, [adjustments]);
+
+  const handleConfirm = async (adj) => {
+    const draft = drafts[adj.id];
+    if (!draft) return;
+    const monto = Number(draft.value.replace(/,/g, "."));
+    if (!Number.isFinite(monto)) {
+      setDrafts((prev) => ({
+        ...prev,
+        [adj.id]: { ...prev[adj.id], error: "Monto inválido" },
+      }));
+      return;
+    }
+    setDrafts((prev) => ({
+      ...prev,
+      [adj.id]: { ...prev[adj.id], processing: true, error: null },
+    }));
+    try {
+      await onConfirm(adj.id, monto);
+      // El parent re-fetch hará que adjustments se actualice y este
+      // bloque se desmonte automáticamente.
+    } catch (e) {
+      setDrafts((prev) => ({
+        ...prev,
+        [adj.id]: {
+          ...prev[adj.id],
+          processing: false,
+          error: e.message || "Error al confirmar",
+        },
+      }));
+    }
+  };
+
+  const handleSkip = async (adj) => {
+    setDrafts((prev) => ({
+      ...prev,
+      [adj.id]: { ...prev[adj.id], processing: true, error: null },
+    }));
+    try {
+      await onSkip(adj.id);
+    } catch (e) {
+      setDrafts((prev) => ({
+        ...prev,
+        [adj.id]: {
+          ...prev[adj.id],
+          processing: false,
+          error: e.message || "Error al saltar",
+        },
+      }));
+    }
+  };
+
+  return (
+    <div
+      role="dialog"
+      aria-modal="true"
+      onClick={(e) => {
+        // Click en el backdrop cierra el modal
+        if (e.target === e.currentTarget) onClose();
+      }}
+      style={{
+        position: "fixed",
+        inset: 0,
+        backgroundColor: "rgba(0,0,0,0.65)",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        zIndex: 100,
+        padding: 20,
+      }}
+    >
+      <div
+        style={{
+          backgroundColor: C.panel,
+          border: `1px solid ${C.border}`,
+          width: "100%",
+          maxWidth: 640,
+          maxHeight: "90vh",
+          display: "flex",
+          flexDirection: "column",
+        }}
+      >
+        {/* Header */}
+        <div
+          className="flex items-center justify-between"
+          style={{
+            padding: "16px 20px",
+            borderBottom: `1px solid ${C.border}`,
+          }}
+        >
+          <div className="flex flex-col">
+            <span style={{
+              fontSize: 14,
+              fontWeight: 600,
+              color: C.text,
+              fontFamily: "'Roboto', sans-serif",
+            }}>
+              Acreditación de movimientos de futuros
+            </span>
+            <span style={{
+              fontSize: 10.5,
+              color: C.dim,
+              marginTop: 2,
+              fontFamily: "'Roboto', sans-serif",
+            }}>
+              {adjustments.length === 1
+                ? "1 ajuste pendiente"
+                : `${adjustments.length} ajustes pendientes`}
+            </span>
+          </div>
+          <button
+            onClick={onClose}
+            style={{
+              backgroundColor: "transparent",
+              border: "none",
+              color: C.muted,
+              cursor: "pointer",
+              padding: 4,
+            }}
+            aria-label="Cerrar"
+          >
+            <X size={18} strokeWidth={2} />
+          </button>
+        </div>
+
+        {/* Cuerpo: lista scrolleable */}
+        <div style={{
+          padding: "12px 20px",
+          overflowY: "auto",
+          flex: 1,
+        }}>
+          {adjustments.length === 0 ? (
+            <div style={{
+              textAlign: "center",
+              padding: "40px 0",
+              color: C.dim,
+              fontSize: 12,
+            }}>
+              No hay ajustes pendientes
+            </div>
+          ) : (
+            adjustments.map((adj) => {
+              const draft = drafts[adj.id] || { value: "0", processing: false, error: null };
+              const variation = Number(adj.curr_settle) - Number(adj.prev_settle);
+              const variationPct = adj.prev_settle > 0
+                ? (variation / Number(adj.prev_settle)) * 100
+                : null;
+              const variationColor = variation >= 0 ? C.green : C.red;
+              const variationSign = variation >= 0 ? "+" : "";
+              const estimated = Number(adj.estimated_amount) || 0;
+              const estIsPositive = estimated >= 0;
+
+              return (
+                <div
+                  key={adj.id}
+                  style={{
+                    border: `1px solid ${C.border}`,
+                    padding: 14,
+                    marginBottom: 12,
+                    backgroundColor: C.deep,
+                  }}
+                >
+                  {/* Header de la fila */}
+                  <div className="flex items-center justify-between" style={{ marginBottom: 10 }}>
+                    <div className="flex items-center gap-3">
+                      <span
+                        className="eco-mono"
+                        style={{
+                          fontSize: 13,
+                          fontWeight: 600,
+                          color: C.text,
+                          letterSpacing: "0.04em",
+                        }}
+                      >
+                        {adj.ticker}
+                      </span>
+                      <span style={{
+                        fontSize: 10.5,
+                        color: C.dim,
+                        fontFamily: "'Roboto', sans-serif",
+                      }}>
+                        {adj.adjustment_date}
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Detalles: variación + cantidad */}
+                  <div
+                    className="flex items-center gap-4"
+                    style={{ marginBottom: 10, fontSize: 11 }}
+                  >
+                    <div className="flex flex-col">
+                      <span style={{
+                        fontSize: 9,
+                        color: C.dim,
+                        textTransform: "uppercase",
+                        letterSpacing: "0.1em",
+                        fontFamily: "'Roboto', sans-serif",
+                      }}>
+                        Variación settlement
+                      </span>
+                      <span
+                        className="eco-mono"
+                        style={{ color: C.text, marginTop: 2 }}
+                      >
+                        {fmtNumber(adj.prev_settle, { maxDecimals: 2 })}
+                        &nbsp;→&nbsp;
+                        {fmtNumber(adj.curr_settle, { maxDecimals: 2 })}
+                        &nbsp;
+                        <span style={{ color: variationColor }}>
+                          ({variationSign}{fmtNumber(variation, { maxDecimals: 2 })}
+                          {variationPct != null && (
+                            <>
+                              {" / "}{variationSign}{variationPct.toFixed(2)}%
+                            </>
+                          )})
+                        </span>
+                      </span>
+                    </div>
+                    <div className="flex flex-col">
+                      <span style={{
+                        fontSize: 9,
+                        color: C.dim,
+                        textTransform: "uppercase",
+                        letterSpacing: "0.1em",
+                        fontFamily: "'Roboto', sans-serif",
+                      }}>
+                        Cantidad neta
+                      </span>
+                      <span
+                        className="eco-mono"
+                        style={{ color: C.text, marginTop: 2 }}
+                      >
+                        {fmtNumber(adj.net_qty, { maxDecimals: 0 })} ×{" "}
+                        {fmtNumber(adj.multiplier, { maxDecimals: 0 })}
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Input de monto */}
+                  <div className="flex items-center gap-2" style={{ marginBottom: 10 }}>
+                    <div className="flex flex-col" style={{ flex: 1 }}>
+                      <label style={{
+                        fontSize: 9,
+                        color: C.dim,
+                        textTransform: "uppercase",
+                        letterSpacing: "0.1em",
+                        fontFamily: "'Roboto', sans-serif",
+                        marginBottom: 4,
+                      }}>
+                        Monto a acreditar (ARS)
+                      </label>
+                      <input
+                        type="text"
+                        inputMode="decimal"
+                        value={draft.value}
+                        onChange={(e) => setDrafts((prev) => ({
+                          ...prev,
+                          [adj.id]: { ...prev[adj.id], value: e.target.value, error: null },
+                        }))}
+                        disabled={draft.processing}
+                        className="eco-mono"
+                        style={{
+                          backgroundColor: C.deep,
+                          border: `1px solid ${C.border}`,
+                          color: C.text,
+                          padding: "8px 10px",
+                          fontSize: 13,
+                          fontFamily: "'JetBrains Mono', monospace",
+                        }}
+                      />
+                    </div>
+                    <div className="flex flex-col" style={{ paddingLeft: 8 }}>
+                      <span style={{
+                        fontSize: 9,
+                        color: C.dim,
+                        textTransform: "uppercase",
+                        letterSpacing: "0.1em",
+                        fontFamily: "'Roboto', sans-serif",
+                        marginBottom: 4,
+                      }}>
+                        Estimado
+                      </span>
+                      <span
+                        className="eco-mono"
+                        style={{
+                          fontSize: 12.5,
+                          color: estIsPositive ? C.green : C.red,
+                          fontWeight: 500,
+                          padding: "8px 0",
+                        }}
+                      >
+                        {estIsPositive ? "+" : ""}{fmtNumber(estimated, { maxDecimals: 2 })}
+                      </span>
+                    </div>
+                  </div>
+
+                  {draft.error && (
+                    <div style={{
+                      fontSize: 11,
+                      color: C.red,
+                      marginBottom: 8,
+                      fontFamily: "'Roboto', sans-serif",
+                    }}>
+                      {draft.error}
+                    </div>
+                  )}
+
+                  {/* Botones */}
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={() => handleConfirm(adj)}
+                      disabled={draft.processing}
+                      style={{
+                        backgroundColor: C.accent,
+                        border: "none",
+                        color: "#fff",
+                        padding: "8px 14px",
+                        cursor: draft.processing ? "wait" : "pointer",
+                        fontSize: 11.5,
+                        fontWeight: 600,
+                        fontFamily: "'Roboto', sans-serif",
+                        letterSpacing: "0.02em",
+                        opacity: draft.processing ? 0.6 : 1,
+                      }}
+                    >
+                      {draft.processing ? "Procesando..." : "Confirmar y acreditar"}
+                    </button>
+                    <button
+                      onClick={() => handleSkip(adj)}
+                      disabled={draft.processing}
+                      style={{
+                        backgroundColor: "transparent",
+                        border: `1px solid ${C.border}`,
+                        color: C.muted,
+                        padding: "8px 14px",
+                        cursor: draft.processing ? "wait" : "pointer",
+                        fontSize: 11.5,
+                        fontWeight: 500,
+                        fontFamily: "'Roboto', sans-serif",
+                      }}
+                    >
+                      Saltar
+                    </button>
+                  </div>
+                </div>
+              );
+            })
+          )}
+        </div>
+
+        {/* Footer */}
+        <div
+          style={{
+            padding: "12px 20px",
+            borderTop: `1px solid ${C.border}`,
+            display: "flex",
+            justifyContent: "flex-end",
+          }}
+        >
+          <button
+            onClick={onClose}
+            style={{
+              backgroundColor: "transparent",
+              border: `1px solid ${C.border}`,
+              color: C.muted,
+              padding: "8px 16px",
+              cursor: "pointer",
+              fontSize: 11.5,
+              fontWeight: 500,
+              fontFamily: "'Roboto', sans-serif",
+            }}
+          >
+            Cerrar
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+
 /* ─────────────── ConsolidatedSection ───────────────
  * 
  * Wrapper de la vista consolidada con su cabecera, filtros y tabla.
@@ -8580,6 +9100,7 @@ function ConsolidatedSection({
   bondPrices,
   futurePrices,
   stockPrices,
+  futureAdjustmentsState,
   filter,
   setFilter,
   presentTypes,
@@ -8597,6 +9118,16 @@ function ConsolidatedSection({
     () => consolidatePositions(filteredPositions, bondPrices, futurePrices),
     [filteredPositions, bondPrices, futurePrices]
   );
+
+  // Modal state para acreditación de ajustes futuros pendientes.
+  // Se abre desde el banner y muestra la lista de ajustes pendientes
+  // con inputs editables para confirmar el monto real liquidado.
+  const [adjustmentsModalOpen, setAdjustmentsModalOpen] = useState(false);
+
+  const pending = futureAdjustmentsState?.pendingAdjustments || [];
+  const totalEstimated = useMemo(() => {
+    return pending.reduce((sum, a) => sum + (Number(a.estimated_amount) || 0), 0);
+  }, [pending]);
 
   const open = allConsolidated.filter((g) => !g.isClosed);
   const closedAll = allConsolidated.filter((g) => g.isClosed);
@@ -8725,6 +9256,28 @@ function ConsolidatedSection({
           );
         })}
       </div>
+
+      {/* Banner de ajustes pendientes de futuros: aparece solo si hay
+          al menos un ajuste con status='pending'. Click → abre modal
+          de acreditación donde el user confirma el monto real liquidado
+          por el broker. */}
+      {pending.length > 0 && (
+        <FutureAdjustmentsBanner
+          count={pending.length}
+          totalEstimated={totalEstimated}
+          onClick={() => setAdjustmentsModalOpen(true)}
+        />
+      )}
+
+      {/* Modal de acreditación */}
+      {adjustmentsModalOpen && (
+        <FutureAdjustmentsModal
+          adjustments={pending}
+          onConfirm={futureAdjustmentsState.confirm}
+          onSkip={futureAdjustmentsState.skip}
+          onClose={() => setAdjustmentsModalOpen(false)}
+        />
+      )}
 
       {open.length === 0 ? (
         <div
