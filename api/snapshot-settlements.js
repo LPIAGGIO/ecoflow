@@ -91,7 +91,10 @@ async function listInstruments(token) {
 
 /**
  * Para un ticker determinado, pide el market data y devuelve el
- * settlement actual. Si no hay settlement, devuelve null.
+ * settlement actual + su fecha. Primary devuelve SE como
+ * { price: number, size: number|null, date: epoch_ms }.
+ *
+ * Retorna { price, settleDate } o null si no hay settlement válido.
  */
 async function getSettlement(token, marketId, symbol) {
   const url =
@@ -102,8 +105,24 @@ async function getSettlement(token, marketId, symbol) {
   if (!r.ok) return null;
   const json = await r.json();
   const se = json?.marketData?.SE;
-  if (se == null || !Number.isFinite(Number(se))) return null;
-  return Number(se);
+  if (!se || typeof se !== "object") return null;
+
+  const price = Number(se.price);
+  if (!Number.isFinite(price)) return null;
+
+  // se.date es epoch ms. Si está, lo usamos como fecha REAL del
+  // settlement (más confiable que calcularlo nosotros). Si no, fallback
+  // al cálculo de lastMarketCloseDate().
+  let settleDate = null;
+  if (se.date != null && Number.isFinite(Number(se.date))) {
+    const d = new Date(Number(se.date));
+    if (!isNaN(d.getTime())) {
+      // Convertir a fecha AR para evitar shift de timezone
+      settleDate = d.toISOString().split("T")[0]; // "YYYY-MM-DD"
+    }
+  }
+
+  return { price, settleDate };
 }
 
 /**
@@ -194,19 +213,24 @@ export default async function handler(req, res) {
       }
 
       try {
-        const settlement = await getSettlement(token, marketId, symbol);
-        if (settlement == null) {
+        const result = await getSettlement(token, marketId, symbol);
+        if (!result) {
           summary.skipped++;
           summary.details.push({ ticker, status: "no_settlement" });
           continue;
         }
 
+        // Preferimos la fecha que vino del propio settlement (es la
+        // fecha real de la sesión que generó ese settle). Si no vino,
+        // usamos targetDate calculada por nosotros como fallback.
+        const dateToUse = result.settleDate || targetDate;
+
         const { error } = await supabase
           .from("futures_settlements_history")
           .upsert({
             ticker,
-            settle_date: targetDate,
-            settlement,
+            settle_date: dateToUse,
+            settlement: result.price,
           }, { onConflict: "ticker,settle_date" });
 
         if (error) {
@@ -214,6 +238,7 @@ export default async function handler(req, res) {
           summary.details.push({ ticker, status: "db_error", error: error.message });
         } else {
           summary.captured++;
+          summary.details.push({ ticker, settle_date: dateToUse, settlement: result.price });
         }
       } catch (e) {
         summary.errors++;
