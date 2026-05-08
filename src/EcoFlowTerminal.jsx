@@ -4070,27 +4070,22 @@ function useFutureAdjustments(positions, futurePrices) {
   const [refreshKey, setRefreshKey] = useState(0);
 
   // --- Helper: detecta si es ≥9:00 AR de un día hábil ----
-  const isPostMarketOpenAR = useCallback(() => {
-    const now = new Date();
-    const arDateStr = now.toLocaleDateString("en-CA", {
+  // Solo bloquea si NO es día hábil (sábado/domingo/feriado). Durante
+  // días hábiles generamos siempre que se cargue el dashboard, sin
+  // importar la hora. El filtro real de "qué días procesar" lo hace
+  // el loop interno usando el flag includeToday (post-cierre).
+  const isBusinessDayAR = useCallback(() => {
+    const arDateStr = new Date().toLocaleDateString("en-CA", {
       timeZone: "America/Argentina/Buenos_Aires",
     });
-    const arHourStr = now.toLocaleTimeString("en-GB", {
-      timeZone: "America/Argentina/Buenos_Aires",
-      hour12: false,
-    });
-    const arHour = parseInt(arHourStr.slice(0, 2), 10);
-    if (arHour < 9) return false;
-    if (isNonBusinessDay(arDateStr)) return false;
-    return true;
+    return !isNonBusinessDay(arDateStr);
   }, []);
 
   // --- Genera ajustes pendientes para posiciones de futuros abiertas ----
   // Esta función NO toca filas existentes; solo crea las que faltan.
-  // Conservadora por diseño: se guarda solo si tenemos curr_settle.
   const generateMissingAdjustments = useCallback(async () => {
     if (!user) return;
-    if (!isPostMarketOpenAR()) return;
+    if (!isBusinessDayAR()) return;
 
     // 1) Posiciones de futuros abiertas (consolidando)
     if (!positions || positions.length === 0) return;
@@ -4137,6 +4132,19 @@ function useFutureAdjustments(positions, futurePrices) {
       timeZone: "America/Argentina/Buenos_Aires",
     });
 
+    // Hora AR para decidir si incluimos hoy en la ventana de ajustes:
+    //   - Si son ≥17 AR (mercado cerrado), generamos también el ajuste
+    //     del día actual usando proxy (precio actual de Primary o último
+    //     settle conocido). Es estimado, el usuario lo confirma cuando
+    //     Cocos le liquida (típicamente al día siguiente ~13:00).
+    //   - Si son <17 AR (mercado abierto), solo generamos hasta ayer.
+    const arHourStr = new Date().toLocaleTimeString("en-GB", {
+      timeZone: "America/Argentina/Buenos_Aires",
+      hour12: false,
+    });
+    const arHour = parseInt(arHourStr.slice(0, 2), 10);
+    const includeToday = arHour >= 17 && !isNonBusinessDay(todayAR);
+
     const tickers = openGroups.map((g) => g.ticker);
 
     // Traer todos los settlements de esos tickers en bloque
@@ -4181,9 +4189,8 @@ function useFutureAdjustments(positions, futurePrices) {
       const tickerSettles = settlesByTicker[g.ticker] || [];
       if (tickerSettles.length === 0) continue;
 
-      // Tomamos la op MÁS VIEJA del grupo (la que define entry_date más temprana)
-      // como "anchor" para el position_id. En realidad cualquier op del grupo
-      // sirve, pero usamos la más antigua para tener consistencia.
+      // Anchor op: la op MÁS VIEJA del grupo. Define entry_date y entry_price
+      // que usamos como prev_settle del primer día.
       const anchorOp = g.ops.reduce(
         (a, b) => {
           const aD = a.entry_date || a.created_at?.slice(0, 10) || "9999-12-31";
@@ -4196,33 +4203,98 @@ function useFutureAdjustments(positions, futurePrices) {
         anchorOp.entry_date || anchorOp.created_at?.slice(0, 10) || todayAR;
       const anchorEntryPrice = Number(anchorOp.entry_price) || 0;
 
-      for (const s of tickerSettles) {
-        const adjDate = s.settle_date;
+      // Iteramos día por día desde entry_date+1 hasta hoy-1 (día hábil
+      // anterior a hoy). Para cada día, intentamos resolver el settle:
+      //   - Si hay settle exacto del día → uso ese (is_estimated=false).
+      //   - Si NO hay → uso el precio actual de Primary feed (live) como
+      //                 proxy. Si tampoco → uso entry_price.
+      // Esto cubre el caso en que Primary remarkets no actualice el settle:
+      // el ajuste se genera igual con un proxy y el usuario lo confirma con
+      // el monto real que le liquidó su broker.
+      //
+      // Si estamos post-mercado AR (≥17:00), incluimos también el ajuste
+      // del día actual con un proxy. Eso permite ver el banner el mismo
+      // día post-cierre sin esperar al día siguiente.
+      const cursor = new Date(anchorEntryDate + "T12:00:00");
+      const endDateStr = includeToday
+        ? todayAR
+        : (() => {
+            // ayer en AR (o último día hábil)
+            const d = new Date(todayAR + "T12:00:00");
+            d.setDate(d.getDate() - 1);
+            return d.toISOString().slice(0, 10);
+          })();
+      const endDate = new Date(endDateStr + "T12:00:00");
+      // endDate es inclusive — la condición del loop es <=
+      endDate.setHours(23, 59, 59, 999);
 
-        // Filtros:
-        // - adjDate debe ser >= entry_date de la posición
-        // - adjDate debe ser < hoy AR (no procesamos hoy hasta que cierre el mercado)
-        // - adjDate debe ser día hábil (ya lo es por como capturamos settlements)
-        if (adjDate < anchorEntryDate) continue;
-        if (adjDate >= todayAR) continue;
+      // Empezamos desde el día siguiente al entry_date (el día de la compra
+      // no genera ajuste — sí podría generarlo si hubo MTM ese mismo día,
+      // pero por simplicidad arrancamos desde el día hábil siguiente).
+      cursor.setDate(cursor.getDate() + 1);
+      while (cursor.getDay() === 0 || cursor.getDay() === 6) {
+        cursor.setDate(cursor.getDate() + 1);
+      }
 
-        // ¿Ya existe un ajuste para esta posición × fecha?
-        const key = `${anchorOp.id}__${adjDate}`;
-        if (existingSet.has(key)) continue;
+      while (cursor <= endDate) {
+        const adjDate = cursor.toISOString().slice(0, 10);
 
-        // prev_settle: settlement del día hábil anterior si existe; si no,
-        // usar entry_price.
-        let prevSettle = anchorEntryPrice;
-        // Buscar el settle anterior en orden cronológico
-        const prevSettles = tickerSettles.filter(
-          (x) => x.settle_date < adjDate
-        );
-        if (prevSettles.length > 0) {
-          prevSettle = Number(prevSettles[prevSettles.length - 1].settlement);
+        // Skip días no hábiles (feriados, fines de semana)
+        if (isNonBusinessDay(adjDate)) {
+          cursor.setDate(cursor.getDate() + 1);
+          continue;
         }
 
-        const currSettle = Number(s.settlement);
-        if (!Number.isFinite(currSettle) || !Number.isFinite(prevSettle)) continue;
+        // ¿Ya existe ajuste para esta posición × fecha?
+        const key = `${anchorOp.id}__${adjDate}`;
+        if (existingSet.has(key)) {
+          cursor.setDate(cursor.getDate() + 1);
+          continue;
+        }
+
+        // Resolver prev_settle: el settle del día hábil ANTERIOR a adjDate.
+        //   - Si existe en histórico → usar ese.
+        //   - Si no → entry_price (es el primer día de la posición).
+        let prevSettle = anchorEntryPrice;
+        const prevCandidates = tickerSettles.filter(
+          (x) => x.settle_date < adjDate
+        );
+        if (prevCandidates.length > 0) {
+          prevSettle = Number(prevCandidates[prevCandidates.length - 1].settlement);
+        }
+
+        // Resolver curr_settle con cascada de fallbacks:
+        //   1) Settle exacto del día en BD → preferido (is_estimated=false).
+        //   2) Si NO hay y existe precio actual en feed Primary → usarlo
+        //      como proxy. Es lo más cercano a "precio de cierre del día"
+        //      que se puede conseguir en vivo (is_estimated=true).
+        //   3) Si tampoco hay precio en feed → usar prev_settle como
+        //      curr_settle (estimated_amount = 0). Conservador
+        //      (is_estimated=true).
+        const exactSettle = tickerSettles.find((x) => x.settle_date === adjDate);
+        let currSettle;
+        let isEstimated;
+
+        if (exactSettle) {
+          currSettle = Number(exactSettle.settlement);
+          isEstimated = false;
+        } else {
+          // No hay settle oficial — buscar fallback en feed live de Primary
+          const livePrice = futurePrices?.[g.ticker]?.price;
+          if (livePrice != null && Number.isFinite(Number(livePrice))) {
+            currSettle = Number(livePrice);
+            isEstimated = true;
+          } else {
+            // Último recurso: prev_settle. Estimated_amount queda 0.
+            currSettle = prevSettle;
+            isEstimated = true;
+          }
+        }
+
+        if (!Number.isFinite(currSettle) || !Number.isFinite(prevSettle)) {
+          cursor.setDate(cursor.getDate() + 1);
+          continue;
+        }
 
         const estimatedAmount =
           (currSettle - prevSettle) * g.netQty * g.multiplier;
@@ -4237,8 +4309,11 @@ function useFutureAdjustments(positions, futurePrices) {
           net_qty: g.netQty,
           multiplier: g.multiplier,
           estimated_amount: estimatedAmount,
+          is_estimated: isEstimated,
           status: "pending",
         });
+
+        cursor.setDate(cursor.getDate() + 1);
       }
     }
 
@@ -4255,7 +4330,7 @@ function useFutureAdjustments(positions, futurePrices) {
         );
       }
     }
-  }, [user, positions, isPostMarketOpenAR]);
+  }, [user, positions, futurePrices, isBusinessDayAR]);
 
   // --- Carga ajustes desde DB y dispara la generación ----
   useEffect(() => {
@@ -8892,8 +8967,42 @@ function FutureAdjustmentsModal({ adjustments, onConfirm, onClose }) {
                       }}>
                         {adj.adjustment_date}
                       </span>
+                      {adj.is_estimated && (
+                        <span style={{
+                          fontSize: 9,
+                          fontWeight: 600,
+                          color: "#eab308",
+                          backgroundColor: "rgba(234,179,8,0.12)",
+                          border: "1px solid rgba(234,179,8,0.4)",
+                          padding: "2px 6px",
+                          letterSpacing: "0.06em",
+                          fontFamily: "'Roboto', sans-serif",
+                          textTransform: "uppercase",
+                        }}>
+                          Estimado
+                        </span>
+                      )}
                     </div>
                   </div>
+
+                  {/* Cartel explicativo cuando es estimado */}
+                  {adj.is_estimated && (
+                    <div style={{
+                      backgroundColor: "rgba(234,179,8,0.08)",
+                      borderLeft: "2px solid #eab308",
+                      padding: "8px 10px",
+                      marginBottom: 10,
+                      fontSize: 10.5,
+                      lineHeight: 1.5,
+                      color: C.muted,
+                      fontFamily: "'Roboto', sans-serif",
+                    }}>
+                      El settle oficial de este día aún no se publicó.
+                      El monto sugerido se calculó usando el precio actual
+                      de mercado como referencia. <strong style={{ color: C.text }}>
+                      Confirmá con el monto real que tu broker te liquidó</strong>.
+                    </div>
+                  )}
 
                   {/* Detalles: variación + cantidad */}
                   <div
