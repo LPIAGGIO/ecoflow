@@ -4,5 +4,11 @@
   "framework": "vite",
   "rewrites": [
     { "source": "/((?!api/).*)", "destination": "/index.html" }
+  ],
+  "crons": [
+    {
+      "path": "/api/snapshot-settlements",
+      "schedule": "0 21 * * 1-5"
+    }
   ]
 }
