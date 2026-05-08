@@ -5925,7 +5925,15 @@ function DistributionCard({ positions, fx, bondPrices, futurePrices, valuationCu
       { key: "usd_mep", label: "Dólares",           amount: usdMep, currency: "USD-MEP" },
       { key: "usd_ccl", label: "US Dollar (Cable)", amount: usdCcl, currency: "USD-CCL" },
     ];
-  }, [positions, fx, valuationCurrency, bondPrices, balanceByCurrency]);
+    // futurePrices va en las deps porque computePortfolioTotals lo usa para
+    // valuar los futuros a su P&L MTM. Sin esta dep, cuando llega un precio
+    // fresco de Primary el `instrumentsTotal` no se recalcula y queda stale,
+    // y la suma "Instrumentos + Pesos" deja de coincidir con el TOTAL de
+    // TotalCard (que sí lo tiene en sus deps). Bug reportado por LP en mayo
+    // 2026: TOTAL daba $84.531.993 mientras que Instrumentos+Pesos daba
+    // $83.269.743 — la diferencia exacta era el delta del precio del DLR
+    // multiplicado por net_qty × multiplier.
+  }, [positions, fx, valuationCurrency, bondPrices, futurePrices, balanceByCurrency]);
 
   return (
     <div style={cardBaseStyle()}>
