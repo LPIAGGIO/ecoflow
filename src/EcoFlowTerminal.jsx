@@ -4424,6 +4424,15 @@ function useFutureAdjustments(positions, futurePrices) {
         const absAmount = Math.abs(monto);
         const notes = `Ajuste futuro ${adj.ticker} (${adj.adjustment_date})`;
 
+        // related_position_id va EXPLÍCITAMENTE en null acá. El constraint
+        // cash_movements_related_position_logic exige que deposit/withdrawal
+        // tengan related_position_id IS NULL (solo sale_proceeds y purchase_cost
+        // pueden referenciar una position). La trazabilidad de qué ajuste
+        // generó este movement se mantiene del otro lado: la fila de
+        // futures_daily_adjustments guarda el cash_movement_id en su columna
+        // homónima (ver UPDATE más abajo). Si querés saber a qué futuro
+        // corresponde un movement, hacés JOIN por esa FK; o leés la `notes`,
+        // que ya incluye ticker y adjustment_date para el libro.
         const { data: cm, error: cmErr } = await supabase
           .from("cash_movements")
           .insert({
@@ -4432,7 +4441,7 @@ function useFutureAdjustments(positions, futurePrices) {
             currency: "ARS",
             amount: absAmount, // siempre positivo, signo via movement_type
             movement_type: movementType,
-            related_position_id: adj.position_id,
+            related_position_id: null,
             notes,
           })
           .select()
