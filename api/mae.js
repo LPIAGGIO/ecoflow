@@ -10,18 +10,10 @@
 //   GET /api/mae?type=repo                            → /cotizaciones/repo
 //   GET /api/mae?type=boletin&fecha=YYYY-MM-DD        → /boletin/ReporteResumenFinal?fecha=
 //
-// Devuelve el body tal cual lo devuelve MAE (sin transformar) + headers
-// útiles como x-pagination preservados en el body como `_meta`.
+// AUTH: usa MAE_API_KEY de env vars. Nunca se expone al cliente.
 //
-// AUTH: usa MAE_API_KEY de env vars. Nunca se expone al cliente — los
-// fetches del frontend hablan con este endpoint y NO directo con MAE.
-//
-// CACHE: 60s por type+fecha. MAE no se actualiza intra-día con frecuencia
-// (los cotizaciones live cambian segundo a segundo, los boletines no
-// cambian una vez publicados). Caché de 60s es buen balance.
-//
-// LOGGING: cada request se loguea con type, status, duration. Si MAE
-// devuelve un shape inesperado o falla, queda asentado.
+// User-Agent: usamos uno de browser real porque MAE bloquea User-Agents
+// "bot-like" o de cloud providers (devolvió 403 con el default de fetch).
 
 const MAE_BASE = "https://api.mae.com.ar/MarketData/v1";
 
@@ -37,7 +29,6 @@ export default async function handler(req, res) {
   const t0 = Date.now();
   const { type, fecha } = req.query || {};
 
-  // ─── Validación ──────────────────────────────────────────
   if (!type || !PATHS[type]) {
     return res.status(400).json({
       error: "Falta o inválido el query param 'type'.",
@@ -57,7 +48,6 @@ export default async function handler(req, res) {
     });
   }
 
-  // ─── Auth ───────────────────────────────────────────────
   const apiKey = process.env.MAE_API_KEY;
   if (!apiKey) {
     console.error("[mae] MAE_API_KEY no configurada en env vars");
@@ -66,41 +56,48 @@ export default async function handler(req, res) {
     });
   }
 
-  // ─── URL ────────────────────────────────────────────────
   let url = `${MAE_BASE}${PATHS[type]}`;
   if (type === "boletin") {
     url += `?fecha=${encodeURIComponent(fecha)}`;
   }
 
-  // ─── Fetch ──────────────────────────────────────────────
   try {
     const r = await fetch(url, {
-      headers: { "x-api-key": apiKey },
+      headers: {
+        "x-api-key": apiKey,
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "es-AR,es;q=0.9,en;q=0.8",
+      },
     });
 
     const duration = Date.now() - t0;
     const contentType = r.headers.get("content-type") || "";
 
     if (!r.ok) {
-      console.warn(`[mae] type=${type} fecha=${fecha || "-"} status=${r.status} duration=${duration}ms`);
+      let bodySnippet = "";
+      try {
+        bodySnippet = (await r.text()).slice(0, 200);
+      } catch {}
+      console.warn(
+        `[mae] type=${type} fecha=${fecha || "-"} status=${r.status} ` +
+        `duration=${duration}ms body="${bodySnippet}"`
+      );
       return res.status(r.status).json({
         error: `MAE devolvió ${r.status}`,
         type,
         fecha: fecha || null,
+        body_snippet: bodySnippet || null,
       });
     }
 
-    // Parsear según content-type
     let body;
     if (contentType.includes("application/json")) {
       body = await r.json();
     } else {
-      // Fallback: texto crudo (no debería pasar pero por las dudas)
       body = await r.text();
     }
 
-    // Pagination header de MAE (lo preservamos como _meta para que el
-    // frontend lo pueda usar si lo necesita)
     const paginationHeader = r.headers.get("x-pagination");
     let meta = null;
     if (paginationHeader) {
@@ -116,8 +113,6 @@ export default async function handler(req, res) {
       `duration=${duration}ms records=${Array.isArray(body) ? body.length : "n/a"}`
     );
 
-    // Cache: cotizaciones live (60s), boletín del día anterior (1 hora,
-    // no cambia más una vez publicado).
     const isHistorical =
       type === "boletin" &&
       fecha &&
@@ -128,12 +123,10 @@ export default async function handler(req, res) {
       `public, s-maxage=${sMaxAge}, stale-while-revalidate=${sMaxAge * 2}`
     );
 
-    // Responder con body + meta opcional
     if (meta && typeof body === "object" && body !== null && !Array.isArray(body)) {
       return res.status(200).json({ ...body, _meta: meta });
     }
     if (meta && Array.isArray(body)) {
-      // Para arrays, lo devolvemos como objeto con _meta + data
       return res.status(200).json({ _meta: meta, data: body });
     }
     return res.status(200).json(body);
