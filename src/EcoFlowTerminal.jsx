@@ -4355,23 +4355,6 @@ function useFutureAdjustments(positions, futurePrices) {
     [user, pendingAdjustments]
   );
 
-  // --- Skip: marcar como skipped sin crear cash_movement ----
-  const skip = useCallback(
-    async (adjustmentId) => {
-      if (!user) throw new Error("No hay sesión");
-      const { error: uErr } = await supabase
-        .from("futures_daily_adjustments")
-        .update({
-          status: "skipped",
-          confirmed_at: new Date().toISOString(),
-        })
-        .eq("id", adjustmentId);
-      if (uErr) throw uErr;
-      setRefreshKey((k) => k + 1);
-    },
-    [user]
-  );
-
   const refresh = useCallback(() => setRefreshKey((k) => k + 1), []);
 
   return {
@@ -4380,7 +4363,6 @@ function useFutureAdjustments(positions, futurePrices) {
     loading,
     error,
     confirm,
-    skip,
     refresh,
   };
 }
@@ -4886,9 +4868,33 @@ function useCashMovements() {
    * Elimina un movement manual (típicamente un deposit/withdrawal cargado
    * por error). No se usa para movements asociados a positions — esos se
    * borran por cascade al borrar la position.
+   *
+   * Si el movement está asociado a un ajuste de futuros (existe una fila
+   * en futures_daily_adjustments con cash_movement_id = movementId),
+   * primero borramos esa fila. La FK con ON DELETE SET NULL no alcanza
+   * porque dejaría la fila como confirmada sin movement, lo cual rompe
+   * el modelo (queremos que se vuelva a generar el ajuste pendiente al
+   * próximo refresh del dashboard).
    */
   const deleteManualMovement = useCallback(async (movementId) => {
     if (!user) throw new Error("No hay sesión activa");
+
+    // 1) Si hay una fila de future_adjustment asociada, borrarla.
+    //    Esto hace que el ajuste vuelva a generarse al próximo refresh
+    //    (siempre que aún haya settlement en histórico para ese día).
+    const { error: adjErr } = await supabase
+      .from("futures_daily_adjustments")
+      .delete()
+      .eq("cash_movement_id", movementId);
+    if (adjErr) {
+      // No bloqueante: si falla, lo logueamos pero seguimos con el
+      // delete del movement. La fila quedaría con cash_movement_id null
+      // (por la FK ON DELETE SET NULL), que es un estado inconsistente
+      // pero no rompe la app.
+      console.warn("[deleteManualMovement] Error borrando ajuste asociado:", adjErr);
+    }
+
+    // 2) Borrar el cash_movement
     const { error: err } = await supabase
       .from("cash_movements")
       .delete()
@@ -8667,20 +8673,21 @@ function FutureAdjustmentsBanner({ count, totalEstimated, onClick }) {
  * Pre-carga el monto estimado en cada input. El user puede:
  *   - Editar el monto (si Cocos liquidó distinto al estimado).
  *   - Confirmar → crea cash_movement con la fecha del ajuste.
- *   - Saltar → marca como skipped sin generar movement.
+ *
+ * Si ese día no hubo movimiento real, el usuario igual confirma con
+ * monto = 0 (no hay botón "Saltar" — la opción A del diseño es
+ * más simple y consistente).
  *
  * Si hay varios ajustes pendientes, los muestra todos en una lista
  * scrolleable. El usuario los confirma de a uno (no hay "confirmar
- * todos" por ahora — agregar mostraría riesgo de confirmar montos
- * mal sin querer).
+ * todos" — agregar mostraría riesgo de confirmar montos mal sin querer).
  *
  * Props:
  *   adjustments: array de filas pending desde futures_daily_adjustments.
  *   onConfirm(id, actualAmount): callback al confirmar.
- *   onSkip(id): callback al saltar.
  *   onClose: cerrar el modal.
  */
-function FutureAdjustmentsModal({ adjustments, onConfirm, onSkip, onClose }) {
+function FutureAdjustmentsModal({ adjustments, onConfirm, onClose }) {
   // Estado local: { [adjustmentId]: { value: string, processing: bool, error: string } }
   const [drafts, setDrafts] = useState(() => {
     const init = {};
@@ -8736,25 +8743,6 @@ function FutureAdjustmentsModal({ adjustments, onConfirm, onSkip, onClose }) {
           ...prev[adj.id],
           processing: false,
           error: e.message || "Error al confirmar",
-        },
-      }));
-    }
-  };
-
-  const handleSkip = async (adj) => {
-    setDrafts((prev) => ({
-      ...prev,
-      [adj.id]: { ...prev[adj.id], processing: true, error: null },
-    }));
-    try {
-      await onSkip(adj.id);
-    } catch (e) {
-      setDrafts((prev) => ({
-        ...prev,
-        [adj.id]: {
-          ...prev[adj.id],
-          processing: false,
-          error: e.message || "Error al saltar",
         },
       }));
     }
@@ -9016,8 +9004,10 @@ function FutureAdjustmentsModal({ adjustments, onConfirm, onSkip, onClose }) {
                     </div>
                   )}
 
-                  {/* Botones */}
-                  <div className="flex items-center gap-2">
+                  {/* Botón confirmar (sin "Saltar" — si querés que un día
+                       no impacte, ponés monto 0 igual). Texto explicativo
+                       abajo para clarificar el uso. */}
+                  <div className="flex flex-col gap-2">
                     <button
                       onClick={() => handleConfirm(adj)}
                       disabled={draft.processing}
@@ -9032,26 +9022,21 @@ function FutureAdjustmentsModal({ adjustments, onConfirm, onSkip, onClose }) {
                         fontFamily: "'Roboto', sans-serif",
                         letterSpacing: "0.02em",
                         opacity: draft.processing ? 0.6 : 1,
+                        alignSelf: "flex-start",
                       }}
                     >
                       {draft.processing ? "Procesando..." : "Confirmar y acreditar"}
                     </button>
-                    <button
-                      onClick={() => handleSkip(adj)}
-                      disabled={draft.processing}
-                      style={{
-                        backgroundColor: "transparent",
-                        border: `1px solid ${C.border}`,
-                        color: C.muted,
-                        padding: "8px 14px",
-                        cursor: draft.processing ? "wait" : "pointer",
-                        fontSize: 11.5,
-                        fontWeight: 500,
-                        fontFamily: "'Roboto', sans-serif",
-                      }}
-                    >
-                      Saltar
-                    </button>
+                    <span style={{
+                      fontSize: 10,
+                      color: C.dim,
+                      fontFamily: "'Roboto', sans-serif",
+                      lineHeight: 1.5,
+                    }}>
+                      Si Cocos te liquidó un monto distinto al estimado,
+                      editalo antes de confirmar. Si ese día no hubo
+                      movimiento real, dejalo en 0.
+                    </span>
                   </div>
                 </div>
               );
@@ -9274,7 +9259,6 @@ function ConsolidatedSection({
         <FutureAdjustmentsModal
           adjustments={pending}
           onConfirm={futureAdjustmentsState.confirm}
-          onSkip={futureAdjustmentsState.skip}
           onClose={() => setAdjustmentsModalOpen(false)}
         />
       )}
