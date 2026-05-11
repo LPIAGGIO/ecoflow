@@ -4083,9 +4083,27 @@ function useFutureAdjustments(positions, futurePrices) {
 
   // --- Genera ajustes pendientes para posiciones de futuros abiertas ----
   // Esta función NO toca filas existentes; solo crea las que faltan.
+  //
+  // Política de generación (Modelo "cron 7 AM día siguiente"):
+  //   - No genera pendings si la hora AR < 07:00 (incluso siendo día hábil).
+  //     Esto da margen a que Matba publique el settle oficial del día
+  //     anterior antes de que el usuario abra la app y vea el banner.
+  //   - Nunca genera pending del día corriente — solo de días pasados
+  //     (controlado por el flag includeToday=false abajo).
   const generateMissingAdjustments = useCallback(async () => {
     if (!user) return;
     if (!isBusinessDayAR()) return;
+
+    // Guarda 7 AM: respetamos la convención de cron "post-09:00 del día
+    // siguiente". Si todavía no son las 7 AM en Argentina, no procesamos.
+    {
+      const arHourStr = new Date().toLocaleTimeString("en-GB", {
+        timeZone: "America/Argentina/Buenos_Aires",
+        hour12: false,
+      });
+      const arHour = parseInt(arHourStr.slice(0, 2), 10);
+      if (arHour < 7) return;
+    }
 
     // 1) Posiciones de futuros abiertas (consolidando)
     if (!positions || positions.length === 0) return;
@@ -4157,14 +4175,32 @@ function useFutureAdjustments(positions, futurePrices) {
     //   - Si son ≥17 AR (mercado cerrado), generamos también el ajuste
     //     del día actual usando proxy (precio actual de Primary o último
     //     settle conocido). Es estimado, el usuario lo confirma cuando
-    //     Cocos le liquida (típicamente al día siguiente ~13:00).
-    //   - Si son <17 AR (mercado abierto), solo generamos hasta ayer.
+    // Política de generación de pending:
+    //
+    //   Bajo el modelo de "cron 7 AM día siguiente" (acordado con LP en
+    //   mayo 2026), el pending de un día D se genera recién cuando ya
+    //   estamos en el día hábil D+1 a partir de las 7 AM AR. Eso da
+    //   margen para que Matba publique el settle oficial de D y evita
+    //   tener pendings "estimados" con un proxy del precio intra-día.
+    //
+    //   En la práctica: nunca generamos pending del día corriente. La
+    //   variable `includeToday` queda en false siempre, y endDateStr es
+    //   "ayer hábil" o el último día con settle disponible.
+    //
+    //   Esto convive con el cálculo del P&L vivo del día (Modelo B): si
+    //   no hay pending del día corriente, TotalCard / ConsolidatedRow
+    //   calculan P&L como (current_price - lookup.lastSettle), donde
+    //   lookup.lastSettle es el settle del último adjustment registrado
+    //   (típicamente, el pending de ayer).
+    //
+    //   IMPORTANTE: igual seguimos calculando arHour por compatibilidad
+    //   con código que lo lea aguas abajo. El switch lo paramos acá.
     const arHourStr = new Date().toLocaleTimeString("en-GB", {
       timeZone: "America/Argentina/Buenos_Aires",
       hour12: false,
     });
     const arHour = parseInt(arHourStr.slice(0, 2), 10);
-    const includeToday = arHour >= 17 && !isNonBusinessDay(todayAR);
+    const includeToday = false; // nunca generar pending del día corriente
 
     const tickers = openGroups.map((g) => g.ticker);
 
@@ -5144,7 +5180,7 @@ function fmtDateShort(iso) {
  * useBondPrices se encarga de fetchear y cachear esos precios.
  */
 
-function DashboardOverview({ positions, fxState, bondPricesState, futurePricesState, stockPricesState, cashState, onIngresar, onRetirar }) {
+function DashboardOverview({ positions, fxState, bondPricesState, futurePricesState, stockPricesState, cashState, futureAdjustmentsState, onIngresar, onRetirar }) {
   const { fx, loading: fxLoading, error: fxError, lastUpdated: fxLastUpdated, refresh: refreshFx } = fxState;
   const { prices: bondPrices, loading: pricesLoading, error: pricesError, lastFetch: pricesLastFetch, refresh: refreshBondPrices } = bondPricesState;
   // futurePricesState viene de PortfolioDashboard (un solo hook compartido
@@ -5155,6 +5191,17 @@ function DashboardOverview({ positions, fxState, bondPricesState, futurePricesSt
   const stockPrices = stockPricesState?.prices || {};
   const balanceByCurrency = cashState?.balanceByCurrency || { "ARS": 0, "USD-MEP": 0, "USD-CCL": 0 };
   const movements = cashState?.movements || [];
+
+  // Lookup de adjustments de futuros — usado por TotalCard y DistributionCard
+  // para descontar el P&L ya acreditado del valor de los futuros (ese P&L
+  // ya está en cash y sumarlo de nuevo es double-counting). Si el hook
+  // todavía no cargó, queda en null y los callers caen al fallback.
+  const pendingAdjustments = futureAdjustmentsState?.pendingAdjustments || [];
+  const confirmedAdjustments = futureAdjustmentsState?.confirmedAdjustments || [];
+  const futureAdjLookup = useMemo(
+    () => buildFutureAdjLookup(pendingAdjustments, confirmedAdjustments),
+    [pendingAdjustments, confirmedAdjustments]
+  );
 
   // Toggle de moneda de valuación: ARS / USD-MEP / USD-CCL
   const [valuationCurrency, setValuationCurrency] = useState("ARS");
@@ -5197,6 +5244,7 @@ function DashboardOverview({ positions, fxState, bondPricesState, futurePricesSt
           stockPrices={stockPrices}
           valuationCurrency={valuationCurrency}
           balanceByCurrency={balanceByCurrency}
+          futureAdjLookup={futureAdjLookup}
           onIngresar={onIngresar}
           onRetirar={onRetirar}
         />
@@ -5207,6 +5255,7 @@ function DashboardOverview({ positions, fxState, bondPricesState, futurePricesSt
           futurePrices={futurePrices}
           valuationCurrency={valuationCurrency}
           balanceByCurrency={balanceByCurrency}
+          futureAdjLookup={futureAdjLookup}
           view={distView}
           onViewChange={setDistView}
         />
@@ -5217,6 +5266,7 @@ function DashboardOverview({ positions, fxState, bondPricesState, futurePricesSt
           futurePrices={futurePrices}
           valuationCurrency={valuationCurrency}
           movements={movements}
+          futureAdjLookup={futureAdjLookup}
           window={liquidityWindow}
           onWindowChange={setLiquidityWindow}
         />
@@ -5535,13 +5585,13 @@ function ValuationToggle({ value, onChange }) {
 
 /* ─────────────── Card 1: Total de cartera ─────────────── */
 
-function TotalCard({ positions, fx, bondPrices, futurePrices, stockPrices, valuationCurrency, balanceByCurrency, onIngresar, onRetirar }) {
+function TotalCard({ positions, fx, bondPrices, futurePrices, stockPrices, valuationCurrency, balanceByCurrency, futureAdjLookup, onIngresar, onRetirar }) {
   // V2: ahora usamos precios de mercado de data912 cuando están disponibles.
   // El P&L se calcula como market - cost. Si no hay precio actualizado para
   // alguna posición, esa cae al fallback "a costo" y aparece en pricesFromCost.
   const totals = useMemo(
-    () => computePortfolioTotals(positions, fx, valuationCurrency, bondPrices, futurePrices),
-    [positions, fx, valuationCurrency, bondPrices, futurePrices]
+    () => computePortfolioTotals(positions, fx, valuationCurrency, bondPrices, futurePrices, futureAdjLookup),
+    [positions, fx, valuationCurrency, bondPrices, futurePrices, futureAdjLookup]
   );
 
   // P&L del día (variación intra-día desde el cierre anterior). Se suma
@@ -5555,7 +5605,7 @@ function TotalCard({ positions, fx, bondPrices, futurePrices, stockPrices, valua
     let hasAny = false;
 
     for (const p of positions) {
-      const d = computeDailyPnL(p, bondPrices, futurePrices, stockPrices);
+      const d = computeDailyPnL(p, bondPrices, futurePrices, stockPrices, futureAdjLookup);
       if (!d || d.pnl == null || !Number.isFinite(d.pnl)) continue;
 
       // Moneda de la posición (igual lógica que en computePortfolioTotals)
@@ -5582,7 +5632,7 @@ function TotalCard({ positions, fx, bondPrices, futurePrices, stockPrices, valua
       base: prevValueInValuation,
       hasAny,
     };
-  }, [positions, bondPrices, futurePrices, stockPrices, fx, valuationCurrency]);
+  }, [positions, bondPrices, futurePrices, stockPrices, fx, valuationCurrency, futureAdjLookup]);
 
   const showDaily = dailyTotals.hasAny && dailyTotals.pnl != null;
   const dailyIsPositive = showDaily && dailyTotals.pnl >= 0;
@@ -5870,7 +5920,7 @@ function TotalCard({ positions, fx, bondPrices, futurePrices, stockPrices, valua
  *     denominación.
  */
 
-function DistributionCard({ positions, fx, bondPrices, futurePrices, valuationCurrency, balanceByCurrency, view, onViewChange }) {
+function DistributionCard({ positions, fx, bondPrices, futurePrices, valuationCurrency, balanceByCurrency, futureAdjLookup, view, onViewChange }) {
   // Vista "Instrumentos": donut con categorías + cash como una porción más.
   const instrumentSlices = useMemo(() => {
     const groups = groupByCategory(positions, fx, valuationCurrency, bondPrices);
@@ -5906,7 +5956,7 @@ function DistributionCard({ positions, fx, bondPrices, futurePrices, valuationCu
   // Vista "Monedas": 4 renglones (Instrumentos + 3 cash por moneda).
   const monedaRows = useMemo(() => {
     // Renglón 1: Instrumentos = total a mercado en valuationCurrency
-    const totals = computePortfolioTotals(positions, fx, valuationCurrency, bondPrices, futurePrices);
+    const totals = computePortfolioTotals(positions, fx, valuationCurrency, bondPrices, futurePrices, futureAdjLookup);
     const instrumentsTotal = totals.value ?? 0;
 
     // Renglones 2-4: cash por moneda (NO convertido — en su moneda nativa).
@@ -5930,10 +5980,11 @@ function DistributionCard({ positions, fx, bondPrices, futurePrices, valuationCu
     // fresco de Primary el `instrumentsTotal` no se recalcula y queda stale,
     // y la suma "Instrumentos + Pesos" deja de coincidir con el TOTAL de
     // TotalCard (que sí lo tiene en sus deps). Bug reportado por LP en mayo
-    // 2026: TOTAL daba $84.531.993 mientras que Instrumentos+Pesos daba
-    // $83.269.743 — la diferencia exacta era el delta del precio del DLR
-    // multiplicado por net_qty × multiplier.
-  }, [positions, fx, valuationCurrency, bondPrices, futurePrices, balanceByCurrency]);
+    // 2026: TOTAL daba $84.531.993,85 vs Instrumentos+Pesos=$83.269.743 — la
+    // diferencia exacta era el delta del precio del DLR multiplicado por
+    // net_qty × multiplier. futureAdjLookup también se incluye porque define
+    // cuánto del P&L del futuro es no acreditado (afecta el "value").
+  }, [positions, fx, valuationCurrency, bondPrices, futurePrices, futureAdjLookup, balanceByCurrency]);
 
   return (
     <div style={cardBaseStyle()}>
@@ -6106,22 +6157,23 @@ function DonutChart({ slices, size = 100 }) {
 
 /* ─────────────── Card 3: Liquidez Proyectada ─────────────── */
 
-function LiquidityCard({ positions, fx, bondPrices, futurePrices, valuationCurrency, movements, window: windowKey, onWindowChange }) {
+function LiquidityCard({ positions, fx, bondPrices, futurePrices, valuationCurrency, movements, futureAdjLookup, window: windowKey, onWindowChange }) {
   const breakdown = useMemo(
-    () => computeLiquidityBreakdown(positions, fx, valuationCurrency, windowKey, bondPrices, movements, futurePrices),
-    [positions, fx, valuationCurrency, windowKey, bondPrices, movements, futurePrices]
+    () => computeLiquidityBreakdown(positions, fx, valuationCurrency, windowKey, bondPrices, movements, futurePrices, futureAdjLookup),
+    [positions, fx, valuationCurrency, windowKey, bondPrices, movements, futurePrices, futureAdjLookup]
   );
 
   // Mensaje de footer dinámico según el window seleccionado.
-  // CI / T1 son saldos puros; 30d+ incluye proyección de vencimientos.
+  // CI = saldo cash puro; T1+ incluye P&L no acreditado de futuros; 30d+
+  // suma además vencimientos proyectados.
   const footerMessage = (() => {
     if (windowKey === "CI") {
       return "Saldo de efectivo disponible al día de hoy.";
     }
     if (windowKey === "T1") {
-      return "Saldo CI más flujos que liquidan al siguiente día hábil.";
+      return "Saldo CI más flujos que liquidan al siguiente día hábil y P&L de futuros aún no acreditado.";
     }
-    return "Bonos, ONs, cauciones y opciones con vencimiento en la ventana, valuados a precio de mercado actual. Al vencimiento puede variar.";
+    return "CI + P&L no acreditado de futuros + bonos, ONs, cauciones y opciones con vencimiento en la ventana, valuados a precio de mercado actual. Al vencimiento puede variar.";
   })();
 
   return (
@@ -6533,6 +6585,65 @@ function resolvePositionPrice(p, bondPrices, futurePrices, stockPrices) {
   return null;
 }
 
+/* ─────────────── buildFutureAdjLookup ───────────────
+ *
+ * Construye un Map<position_id, summary> a partir de los adjustments
+ * pending y confirmed. Cada summary tiene:
+ *   - realizedPnL: SUM(actual_amount) de los confirmed para esa position.
+ *     Es la plata que YA se acreditó como cash (Modelo i).
+ *   - lastSettle:  curr_settle del adjustment más reciente (sea pending
+ *     o confirmed). Se usa para calcular el P&L "vivo" del día como
+ *     (current_price - lastSettle). Si no hay adjustments, queda null
+ *     y los callers caen al fallback (fp.settlement o entry_price).
+ *   - lastAdjDate: la fecha del adjustment más reciente, usada para
+ *     ordenar cronológicamente.
+ *
+ * Pasamos este lookup a computePortfolioTotals y computeDailyPnL para
+ * que el valor de los futuros refleje SOLO el P&L NO acreditado al
+ * patrimonio (el acreditado ya está en cash). Antes el código sumaba
+ * el P&L total contable, lo que causaba doble-conteo con el cash.
+ */
+function buildFutureAdjLookup(pendingAdjustments, confirmedAdjustments) {
+  const lookup = new Map();
+
+  const upsert = (adj) => {
+    if (!adj || !adj.position_id) return;
+    const pid = adj.position_id;
+    const entry = lookup.get(pid) || {
+      realizedPnL: 0,
+      lastSettle: null,
+      lastAdjDate: null,
+    };
+    // Si esta fila es más reciente que la guardada, actualizá el settle.
+    if (!entry.lastAdjDate || adj.adjustment_date > entry.lastAdjDate) {
+      const cs = Number(adj.curr_settle);
+      if (Number.isFinite(cs)) {
+        entry.lastAdjDate = adj.adjustment_date;
+        entry.lastSettle = cs;
+      }
+    }
+    lookup.set(pid, entry);
+  };
+
+  // Confirmed: además del settle, suman a realizedPnL.
+  if (Array.isArray(confirmedAdjustments)) {
+    for (const adj of confirmedAdjustments) {
+      upsert(adj);
+      if (adj.position_id) {
+        const entry = lookup.get(adj.position_id);
+        const amt = Number(adj.actual_amount);
+        if (Number.isFinite(amt)) entry.realizedPnL += amt;
+      }
+    }
+  }
+  // Pending: solo settle (no se acreditaron todavía).
+  if (Array.isArray(pendingAdjustments)) {
+    for (const adj of pendingAdjustments) upsert(adj);
+  }
+
+  return lookup;
+}
+
 /**
  * Calcula el P&L diario de una posición (variación del día desde el cierre
  * anterior). Usa pct_change/previousClose del feed de precios:
@@ -6553,19 +6664,32 @@ function resolvePositionPrice(p, bondPrices, futurePrices, stockPrices) {
  * o si la fuente no expone cierre anterior, retorna null → la UI debe
  * mostrar "—".
  */
-function computeDailyPnL(p, bondPrices, futurePrices, stockPrices) {
+function computeDailyPnL(p, bondPrices, futurePrices, stockPrices, futureAdjLookup) {
   if (!p || !p.ticker) return null;
   const ticker = (p.ticker || "").trim().toUpperCase();
   const qty = Number(p.quantity) || 0;
   if (qty === 0) return null;
 
   // ─── Futuros ──────────────────────────────────────────────
+  // El "P&L del día" del futuro es la variación desde el último settle
+  // CONOCIDO (sea pending o confirmed) hasta el precio actual de Primary.
+  // Prioridad de prev_settle:
+  //   1) lookup.lastSettle (último adjustment registrado, refleja el
+  //      verdadero estado de "lo último acreditado o por acreditar").
+  //   2) fp.settlement (settle del feed Primary, fallback histórico).
+  // Antes solo se usaba (2), lo que arrastraba varios días cuando había
+  // pendings sin confirmar. Bajo el modelo nuevo (cron 7 AM día siguiente),
+  // si hay pending, lastSettle === curr_settle del pending de ayer, y el
+  // P&L del día es estrictamente intraday.
   if (p.instrument_type === "future" && futurePrices) {
     const fp = futurePrices[ticker];
-    if (fp?.price != null && fp?.settlement != null && !fp.error) {
+    if (fp?.price != null && !fp.error) {
       const last = Number(fp.price);
-      const settle = Number(fp.settlement);
-      if (Number.isFinite(last) && Number.isFinite(settle) && settle > 0) {
+      const lookupEntry = futureAdjLookup ? futureAdjLookup.get(p.id) : null;
+      const settle = lookupEntry?.lastSettle != null
+        ? Number(lookupEntry.lastSettle)
+        : (fp.settlement != null ? Number(fp.settlement) : null);
+      if (Number.isFinite(last) && settle != null && Number.isFinite(settle) && settle > 0) {
         const multiplier = Number(p.extra?.contract_size) || 1000;
         // signo: COMPRA gana si sube, VENTA gana si baja.
         const sign = (p.operation_type === "venta") ? -1 : 1;
@@ -6856,13 +6980,20 @@ function positionValue(p) {
   return r ? r.value : null;
 }
 
-function computePortfolioTotals(positions, fx, valuationCurrency, bondPrices, futurePrices) {
+function computePortfolioTotals(positions, fx, valuationCurrency, bondPrices, futurePrices, futureAdjLookup) {
   let totalMarket = 0;
   let totalCost = 0;
   let unvalued = 0;
   let valuedAny = false;
   let pricesFromMarket = 0; // posiciones con precio data912 / manual
   let pricesFromCost = 0;   // posiciones que cayeron al fallback
+  // P&L de futuros que YA se acreditó como cash (suma de actual_amount
+  // de adjustments confirmed). Lo separamos de totalMarket porque ese
+  // monto ya está sumado en balanceByCurrency (cash) y duplicaríamos si
+  // lo metiéramos también en value. Sin embargo SÍ debe contar para el
+  // P&L "vs costo" (al usuario le importa cuánto ganó en total, no solo
+  // lo no acreditado). En el return final lo sumamos al pnl.
+  let realizedFuturesPnL = 0;
 
   // Separamos las posiciones en TRES grupos según cómo se valúan:
   //
@@ -6905,13 +7036,32 @@ function computePortfolioTotals(positions, fx, valuationCurrency, bondPrices, fu
       // El "valor de mercado" de un futuro consolidado es su P&L total
       // (realizado + no realizado). El costo es 0.
       if (g.pnl == null) continue;
-      const converted = convertValue(g.pnl, g.currency || "ARS", valuationCurrency, fx);
-      if (converted == null) {
+
+      // Si tenemos lookup, calculamos el P&L acreditado del grupo
+      // sumando los realizedPnL de cada operation (position_id) que
+      // forma parte del grupo consolidado. Este monto ya está en cash
+      // y NO debe sumarse al valor de la cartera (sería doble-conteo).
+      // Lo guardamos aparte para el P&L "vs costo".
+      let groupRealizedPnL = 0;
+      if (futureAdjLookup && Array.isArray(g.operations)) {
+        for (const op of g.operations) {
+          const entry = futureAdjLookup.get(op.id);
+          if (entry?.realizedPnL) groupRealizedPnL += entry.realizedPnL;
+        }
+      }
+      // P&L NO acreditado = total contable - acreditado en cash.
+      // Eso es lo que aporta al patrimonio neto hoy.
+      const nonAcreditedPnL = g.pnl - groupRealizedPnL;
+
+      const convertedNonAcredited = convertValue(nonAcreditedPnL, g.currency || "ARS", valuationCurrency, fx);
+      const convertedRealized = convertValue(groupRealizedPnL, g.currency || "ARS", valuationCurrency, fx);
+      if (convertedNonAcredited == null) {
         unvalued++;
         continue;
       }
       valuedAny = true;
-      totalMarket += converted;
+      totalMarket += convertedNonAcredited;
+      if (convertedRealized != null) realizedFuturesPnL += convertedRealized;
       // costo de futuros = 0, no suma a totalCost
       if (g.priceSource === "market" || g.priceSource === "manual" ||
           g.priceSource === "close" || g.priceSource === "primary") {
@@ -7015,7 +7165,14 @@ function computePortfolioTotals(positions, fx, valuationCurrency, bondPrices, fu
     }
   }
 
-  const pnl = totalMarket - totalCost;
+  // PNL vs costo: tiene que incluir los P&L acreditados de futuros
+  // (que sacamos de totalMarket para no duplicar con cash, pero que
+  // siguen contando como "ganancia respecto al costo de inicio").
+  // pnl viejo  = totalMarket - totalCost = bonosPnL + futurosPnL_total
+  // pnl nuevo  = (totalMarket + realizedFuturesPnL) - totalCost
+  //            = bonosPnL + futurosPnL_no_acreditado + futurosPnL_acreditado
+  //            = bonosPnL + futurosPnL_total      ← equivalente al viejo
+  const pnl = totalMarket + realizedFuturesPnL - totalCost;
   const pnlPct = totalCost > 0 ? (pnl / totalCost) * 100 : null;
 
   return {
@@ -7023,6 +7180,7 @@ function computePortfolioTotals(positions, fx, valuationCurrency, bondPrices, fu
     valueAtCost: valuedAny ? totalCost : null,
     pnl: valuedAny ? pnl : null,
     pnlPct: valuedAny ? pnlPct : null,
+    realizedFuturesPnL,
     unvalued,
     pricesFromMarket,
     pricesFromCost,
@@ -7134,7 +7292,7 @@ function prettifyGroupKey(key, view) {
  * El cash actual (CI) SIEMPRE se incluye como base. Las otras ventanas lo
  * acumulan sumándole los flujos esperados.
  */
-function computeLiquidityBreakdown(positions, fx, valuationCurrency, windowKey, bondPrices, movements, futurePrices) {
+function computeLiquidityBreakdown(positions, fx, valuationCurrency, windowKey, bondPrices, movements, futurePrices, futureAdjLookup) {
   const result = { ARS: 0, "USD-MEP": 0, "USD-CCL": 0 };
 
   const todayIso = new Date().toLocaleDateString("en-CA", {
@@ -7243,38 +7401,64 @@ function computeLiquidityBreakdown(positions, fx, valuationCurrency, windowKey, 
         result[cur] += g.valueAtMarket;
       }
     }
+  }
 
-    // 3c) P&L mark-to-market de FUTUROS que vencen en ventana.
-    //
-    // Lógica ROFEX: el P&L mark-to-market del futuro se acredita en cash
-    // ARS al día hábil siguiente del cierre/vencimiento. Si el contrato
-    // vence dentro de la ventana, asumimos que el P&L actual va a quedar
-    // realizado (best estimate al precio actual). Sumarlo aquí hace que
-    // Liquidez Proyectada coincida con el Total cuando todos los activos
-    // vencen en ventana — es decir, "tu cartera HOY converge a este cash
-    // si todo se mantiene a precio actual hasta vencer".
-    //
-    // Importante: solo entran las posiciones futuras ABIERTAS. Las cerradas
-    // ya tienen su P&L realizado fluyendo como cash_movement (item 2).
+  // 3c) P&L NO acreditado de FUTUROS abiertos.
+  //
+  // El P&L "no acreditado" es la parte del P&L total contable del futuro
+  // que TODAVÍA NO se reflejó como cash en la cuenta. Equivale a:
+  //   nonAcreditedPnL = P&L_total_contable − SUM(actual_amount de adjustments confirmed)
+  //
+  // En la práctica, este monto contiene dos componentes que el usuario
+  // ve día a día:
+  //   (a) Pending adjustments (ajustes generados por el cron del día
+  //       siguiente que esperan ser confirmados en el modal).
+  //   (b) P&L vivo intraday del día corriente (todavía no se generó el
+  //       pending porque el cron corre a las 7 AM del día hábil siguiente).
+  //
+  // ¿Por qué se suma a T1 / 30D / 60D / 90D y NO a CI?
+  //   - CI = saldo cash estrictamente actual. El P&L no acreditado todavía
+  //     no es cash, es una promesa que se va a materializar progresivamente
+  //     a medida que el usuario confirme cada pending.
+  //   - T1+ = "cuánto vas a tener disponible cuando se acrediten los
+  //     próximos ajustes". Sumar el P&L no acreditado refleja eso.
+  //
+  // Cubrimos TODOS los futuros abiertos sin filtrar por vencimiento en
+  // ventana. La razón: aunque el contrato venza dentro de 90 días o dentro
+  // de 6 meses, el cash de los ajustes va goteando todos los días — no es
+  // un flujo único al vencimiento como un bono. Para T1 / 30d / 60d / 90d
+  // el monto relevante es el mismo: el P&L que todavía no se cobró.
+  //
+  // No double-counting porque:
+  //   - Los acreditados YA están en cash (item 1: sumamos cash_movements
+  //     incluyendo los deposits que vienen de confirmar adjustments).
+  //   - El P&L no acreditado SOLO contiene lo no acreditado (lo restamos
+  //     vía SUM(realizedPnL) del futureAdjLookup).
+  //
+  // ROFEX siempre liquida en ARS, sin importar la moneda registrada de
+  // la posición.
+  if (windowKey !== "CI") {
     const futures = positions.filter((p) => p.instrument_type === "future");
     if (futures.length > 0) {
       const futureGroups = consolidatePositions(futures, bondPrices, futurePrices);
       for (const g of futureGroups) {
-        if (g.isClosed) continue;          // cerrado → ya tiene su movement
-        if (g.netQty === 0) continue;       // neteo total → idem
-        if (g.valueAtMarket == null) continue;
+        if (g.isClosed) continue;       // cerrado → su P&L ya está en cash
+        if (g.netQty === 0) continue;    // neteo total → idem
+        if (g.pnl == null) continue;
 
-        const sample = g.operations[0];
-        if (!sample) continue;
-        const matDate = getPositionMaturity(sample);
-        if (!matDate) continue;
-        const md = new Date(matDate);
-        if (md < today || md > cutoff) continue;
-
-        // Para futuros, valueAtMarket = P&L mark-to-market (puede ser
-        // negativo). ROFEX siempre liquida en ARS, sin importar la
-        // moneda registrada.
-        result["ARS"] += g.valueAtMarket;
+        // P&L acreditado del grupo: SUM(realizedPnL) de cada op del grupo
+        // según el lookup. Si no hay lookup (caso edge), queda 0 y
+        // sumamos el P&L total contable — equivalente al comportamiento
+        // anterior del código antes del modelo no-acreditado.
+        let groupRealizedPnL = 0;
+        if (futureAdjLookup && Array.isArray(g.operations)) {
+          for (const op of g.operations) {
+            const entry = futureAdjLookup.get(op.id);
+            if (entry?.realizedPnL) groupRealizedPnL += entry.realizedPnL;
+          }
+        }
+        const nonAcreditedPnL = g.pnl - groupRealizedPnL;
+        result["ARS"] += nonAcreditedPnL;
       }
     }
   }
@@ -8502,6 +8686,7 @@ function PortfolioDashboard({ onNavigate }) {
             futurePricesState={futurePricesState}
             stockPricesState={stockPricesState}
             cashState={cashState}
+            futureAdjustmentsState={futureAdjustmentsState}
             onIngresar={() => setCashModalType("deposit")}
             onRetirar={() => setCashModalType("withdrawal")}
           />
@@ -8808,18 +8993,41 @@ function FutureAdjustmentsBanner({ count, totalEstimated, onClick }) {
  * scrolleable. El usuario los confirma de a uno (no hay "confirmar
  * todos" — agregar mostraría riesgo de confirmar montos mal sin querer).
  *
+ * Recálculo con feed live:
+ *   Si el ajuste tiene is_estimated=true (settle oficial todavía no
+ *   publicado) Y hay un precio actual en futurePrices, recalculamos
+ *   curr_settle y estimated_amount al MONTAR el modal. Esto cubre el
+ *   caso donde el cron generó el pending con un snapshot viejo del
+ *   feed y después Primary siguió moviéndose. Si el usuario cierra y
+ *   reabre, vuelve a recalcular con el feed del momento (se pierde
+ *   cualquier override manual). Mientras el modal queda abierto NO se
+ *   recalcula automáticamente (para no pisar lo que el usuario tipeó).
+ *
  * Props:
  *   adjustments: array de filas pending desde futures_daily_adjustments.
+ *   futurePrices: feed de precios live (para recalcular is_estimated).
  *   onConfirm(id, actualAmount): callback al confirmar.
  *   onClose: cerrar el modal.
  */
-function FutureAdjustmentsModal({ adjustments, onConfirm, onClose }) {
+function getAdjustmentDisplayValues(adj, futurePrices) {
+  const livePrice = futurePrices?.[adj.ticker]?.price;
+  const useLive = adj.is_estimated && Number.isFinite(Number(livePrice));
+  const currSettle = useLive ? Number(livePrice) : Number(adj.curr_settle);
+  const prevSettle = Number(adj.prev_settle);
+  const netQty = Number(adj.net_qty);
+  const multiplier = Number(adj.multiplier);
+  const estimatedAmount = (currSettle - prevSettle) * netQty * multiplier;
+  return { currSettle, prevSettle, estimatedAmount, isLive: useLive };
+}
+
+function FutureAdjustmentsModal({ adjustments, futurePrices, onConfirm, onClose }) {
   // Estado local: { [adjustmentId]: { value: string, processing: bool, error: string } }
   const [drafts, setDrafts] = useState(() => {
     const init = {};
     for (const a of adjustments) {
+      const { estimatedAmount } = getAdjustmentDisplayValues(a, futurePrices);
       init[a.id] = {
-        value: String(Number(a.estimated_amount) || 0),
+        value: String(Math.round(estimatedAmount)),
         processing: false,
         error: null,
       };
@@ -8829,18 +9037,29 @@ function FutureAdjustmentsModal({ adjustments, onConfirm, onClose }) {
 
   // Si la lista de adjustments cambia (porque uno se confirmó/skipped y se
   // reprodujo el fetch), filtramos los que ya no están del state local.
+  // Para los que sobrevivieron mantenemos su draft (no pisar lo que el
+  // usuario tipeó). Los adjustments nuevos arrancan con el monto recalculado.
   useEffect(() => {
     setDrafts((prev) => {
       const next = {};
       for (const a of adjustments) {
-        next[a.id] = prev[a.id] || {
-          value: String(Number(a.estimated_amount) || 0),
-          processing: false,
-          error: null,
-        };
+        if (prev[a.id]) {
+          next[a.id] = prev[a.id];
+        } else {
+          const { estimatedAmount } = getAdjustmentDisplayValues(a, futurePrices);
+          next[a.id] = {
+            value: String(Math.round(estimatedAmount)),
+            processing: false,
+            error: null,
+          };
+        }
       }
       return next;
     });
+    // futurePrices intencionalmente FUERA de deps: no queremos pisar el
+    // valor del input cuando llega un tick nuevo del feed. El recálculo
+    // con feed live solo aplica al MONTAR el modal (cerrar + reabrir).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [adjustments]);
 
   const handleConfirm = async (adj) => {
@@ -8965,13 +9184,18 @@ function FutureAdjustmentsModal({ adjustments, onConfirm, onClose }) {
           ) : (
             adjustments.map((adj) => {
               const draft = drafts[adj.id] || { value: "0", processing: false, error: null };
-              const variation = Number(adj.curr_settle) - Number(adj.prev_settle);
-              const variationPct = adj.prev_settle > 0
-                ? (variation / Number(adj.prev_settle)) * 100
+              // Recalculamos curr_settle y estimated_amount con feed live
+              // si es_estimated. Esto refleja el último precio de Primary
+              // al momento de abrir el modal — más actualizado que el
+              // snapshot que dejó el cron en BD.
+              const display = getAdjustmentDisplayValues(adj, futurePrices);
+              const variation = display.currSettle - display.prevSettle;
+              const variationPct = display.prevSettle > 0
+                ? (variation / display.prevSettle) * 100
                 : null;
               const variationColor = variation >= 0 ? C.green : C.red;
               const variationSign = variation >= 0 ? "+" : "";
-              const estimated = Number(adj.estimated_amount) || 0;
+              const estimated = display.estimatedAmount;
               const estIsPositive = estimated >= 0;
 
               return (
@@ -9061,9 +9285,9 @@ function FutureAdjustmentsModal({ adjustments, onConfirm, onClose }) {
                         className="eco-mono"
                         style={{ color: C.text, marginTop: 2 }}
                       >
-                        {fmtNumber(adj.prev_settle, { maxDecimals: 2 })}
+                        {fmtNumber(display.prevSettle, { maxDecimals: 2 })}
                         &nbsp;→&nbsp;
-                        {fmtNumber(adj.curr_settle, { maxDecimals: 2 })}
+                        {fmtNumber(display.currSettle, { maxDecimals: 2 })}
                         &nbsp;
                         <span style={{ color: variationColor }}>
                           ({variationSign}{fmtNumber(variation, { maxDecimals: 2 })}
@@ -9270,9 +9494,19 @@ function ConsolidatedSection({
   const [adjustmentsModalOpen, setAdjustmentsModalOpen] = useState(false);
 
   const pending = futureAdjustmentsState?.pendingAdjustments || [];
+  const confirmed = futureAdjustmentsState?.confirmedAdjustments || [];
   const totalEstimated = useMemo(() => {
     return pending.reduce((sum, a) => sum + (Number(a.estimated_amount) || 0), 0);
   }, [pending]);
+
+  // Lookup de adjustments por position_id — usado por ConsolidatedRow
+  // para calcular el P&L del día del futuro contra el último settle
+  // CONOCIDO en BD (no contra el fp.settlement del feed, que viene del
+  // día previo de mercado y puede arrastrar varios días sin acreditar).
+  const futureAdjLookup = useMemo(
+    () => buildFutureAdjLookup(pending, confirmed),
+    [pending, confirmed]
+  );
 
   const open = allConsolidated.filter((g) => !g.isClosed);
   const closedAll = allConsolidated.filter((g) => g.isClosed);
@@ -9418,6 +9652,7 @@ function ConsolidatedSection({
       {adjustmentsModalOpen && (
         <FutureAdjustmentsModal
           adjustments={pending}
+          futurePrices={futurePrices}
           onConfirm={futureAdjustmentsState.confirm}
           onClose={() => setAdjustmentsModalOpen(false)}
         />
@@ -9789,6 +10024,7 @@ function ConsolidatedTable({ consolidated, bondPrices, futurePrices, stockPrices
                 bondPrices={bondPrices}
                 futurePrices={futurePrices}
                 stockPrices={stockPrices}
+                futureAdjLookup={futureAdjLookup}
                 expanded={expanded.has(g.groupKey)}
                 onToggle={() => toggle(g.groupKey)}
                 onEdit={onEdit}
@@ -9805,7 +10041,7 @@ function ConsolidatedTable({ consolidated, bondPrices, futurePrices, stockPrices
 }
 
 
-function ConsolidatedRow({ group, bondPrices, futurePrices, stockPrices, expanded, onToggle, onEdit, onDelete, onUpdatePrice, readOnlyPrice = false }) {
+function ConsolidatedRow({ group, bondPrices, futurePrices, stockPrices, futureAdjLookup, expanded, onToggle, onEdit, onDelete, onUpdatePrice, readOnlyPrice = false }) {
   const meta = INSTRUMENT_TYPES[group.instrument_type] || {};
   const TypeIcon = meta.icon || Activity;
   const typeColor = meta.color ? C.cat[meta.color] : C.muted;
@@ -9846,17 +10082,44 @@ function ConsolidatedRow({ group, bondPrices, futurePrices, stockPrices, expande
     }
 
     // Futuros: cada operación tiene sign distinto (long/short).
-    // Para el P&L diario del grupo agregado: usamos precio actual y
-    // settlement del feed Primary, y aplicamos la cantidad NETA del grupo
-    // (positiva si net long, negativa si net short).
+    // Para el P&L diario del grupo agregado: tomamos el último settle
+    // KNOWN del lookup (curr_settle del último adjustment pending o
+    // confirmed para alguna position del grupo). Si no hay lookup o no
+    // hay adjustments, caemos al fallback fp.settlement del feed Primary.
+    //
+    // La diferencia: lookup.lastSettle siempre apunta al settle del
+    // último día con ajuste registrado en BD, así que el P&L del día
+    // queda estrictamente intraday (variación desde ese settle hasta
+    // current_price). fp.settlement, en cambio, es el settle "más
+    // reciente" del feed Primary, que puede ser del día anterior incluso
+    // si hay 3 días de ajustes pendientes acumulados — eso inflaría
+    // mal el P&L del día.
     const ticker = (group.ticker || "").toUpperCase();
     const fp = futurePrices?.[ticker];
-    if (!fp || fp.price == null || fp.settlement == null || fp.error) {
+    if (!fp || fp.price == null || fp.error) {
       return { dailyPnl: null, dailyPct: null };
     }
     const last = Number(fp.price);
-    const settle = Number(fp.settlement);
-    if (!Number.isFinite(last) || !Number.isFinite(settle) || settle <= 0) {
+
+    let settle = null;
+    if (futureAdjLookup && Array.isArray(group.operations)) {
+      // Tomamos el lastSettle más reciente entre las position_ids del
+      // grupo (en consolidados de futuros suele haber 1 sola anchor op).
+      let bestDate = null;
+      for (const op of group.operations) {
+        const entry = futureAdjLookup.get(op.id);
+        if (entry?.lastSettle == null) continue;
+        if (bestDate == null || entry.lastAdjDate > bestDate) {
+          bestDate = entry.lastAdjDate;
+          settle = entry.lastSettle;
+        }
+      }
+    }
+    // Fallback al feed si no hay ningún adjustment en BD para este grupo.
+    if (settle == null && fp.settlement != null) {
+      settle = Number(fp.settlement);
+    }
+    if (settle == null || !Number.isFinite(last) || !Number.isFinite(settle) || settle <= 0) {
       return { dailyPnl: null, dailyPct: null };
     }
     // Multiplier: tomamos del primer op (asumimos consistente en el grupo)
@@ -9868,7 +10131,7 @@ function ConsolidatedRow({ group, bondPrices, futurePrices, stockPrices, expande
       dailyPnl: diffPerUnit * netQty * multiplier,
       dailyPct: (diffPerUnit / settle) * 100,
     };
-  }, [group, bondPrices, futurePrices, stockPrices]);
+  }, [group, bondPrices, futurePrices, stockPrices, futureAdjLookup]);
 
   const dailyColor = dailyPnl == null ? C.dim : dailyPnl >= 0 ? C.green : C.red;
   const dailySign = dailyPnl == null ? "" : dailyPnl >= 0 ? "+" : "";
