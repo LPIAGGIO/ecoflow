@@ -5266,7 +5266,6 @@ function DashboardOverview({ positions, fxState, bondPricesState, futurePricesSt
           futurePrices={futurePrices}
           valuationCurrency={valuationCurrency}
           movements={movements}
-          futureAdjLookup={futureAdjLookup}
           window={liquidityWindow}
           onWindowChange={setLiquidityWindow}
         />
@@ -6157,23 +6156,22 @@ function DonutChart({ slices, size = 100 }) {
 
 /* ─────────────── Card 3: Liquidez Proyectada ─────────────── */
 
-function LiquidityCard({ positions, fx, bondPrices, futurePrices, valuationCurrency, movements, futureAdjLookup, window: windowKey, onWindowChange }) {
+function LiquidityCard({ positions, fx, bondPrices, futurePrices, valuationCurrency, movements, window: windowKey, onWindowChange }) {
   const breakdown = useMemo(
-    () => computeLiquidityBreakdown(positions, fx, valuationCurrency, windowKey, bondPrices, movements, futurePrices, futureAdjLookup),
-    [positions, fx, valuationCurrency, windowKey, bondPrices, movements, futurePrices, futureAdjLookup]
+    () => computeLiquidityBreakdown(positions, fx, valuationCurrency, windowKey, bondPrices, movements, futurePrices),
+    [positions, fx, valuationCurrency, windowKey, bondPrices, movements, futurePrices]
   );
 
   // Mensaje de footer dinámico según el window seleccionado.
-  // CI = saldo cash puro; T1+ incluye P&L no acreditado de futuros; 30d+
-  // suma además vencimientos proyectados.
+  // CI / T1 son saldos puros; 30d+ incluye proyección de vencimientos.
   const footerMessage = (() => {
     if (windowKey === "CI") {
       return "Saldo de efectivo disponible al día de hoy.";
     }
     if (windowKey === "T1") {
-      return "Saldo CI más flujos que liquidan al siguiente día hábil y P&L de futuros aún no acreditado.";
+      return "Saldo CI más flujos que liquidan al siguiente día hábil.";
     }
-    return "CI + P&L no acreditado de futuros + bonos, ONs, cauciones y opciones con vencimiento en la ventana, valuados a precio de mercado actual. Al vencimiento puede variar.";
+    return "Bonos, ONs, cauciones y opciones con vencimiento en la ventana, valuados a precio de mercado actual. Al vencimiento puede variar.";
   })();
 
   return (
@@ -7292,7 +7290,7 @@ function prettifyGroupKey(key, view) {
  * El cash actual (CI) SIEMPRE se incluye como base. Las otras ventanas lo
  * acumulan sumándole los flujos esperados.
  */
-function computeLiquidityBreakdown(positions, fx, valuationCurrency, windowKey, bondPrices, movements, futurePrices, futureAdjLookup) {
+function computeLiquidityBreakdown(positions, fx, valuationCurrency, windowKey, bondPrices, movements, futurePrices) {
   const result = { ARS: 0, "USD-MEP": 0, "USD-CCL": 0 };
 
   const todayIso = new Date().toLocaleDateString("en-CA", {
@@ -7401,64 +7399,38 @@ function computeLiquidityBreakdown(positions, fx, valuationCurrency, windowKey, 
         result[cur] += g.valueAtMarket;
       }
     }
-  }
 
-  // 3c) P&L NO acreditado de FUTUROS abiertos.
-  //
-  // El P&L "no acreditado" es la parte del P&L total contable del futuro
-  // que TODAVÍA NO se reflejó como cash en la cuenta. Equivale a:
-  //   nonAcreditedPnL = P&L_total_contable − SUM(actual_amount de adjustments confirmed)
-  //
-  // En la práctica, este monto contiene dos componentes que el usuario
-  // ve día a día:
-  //   (a) Pending adjustments (ajustes generados por el cron del día
-  //       siguiente que esperan ser confirmados en el modal).
-  //   (b) P&L vivo intraday del día corriente (todavía no se generó el
-  //       pending porque el cron corre a las 7 AM del día hábil siguiente).
-  //
-  // ¿Por qué se suma a T1 / 30D / 60D / 90D y NO a CI?
-  //   - CI = saldo cash estrictamente actual. El P&L no acreditado todavía
-  //     no es cash, es una promesa que se va a materializar progresivamente
-  //     a medida que el usuario confirme cada pending.
-  //   - T1+ = "cuánto vas a tener disponible cuando se acrediten los
-  //     próximos ajustes". Sumar el P&L no acreditado refleja eso.
-  //
-  // Cubrimos TODOS los futuros abiertos sin filtrar por vencimiento en
-  // ventana. La razón: aunque el contrato venza dentro de 90 días o dentro
-  // de 6 meses, el cash de los ajustes va goteando todos los días — no es
-  // un flujo único al vencimiento como un bono. Para T1 / 30d / 60d / 90d
-  // el monto relevante es el mismo: el P&L que todavía no se cobró.
-  //
-  // No double-counting porque:
-  //   - Los acreditados YA están en cash (item 1: sumamos cash_movements
-  //     incluyendo los deposits que vienen de confirmar adjustments).
-  //   - El P&L no acreditado SOLO contiene lo no acreditado (lo restamos
-  //     vía SUM(realizedPnL) del futureAdjLookup).
-  //
-  // ROFEX siempre liquida en ARS, sin importar la moneda registrada de
-  // la posición.
-  if (windowKey !== "CI") {
+    // 3c) P&L mark-to-market de FUTUROS que vencen en ventana.
+    //
+    // Lógica ROFEX: el P&L mark-to-market del futuro se acredita en cash
+    // ARS al día hábil siguiente del cierre/vencimiento. Si el contrato
+    // vence dentro de la ventana, asumimos que el P&L actual va a quedar
+    // realizado (best estimate al precio actual). Sumarlo aquí hace que
+    // Liquidez Proyectada coincida con el Total cuando todos los activos
+    // vencen en ventana — es decir, "tu cartera HOY converge a este cash
+    // si todo se mantiene a precio actual hasta vencer".
+    //
+    // Importante: solo entran las posiciones futuras ABIERTAS. Las cerradas
+    // ya tienen su P&L realizado fluyendo como cash_movement (item 2).
     const futures = positions.filter((p) => p.instrument_type === "future");
     if (futures.length > 0) {
       const futureGroups = consolidatePositions(futures, bondPrices, futurePrices);
       for (const g of futureGroups) {
-        if (g.isClosed) continue;       // cerrado → su P&L ya está en cash
-        if (g.netQty === 0) continue;    // neteo total → idem
-        if (g.pnl == null) continue;
+        if (g.isClosed) continue;          // cerrado → ya tiene su movement
+        if (g.netQty === 0) continue;       // neteo total → idem
+        if (g.valueAtMarket == null) continue;
 
-        // P&L acreditado del grupo: SUM(realizedPnL) de cada op del grupo
-        // según el lookup. Si no hay lookup (caso edge), queda 0 y
-        // sumamos el P&L total contable — equivalente al comportamiento
-        // anterior del código antes del modelo no-acreditado.
-        let groupRealizedPnL = 0;
-        if (futureAdjLookup && Array.isArray(g.operations)) {
-          for (const op of g.operations) {
-            const entry = futureAdjLookup.get(op.id);
-            if (entry?.realizedPnL) groupRealizedPnL += entry.realizedPnL;
-          }
-        }
-        const nonAcreditedPnL = g.pnl - groupRealizedPnL;
-        result["ARS"] += nonAcreditedPnL;
+        const sample = g.operations[0];
+        if (!sample) continue;
+        const matDate = getPositionMaturity(sample);
+        if (!matDate) continue;
+        const md = new Date(matDate);
+        if (md < today || md > cutoff) continue;
+
+        // Para futuros, valueAtMarket = P&L mark-to-market (puede ser
+        // negativo). ROFEX siempre liquida en ARS, sin importar la
+        // moneda registrada.
+        result["ARS"] += g.valueAtMarket;
       }
     }
   }
