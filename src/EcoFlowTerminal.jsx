@@ -6961,9 +6961,71 @@ function applyPriceToPosition(p, price) {
 }
 
 /**
+ * Valor de una CAUCIÓN COLOCADORA con devengamiento prorata lineal.
+ *
+ * Modelo simple (Modelo cuasi-cash):
+ *   Capital × (1 + TNA × días_transcurridos / 365)
+ *
+ * Donde:
+ *   - Capital = quantity (lo que prestaste el día 0)
+ *   - TNA    = extra.rate_tna (en %, ej. 80 → 0.80)
+ *   - días_transcurridos = max(0, asOfDate - entry_date), capeado a term_days
+ *
+ * Si la caución venció (días >= term_days), el valor queda en el monto
+ * total al vencimiento (no sigue devengando más allá).
+ *
+ * Si falta info (sin entry_date, sin rate_tna o sin term_days), devolvemos
+ * el capital plano — fallback honesto.
+ *
+ * @param {object} p — posición caución
+ * @param {string|Date} asOfDate — fecha de referencia (default = hoy)
+ * @returns {number|null}
+ */
+function caucionValueDevengado(p, asOfDate) {
+  if (!p || p.instrument_type !== "caucion") return null;
+  const capital = Number(p.quantity) || 0;
+  if (capital === 0) return 0;
+
+  const tna = Number(p.extra?.rate_tna);
+  const termDays = Number(p.extra?.term_days);
+  if (!p.entry_date || !Number.isFinite(tna) || !Number.isFinite(termDays)) {
+    return capital; // fallback: capital sin intereses
+  }
+
+  const startMs = new Date(p.entry_date + "T00:00:00").getTime();
+  const refMs = asOfDate
+    ? (typeof asOfDate === "string"
+        ? new Date(asOfDate + "T00:00:00").getTime()
+        : asOfDate.getTime())
+    : Date.now();
+
+  let daysElapsed = Math.max(0, Math.floor((refMs - startMs) / 86400000));
+  daysElapsed = Math.min(daysElapsed, termDays);
+
+  const interes = capital * (tna / 100) * (daysElapsed / 365);
+  return capital + interes;
+}
+
+/**
+ * Valor de la caución al vencimiento (capital + intereses TOTALES).
+ * Útil para LIQUIDEZ PROYECTADA cuando la caución vence en ventana.
+ */
+function caucionValueAtMaturity(p) {
+  if (!p || p.instrument_type !== "caucion") return null;
+  const capital = Number(p.quantity) || 0;
+  if (capital === 0) return 0;
+
+  const tna = Number(p.extra?.rate_tna);
+  const termDays = Number(p.extra?.term_days);
+  if (!Number.isFinite(tna) || !Number.isFinite(termDays)) return capital;
+
+  return capital * (1 + (tna / 100) * (termDays / 365));
+}
+
+/**
  * Valor de la posición a mercado actual (impacta en wealth/cartera).
  *
- *   - Cauciones: cantidad (es plata, sin precio).
+ *   - Cauciones: capital + intereses devengados prorata a HOY.
  *   - Bonos / ONs / Acciones / CEDEARs / FCI: cantidad × precio actual.
  *   - Futuros: solo el P&L mark-to-market (NO el notional).
  *   - Opciones: cantidad × 100 × prima.
@@ -6971,9 +7033,16 @@ function applyPriceToPosition(p, price) {
  * Retorna `{ value, source }` o null si no se puede valuar.
  */
 function positionValueAtMarket(p, bondPrices, futurePrices, stockPrices) {
-  // Cauciones: el valor es directamente la cantidad (es plata)
+  // Cauciones: devengamiento prorata lineal sobre el capital colocado.
+  // El valor "a mercado" hoy es capital + intereses corridos. Eso se
+  // refleja directamente en TOTAL CARTERA. Y el P&L de la caución
+  // (valueAtMarket - valueAtCost) son los intereses ganados a la fecha.
   if (p.instrument_type === "caucion") {
-    return { value: Number(p.quantity) || 0, source: "cost" };
+    const devengado = caucionValueDevengado(p);
+    return {
+      value: devengado != null ? devengado : (Number(p.quantity) || 0),
+      source: "devengado",
+    };
   }
   // Futuros: el "valor" que impacta en cartera es el P&L mark-to-market.
   // El notional NO se incluye (es exposición, no wealth real).
@@ -7341,6 +7410,38 @@ function computeLiquidityBreakdown(positions, fx, valuationCurrency, windowKey, 
     }
   }
 
+  // 1b) Cauciones VIGENTES como cuasi-cash con devengamiento prorata.
+  //
+  // Modelo: una caución colocadora es plata que prestaste, devenga
+  // intereses lineales hasta el vencimiento, y es muy líquida (en el
+  // mercado se puede cancelar anticipadamente o esperar el vencimiento,
+  // típicamente 1 día). Por eso la consideramos cuasi-cash:
+  //   valor_a_hoy = capital × (1 + TNA × días_corridos / 365)
+  //
+  // En CI sumamos este valor devengado a hoy. En T1+ además sumamos los
+  // intereses pendientes hasta vencer (ver 3b), pero el devengado a hoy
+  // sigue siendo la base — así CI ≤ T1 ≤ 30d ≤ 60d ≤ 90d siempre.
+  //
+  // Cauciones YA VENCIDAS (maturity < hoy) se saltan acá: idealmente
+  // ya deberían estar como cash_movement automático en pending (Fase 2,
+  // requiere cron). Si todavía no se procesaron, no contamos ni el cash
+  // ni el devengado para no inflar la liquidez con plata fantasma.
+  if (positions && positions.length > 0) {
+    for (const p of positions) {
+      if (p.instrument_type !== "caucion") continue;
+      const maturityDate = getPositionMaturity(p);
+      if (!maturityDate) continue;
+      // Si ya venció, saltar (no se contó como cash todavía → caso edge
+      // a manejar con cash_movement automático en Fase 2).
+      if (new Date(maturityDate + "T12:00:00") < today) continue;
+
+      const devengado = caucionValueDevengado(p, todayIso);
+      if (devengado == null || !Number.isFinite(devengado)) continue;
+      const cur = p.currency || "ARS";
+      if (cur in result) result[cur] += devengado;
+    }
+  }
+
   // 2) Si el window es CI, ya terminamos.
   if (windowKey === "CI") {
     return result;
@@ -7408,26 +7509,51 @@ function computeLiquidityBreakdown(positions, fx, valuationCurrency, windowKey, 
     }
   }
 
-  // 3b) Vencimientos / cobros de posiciones (mismo cálculo que antes,
-  //     pero solo lo aplicamos para windows >= 30d. T1 raramente captura
-  //     un vencimiento de bono y mezclarlo confunde más que aporta).
-  if (windowKey !== "T1") {
+  // 3b) Vencimientos / cobros de posiciones.
+  //
+  // Para BONOS / ONs / FCI / OPCIONES: solo aplicamos en windows >= 30d.
+  // T1 raramente captura un vencimiento de bono y mezclarlo confunde
+  // más que aporta.
+  //
+  // Para CAUCIONES: aplicamos en TODAS las windows (incluido T1), porque
+  // las cauciones overnight vencen al día siguiente y T1 las captura.
+  // Sumamos solo (montoTotal_al_vencer − devengado_a_hoy) = intereses
+  // pendientes. El devengado_a_hoy ya está en CI (sección 1b), así que
+  // sumar el total al vencer sería double-count.
+  {
     const nonFuture = positions.filter((p) => p.instrument_type !== "future");
     const groups = consolidatePositions(nonFuture, bondPrices, futurePrices);
 
     for (const g of groups) {
       if (g.netQty === 0 || g.isClosed) continue;
-      if (g.valueAtMarket == null) continue;
 
       const sample = g.operations[0];
       if (!sample) continue;
       const matDate = getPositionMaturity(sample);
       if (!matDate) continue;
-      const md = new Date(matDate);
+      const md = new Date(matDate + "T12:00:00");
       if (md < today || md > cutoff) continue;
 
       const cur = g.currency || "ARS";
-      if (result[cur] != null) {
+      if (!(cur in result)) continue;
+
+      if (sample.instrument_type === "caucion") {
+        // Cauciones: sumar SOLO los intereses pendientes hasta vencer.
+        // El devengado a hoy ya está en CI (1b).
+        const totalAtMaturity = caucionValueAtMaturity(sample);
+        const devengadoHoy = caucionValueDevengado(sample, todayIso);
+        if (
+          totalAtMaturity != null &&
+          devengadoHoy != null &&
+          Number.isFinite(totalAtMaturity) &&
+          Number.isFinite(devengadoHoy)
+        ) {
+          result[cur] += (totalAtMaturity - devengadoHoy);
+        }
+      } else {
+        // Bonos / ONs / FCI / Opciones: solo para windows >= 30d.
+        if (windowKey === "T1") continue;
+        if (g.valueAtMarket == null) continue;
         result[cur] += g.valueAtMarket;
       }
     }
