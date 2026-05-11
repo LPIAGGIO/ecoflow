@@ -10094,7 +10094,7 @@ function ConsolidatedTable({ consolidated, bondPrices, futurePrices, stockPrices
               <PTh dense style={{ width: 28 }}>{""}</PTh>
               <PTh dense>Tipo</PTh>
               <PTh dense>Ticker</PTh>
-              <PTh dense align="right">Cantidad neta</PTh>
+              <PTh dense align="right">Cantidad / VN</PTh>
               <PTh dense align="right">PPP</PTh>
               <PTh dense align="right">{isClosed ? "Último precio" : "Precio actual"}</PTh>
               {!isClosed && <PTh dense align="right">P&amp;L Hoy</PTh>}
@@ -10484,13 +10484,14 @@ function ConsolidatedRow({ group, bondPrices, futurePrices, stockPrices, futureA
       {expanded && (
         <tr style={{ borderBottom: `1px solid ${C.border}` }}>
           <td colSpan={readOnlyPrice ? 10 : 11} style={{ padding: 0, backgroundColor: C.deep }}>
-            {/* Padding-left grande para que la columna OP del sub-table
-                arranque alineada con TICKER del header padre.
-                Refuerza visualmente que es un sub-grupo dentro de la fila. */}
-            <div style={{ padding: "10px 14px 14px 110px" }}>
-              {/* Bloque "Histórico del ticker": muestra el P&L lifetime
-                  (realizado pasado + no realizado del lote vivo). En
-                  posiciones fully open sin ventas, lifetimePnl === pnl
+            {/* Padding compacto: lo justo para no pegarse a los bordes pero
+                sin desperdiciar espacio vertical. Padding-left grande para
+                que la columna OP del sub-table arranque alineada con TICKER
+                del header padre. */}
+            <div style={{ padding: "6px 14px 8px 110px" }}>
+              {/* Bloque "Histórico del ticker" en línea compacta — sin
+                  línea divisoria ni texto explicativo, el label ya describe.
+                  En posiciones fully open sin ventas, lifetimePnl === pnl
                   y este bloque solo confirma el dato. Cuando hubo ventas
                   o cierres parciales, lifetime es la suma agregada que
                   no se ve en la fila principal. */}
@@ -10498,10 +10499,8 @@ function ConsolidatedRow({ group, bondPrices, futurePrices, stockPrices, futureA
                 <div style={{
                   display: "flex",
                   alignItems: "baseline",
-                  gap: 14,
-                  marginBottom: 14,
-                  paddingBottom: 10,
-                  borderBottom: `1px solid ${C.border}`,
+                  gap: 10,
+                  marginBottom: 6,
                 }}>
                   <span style={{
                     fontSize: 9,
@@ -10511,10 +10510,10 @@ function ConsolidatedRow({ group, bondPrices, futurePrices, stockPrices, futureA
                     fontWeight: 600,
                     fontFamily: "'Roboto', sans-serif",
                   }}>
-                    Histórico del ticker
+                    Histórico
                   </span>
                   <span style={{
-                    fontSize: 14,
+                    fontSize: 12.5,
                     fontWeight: 600,
                     color: group.lifetimePnl >= 0 ? C.green : C.red,
                     fontFamily: "'JetBrains Mono', monospace",
@@ -10524,25 +10523,17 @@ function ConsolidatedRow({ group, bondPrices, futurePrices, stockPrices, futureA
                   </span>
                   {Number.isFinite(group.lifetimePnlPct) && (
                     <span style={{
-                      fontSize: 11,
+                      fontSize: 10,
                       fontWeight: 500,
                       color: group.lifetimePnl >= 0 ? C.green : C.red,
                       fontFamily: "'JetBrains Mono', monospace",
                       backgroundColor: group.lifetimePnl >= 0 ? "rgba(74,222,128,0.12)" : "rgba(248,113,113,0.12)",
-                      padding: "2px 7px",
+                      padding: "1px 6px",
                       borderRadius: 2,
                     }}>
                       {group.lifetimePnl >= 0 ? "+" : ""}{group.lifetimePnlPct.toFixed(2)}%
                     </span>
                   )}
-                  <span style={{
-                    fontSize: 10,
-                    color: C.dim,
-                    fontFamily: "'Roboto', sans-serif",
-                    fontStyle: "italic",
-                  }}>
-                    realizado + no realizado de toda la historia con {group.ticker}
-                  </span>
                 </div>
               )}
 
@@ -10552,7 +10543,7 @@ function ConsolidatedRow({ group, bondPrices, futurePrices, stockPrices, futureA
                 color: C.dim,
                 textTransform: "uppercase",
                 fontWeight: 600,
-                marginBottom: 8,
+                marginBottom: 4,
                 fontFamily: "'Roboto', sans-serif",
               }}>
                 Operaciones agrupadas
