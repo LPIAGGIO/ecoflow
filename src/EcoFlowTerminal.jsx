@@ -977,13 +977,32 @@ function getRefreshIntervalMs() {
     timeZone: "America/Argentina/Buenos_Aires",
     weekday: "short",
     hour: "2-digit",
+    minute: "2-digit",
     hour12: false,
   }).formatToParts(new Date());
   const wd = parts.find((p) => p.type === "weekday")?.value;
   const hh = parseInt(parts.find((p) => p.type === "hour")?.value || "0", 10);
+  const mm = parseInt(parts.find((p) => p.type === "minute")?.value || "0", 10);
   const isWeekday = !["Sat", "Sun"].includes(wd);
-  const isMarketHours = hh >= 11 && hh < 18;
-  // Activo (lunes a viernes 11-18 ART): 15 min · Inactivo: 30 min
+
+  // BYMA opera:
+  //   - Pre-apertura:        10:30 - 11:00 (precios se actualizan, pero
+  //                          no se ejecutan órdenes hasta la apertura).
+  //   - Negociación continua:11:00 - 17:00
+  //   - Subasta de cierre:   17:00 - 17:05
+  //
+  // Como data912 publica precios desde la pre-apertura, consideramos
+  // "mercado activo" desde 10:30 hasta 17:30 (margen post-cierre para
+  // capturar últimas actualizaciones del feed).
+  //
+  // Usamos lógica de minutos para que 10:30 sea exacto y no 10:00.
+  const nowMinutes = hh * 60 + mm;
+  const START_MINUTES = 10 * 60 + 30; // 10:30
+  const END_MINUTES = 17 * 60 + 30;   // 17:30
+  const isMarketHours = nowMinutes >= START_MINUTES && nowMinutes < END_MINUTES;
+
+  // Activo (lun a vie 10:30 a 17:30 ART): refresh cada 15 min.
+  // Inactivo: cada 30 min.
   return isWeekday && isMarketHours ? 15 * 60_000 : 30 * 60_000;
 }
 
