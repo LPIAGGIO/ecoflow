@@ -5745,7 +5745,7 @@ function TotalCard({ positions, fx, bondPrices, futurePrices, stockPrices, valua
             </span>
           )}
           <span style={{ fontSize: 10, color: C.dim, fontFamily: "'Roboto', sans-serif" }}>
-            vs costo
+            histórico
           </span>
         </div>
       ) : (
@@ -7919,6 +7919,21 @@ function consolidatePositions(positions, bondPrices, futurePrices) {
           ? (openUnrealizedPnl / openNotional) * 100
           : null;
 
+        // P&L LIFETIME del ticker: realizado de las ventas pasadas
+        // + no realizado del lote actualmente vivo. Las dos filas del
+        // split (abierta y cerrada) comparten el mismo lifetime porque
+        // representan dos vistas de la misma historia con un ticker.
+        // El usuario lo ve en el detalle expandible de cualquiera.
+        const lifetimePnl = openUnrealizedPnl + realizedPnl;
+        // % lifetime: sobre el notional total invertido en compras
+        // (qty_total_buy × PPP × mult). Es el denominador natural para
+        // futuros — los CR0SCAR no pagas capital, pero el "% de retorno
+        // sobre exposición" es la métrica que tiene sentido comparar.
+        const lifetimeBaseNotional = g.totalBuyQty * mult * ppp;
+        const lifetimePnlPct = lifetimeBaseNotional > 0
+          ? (lifetimePnl / lifetimeBaseNotional) * 100
+          : null;
+
         // Filtrar las operations: solo las de compra van a la entrada abierta.
         // (las de venta van a la cerrada). Para el detalle expandible esto
         // significa que en la fila abierta se ven solo las compras.
@@ -7955,6 +7970,8 @@ function consolidatePositions(positions, bondPrices, futurePrices) {
           pnlPct: openPnlPct,
           realizedPnl: 0,
           unrealizedPnl: openUnrealizedPnl,
+          lifetimePnl,
+          lifetimePnlPct,
           notional: openNotional,
           firstDate: g.firstDate,
           lastDate: g.lastDate,
@@ -7984,6 +8001,8 @@ function consolidatePositions(positions, bondPrices, futurePrices) {
           pnlPct: closedPnlPct,
           realizedPnl: closedPnl,
           unrealizedPnl: 0,
+          lifetimePnl,
+          lifetimePnlPct,
           notional: 0,
           // Una info adicional útil para mostrar: cuántos contratos se cerraron
           closedQty: g.totalSellQty,
@@ -8099,6 +8118,17 @@ function consolidatePositions(positions, bondPrices, futurePrices) {
           ? (closedPnl / Math.abs(closedValueAtCost)) * 100
           : null;
 
+        // P&L LIFETIME del ticker: realizado de las ventas pasadas + no
+        // realizado del lote vivo. Ambas filas del split lo comparten.
+        // % lifetime sobre el costo total invertido en compras (toda la
+        // historia). Si openPnl es null (sin precio actual), el lifetime
+        // se reduce al realized.
+        const lifetimePnl = (openPnl ?? 0) + closedPnl;
+        const lifetimeCostBasis = applyConventionToValue(g.instrument_type, g.totalBuyQty, ppp);
+        const lifetimePnlPct = (lifetimeCostBasis != null && Math.abs(lifetimeCostBasis) > 0)
+          ? (lifetimePnl / Math.abs(lifetimeCostBasis)) * 100
+          : null;
+
         // Push entrada ABIERTA
         result.push({
           groupKey: g.groupKey + "|open",
@@ -8122,6 +8152,8 @@ function consolidatePositions(positions, bondPrices, futurePrices) {
           pnlPct: openPnlPct,
           realizedPnl: 0,
           unrealizedPnl: openPnl,
+          lifetimePnl,
+          lifetimePnlPct,
           notional: null,
           firstDate: g.firstDate,
           lastDate: g.lastDate,
@@ -8154,6 +8186,8 @@ function consolidatePositions(positions, bondPrices, futurePrices) {
           pnlPct: closedPnlPct,
           realizedPnl: closedPnl,
           unrealizedPnl: 0,
+          lifetimePnl,
+          lifetimePnlPct,
           notional: 0,
           closedQty: g.totalSellQty,
           firstDate: g.firstDate,
@@ -8226,6 +8260,10 @@ function consolidatePositions(positions, bondPrices, futurePrices) {
       pnlPct,
       realizedPnl,
       unrealizedPnl,
+      // Para los casos no-split (fully open o fully closed), el lifetime
+      // P&L coincide con pnl porque ya incluye realizedPnl + unrealizedPnl.
+      lifetimePnl: pnl,
+      lifetimePnlPct: pnlPct,
       notional,
       firstDate: g.firstDate,
       lastDate: g.lastDate,
@@ -10450,6 +10488,64 @@ function ConsolidatedRow({ group, bondPrices, futurePrices, stockPrices, futureA
                 arranque alineada con TICKER del header padre.
                 Refuerza visualmente que es un sub-grupo dentro de la fila. */}
             <div style={{ padding: "10px 14px 14px 110px" }}>
+              {/* Bloque "Histórico del ticker": muestra el P&L lifetime
+                  (realizado pasado + no realizado del lote vivo). En
+                  posiciones fully open sin ventas, lifetimePnl === pnl
+                  y este bloque solo confirma el dato. Cuando hubo ventas
+                  o cierres parciales, lifetime es la suma agregada que
+                  no se ve en la fila principal. */}
+              {group.lifetimePnl != null && Number.isFinite(group.lifetimePnl) && (
+                <div style={{
+                  display: "flex",
+                  alignItems: "baseline",
+                  gap: 14,
+                  marginBottom: 14,
+                  paddingBottom: 10,
+                  borderBottom: `1px solid ${C.border}`,
+                }}>
+                  <span style={{
+                    fontSize: 9,
+                    letterSpacing: "0.18em",
+                    color: C.dim,
+                    textTransform: "uppercase",
+                    fontWeight: 600,
+                    fontFamily: "'Roboto', sans-serif",
+                  }}>
+                    Histórico del ticker
+                  </span>
+                  <span style={{
+                    fontSize: 14,
+                    fontWeight: 600,
+                    color: group.lifetimePnl >= 0 ? C.green : C.red,
+                    fontFamily: "'JetBrains Mono', monospace",
+                  }}>
+                    {group.lifetimePnl >= 0 ? "+" : ""}
+                    {fmtCurrencyValue(group.lifetimePnl, group.currency === "USD-MEP" || group.currency === "USD-CCL" ? "USD" : "ARS")}
+                  </span>
+                  {Number.isFinite(group.lifetimePnlPct) && (
+                    <span style={{
+                      fontSize: 11,
+                      fontWeight: 500,
+                      color: group.lifetimePnl >= 0 ? C.green : C.red,
+                      fontFamily: "'JetBrains Mono', monospace",
+                      backgroundColor: group.lifetimePnl >= 0 ? "rgba(74,222,128,0.12)" : "rgba(248,113,113,0.12)",
+                      padding: "2px 7px",
+                      borderRadius: 2,
+                    }}>
+                      {group.lifetimePnl >= 0 ? "+" : ""}{group.lifetimePnlPct.toFixed(2)}%
+                    </span>
+                  )}
+                  <span style={{
+                    fontSize: 10,
+                    color: C.dim,
+                    fontFamily: "'Roboto', sans-serif",
+                    fontStyle: "italic",
+                  }}>
+                    realizado + no realizado de toda la historia con {group.ticker}
+                  </span>
+                </div>
+              )}
+
               <div style={{
                 fontSize: 9,
                 letterSpacing: "0.18em",
