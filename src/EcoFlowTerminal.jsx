@@ -9649,6 +9649,7 @@ function ConsolidatedSection({
           bondPrices={bondPrices}
           futurePrices={futurePrices}
           stockPrices={stockPrices}
+          futureAdjLookup={futureAdjLookup}
           onEdit={onEdit}
           onDelete={onDelete}
           onUpdatePrice={onUpdatePrice}
@@ -9659,6 +9660,10 @@ function ConsolidatedSection({
       {closed.length > 0 && (
         <ClosedPositionsSection
           closed={closed}
+          bondPrices={bondPrices}
+          futurePrices={futurePrices}
+          stockPrices={stockPrices}
+          futureAdjLookup={futureAdjLookup}
           onEdit={onEdit}
           onDelete={onDelete}
           onUpdatePrice={onUpdatePrice}
@@ -9678,7 +9683,7 @@ function ConsolidatedSection({
  * El P&L acá ya es REALIZADO (efectivo en tu comitente, no mark-to-market).
  */
 
-function ClosedPositionsSection({ closed, onEdit, onDelete, onUpdatePrice }) {
+function ClosedPositionsSection({ closed, bondPrices, futurePrices, stockPrices, futureAdjLookup, onEdit, onDelete, onUpdatePrice }) {
   const [open, setOpen] = useState(false);
 
   // Sumamos el P&L total de las cerradas para mostrarlo en el header
@@ -9744,6 +9749,7 @@ function ClosedPositionsSection({ closed, onEdit, onDelete, onUpdatePrice }) {
             bondPrices={bondPrices}
             futurePrices={futurePrices}
             stockPrices={stockPrices}
+            futureAdjLookup={futureAdjLookup}
             onEdit={onEdit}
             onDelete={onDelete}
             onUpdatePrice={onUpdatePrice}
@@ -9950,7 +9956,7 @@ function OperationsHistorySection({
  * Las acciones (editar, borrar, cambiar precio) operan sobre las ops
  * individuales y delegan al callback del padre.
  */
-function ConsolidatedTable({ consolidated, bondPrices, futurePrices, stockPrices, onEdit, onDelete, onUpdatePrice, variant = "open" }) {
+function ConsolidatedTable({ consolidated, bondPrices, futurePrices, stockPrices, futureAdjLookup, onEdit, onDelete, onUpdatePrice, variant = "open" }) {
   const [expanded, setExpanded] = useState(new Set());
   const isClosed = variant === "closed";
 
