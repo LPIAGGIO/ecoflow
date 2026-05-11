@@ -5598,8 +5598,15 @@ function TotalCard({ positions, fx, bondPrices, futurePrices, stockPrices, valua
   // posición por posición usando computeDailyPnL, que devuelve el P&L
   // en moneda de la posición. Después convertimos a la valuationCurrency.
   // Posiciones sin pct_change disponible se ignoran (no rompen el total).
+  // Si el mercado AR está cerrado (fin de semana, feriado o fuera de
+  // horario hábil), early return con marketClosed=true → render en gris.
+  // Sin este check, sumaríamos el P&L del último día hábil como si fuera
+  // "del día" y daría números engañosos durante el weekend.
   const dailyTotals = useMemo(() => {
     if (!fx || !positions) return { pnl: null, base: 0, hasAny: false };
+    if (!isActiveMarketWindow()) {
+      return { pnl: 0, base: 0, hasAny: true, marketClosed: true };
+    }
     let pnlInValuation = 0;
     let prevValueInValuation = 0;
     let hasAny = false;
@@ -5636,9 +5643,9 @@ function TotalCard({ positions, fx, bondPrices, futurePrices, stockPrices, valua
 
   const showDaily = dailyTotals.hasAny && dailyTotals.pnl != null;
   const dailyIsPositive = showDaily && dailyTotals.pnl >= 0;
-  const dailyColor = !showDaily ? C.dim : dailyIsPositive ? C.green : C.red;
-  const dailySymbol = !showDaily ? "" : dailyIsPositive ? "+" : "";
-  const dailyPct = (showDaily && dailyTotals.base > 0)
+  const dailyColor = (!showDaily || dailyTotals.marketClosed) ? C.dim : dailyIsPositive ? C.green : C.red;
+  const dailySymbol = (!showDaily || dailyTotals.marketClosed) ? "" : dailyIsPositive ? "+" : "";
+  const dailyPct = (showDaily && !dailyTotals.marketClosed && dailyTotals.base > 0)
     ? (dailyTotals.pnl / dailyTotals.base) * 100
     : null;
 
@@ -6669,6 +6676,17 @@ function computeDailyPnL(p, bondPrices, futurePrices, stockPrices, futureAdjLook
   const ticker = (p.ticker || "").trim().toUpperCase();
   const qty = Number(p.quantity) || 0;
   if (qty === 0) return null;
+
+  // Si el mercado AR está cerrado (sábado, domingo o fuera de 11-18 hs
+  // hábil), devolvemos 0 con flag marketClosed=true para que el caller
+  // pueda renderizarlo en gris. Sin este check, el cálculo
+  // (price - previousClose) o (current - lastSettle) muestra el delta
+  // del último día hábil como si fuera "P&L de hoy", lo cual confunde
+  // (típico: domingo viendo "+131.000 ARS" en un bono porque data912
+  // sigue devolviendo el precio del viernes y previousClose del jueves).
+  if (!isActiveMarketWindow()) {
+    return { pnl: 0, pct: 0, marketClosed: true };
+  }
 
   // ─── Futuros ──────────────────────────────────────────────
   // El "P&L del día" del futuro es la variación desde el último settle
@@ -10087,9 +10105,16 @@ function ConsolidatedRow({ group, bondPrices, futurePrices, stockPrices, futureA
   // Para futuros usamos LA-SE; para bonos/acciones/CEDEARs usamos
   // pct_change (derivamos cierre anterior). Si ninguna op del grupo tiene
   // datos para calcularlo (típico: caucion, fci, opciones), dailyPnl=null.
-  const { dailyPnl, dailyPct } = useMemo(() => {
+  // Si el mercado AR está cerrado (fin de semana, feriado o fuera de
+  // horario hábil), devolvemos 0 con flag marketClosed=true para
+  // mostrarlo en gris — el feed sigue devolviendo precios stale del
+  // último día hábil y eso inflaría el "P&L HOY" con datos viejos.
+  const { dailyPnl, dailyPct, marketClosed } = useMemo(() => {
+    if (!isActiveMarketWindow()) {
+      return { dailyPnl: 0, dailyPct: 0, marketClosed: true };
+    }
     if (!group.operations || group.operations.length === 0) {
-      return { dailyPnl: null, dailyPct: null };
+      return { dailyPnl: null, dailyPct: null, marketClosed: false };
     }
 
     // Para todos los tipos no-future, el P&L diario por unidad es el mismo
@@ -10106,8 +10131,8 @@ function ConsolidatedRow({ group, bondPrices, futurePrices, stockPrices, futureA
         operation_type: "compra",
       };
       const d = computeDailyPnL(sampleOp, bondPrices, futurePrices, stockPrices);
-      if (!d) return { dailyPnl: null, dailyPct: null };
-      return { dailyPnl: d.pnl, dailyPct: d.pct };
+      if (!d) return { dailyPnl: null, dailyPct: null, marketClosed: false };
+      return { dailyPnl: d.pnl, dailyPct: d.pct, marketClosed: false };
     }
 
     // Futuros: cada operación tiene sign distinto (long/short).
@@ -10162,8 +10187,8 @@ function ConsolidatedRow({ group, bondPrices, futurePrices, stockPrices, futureA
     };
   }, [group, bondPrices, futurePrices, stockPrices, futureAdjLookup]);
 
-  const dailyColor = dailyPnl == null ? C.dim : dailyPnl >= 0 ? C.green : C.red;
-  const dailySign = dailyPnl == null ? "" : dailyPnl >= 0 ? "+" : "";
+  const dailyColor = (dailyPnl == null || marketClosed) ? C.dim : dailyPnl >= 0 ? C.green : C.red;
+  const dailySign = (dailyPnl == null || marketClosed) ? "" : dailyPnl >= 0 ? "+" : "";
 
   // Para la celda de precio editable: como el grupo puede tener varias
   // operaciones, anclamos el current_price a la operación más reciente
