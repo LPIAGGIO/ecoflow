@@ -6516,11 +6516,26 @@ function convertValue(amount, fromCurrency, toCurrency, fx) {
 /**
  * Resuelve el precio "de mercado" actual de una posición.
  *
- * Prioridad:
- *   1. futurePrices[ticker] (Primary API tiempo real, solo para futuros)
- *   2. p.current_price (precio manual cargado por el user)
- *   3. bondPrices[ticker] (data912/BYMA, solo para bonos / ONs)
- *   4. p.entry_price (fallback a costo)
+ * Prioridad (nueva, post bug de futuros editables 11/may/2026):
+ *   1. p.current_price (override MANUAL del usuario) — gana siempre.
+ *      El usuario es la fuente de verdad. Si lo carga, lo respetamos.
+ *      Para volver al feed, el usuario tiene que borrar el current_price
+ *      (botón "Resetear" en la UI de edición de precio).
+ *   2. futurePrices[ticker] (Primary API tiempo real, solo para futuros).
+ *   3. bondPrices[ticker]  (data912/BYMA, solo para bonos / ONs).
+ *   4. stockPrices[ticker] (data912, acciones/CEDEARs con fallback al
+ *      ticker base si es variante de plaza tipo AAPLD/AAPLC).
+ *   5. p.entry_price (fallback a costo).
+ *
+ * Antes la prioridad para FUTUROS era Primary > manual ("Primary es más
+ * confiable que el manual"). El problema: si el usuario quería ajustar
+ * el precio a mano (porque Primary venía con un valor stale post-cierre,
+ * o porque el usuario tiene un dato más fresco de su broker), el override
+ * se guardaba en BD pero la UI seguía mostrando Primary. Eso confundía y
+ * el usuario reportó: "edito y vuelve al de Primary".
+ *
+ * Ahora el manual gana siempre. Comportamiento consistente entre bonos
+ * y futuros: editás → queda manual; borrás → vuelve al feed.
  *
  * Si nada está disponible, devuelve null.
  *
@@ -6529,20 +6544,17 @@ function convertValue(amount, fromCurrency, toCurrency, fx) {
 function resolvePositionPrice(p, bondPrices, futurePrices, stockPrices) {
   const ticker = (p.ticker || "").trim().toUpperCase();
 
-  // 1) Para futuros, intentamos Primary primero. Si tiene un precio fresco
-  //    o vivo, lo usamos. Si solo tiene settlement viejo, igual lo
-  //    usamos como source="primary" — sigue siendo más confiable que
-  //    el manual cargado a mano por el usuario.
+  // 1) Override manual del usuario — máxima prioridad.
+  if (p.current_price != null) {
+    return { price: Number(p.current_price), source: "manual" };
+  }
+
+  // 2) Para futuros, feed Primary (tiempo real).
   if (p.instrument_type === "future" && futurePrices && ticker) {
     const fp = futurePrices[ticker];
     if (fp?.price != null && !fp.error) {
       return { price: Number(fp.price), source: "primary" };
     }
-  }
-
-  // 2) Override manual del usuario (futuros sin Primary, o cualquier otro)
-  if (p.current_price != null) {
-    return { price: Number(p.current_price), source: "manual" };
   }
 
   // 3) Para bonos / ONs leemos del cache de precios (BYMA primero, data912
