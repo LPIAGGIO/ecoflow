@@ -7799,42 +7799,36 @@ function consolidatePositions(positions, bondPrices, futurePrices) {
     let currentPrice = null;
     let priceSource = "cost";
 
-    // Para futuros con ventas, decidimos si gana el cierre o el manual:
-    //   - Si hay manual override Y su timestamp es POSTERIOR a la fecha de
-    //     la última venta → manual gana (el user lo cargó a propósito
-    //     post-cierre, sabiendo que ya había una venta).
-    //   - Si no hay manual, o el manual fue cargado antes de la venta
-    //     → el cierre gana.
-    //
-    // Comparación: convertimos ambos a milisegundos. lastSellDate es solo
-    // un día (ej "2026-05-03") así que lo tratamos como medianoche UTC
-    // de ese día. manualOverrideAt es timestamptz exacto.
-    let manualBeatsClose = false;
-    if (
-      g.instrument_type === "future" &&
-      g.lastSellPrice != null &&
-      manualOverride != null &&
-      manualOverrideAt &&
-      g.lastSellDate
-    ) {
-      const manualMs = new Date(manualOverrideAt).getTime();
-      // lastSellDate como inicio del día siguiente — para que un manual
-      // cargado el mismo día de la venta también cuente como post-cierre.
-      // (En la práctica si vendiste y después en el mismo día editaste
-      // manualmente, fue post-cierre).
-      const sellDateMs = new Date(g.lastSellDate).getTime();
-      manualBeatsClose = manualMs > sellDateMs;
-    }
+    // NOTA: la lógica de "manualBeatsClose" (manual gana vs cierre según
+    // timestamp posterior a la última venta) se eliminó cuando se unificó
+    // la prioridad a "manual gana siempre". Si más adelante hace falta
+    // distinguir manuales viejos de actuales, recuperar la comparación
+    // entre manualOverrideAt y lastSellDate.
 
     // Precio Primary API: si tenemos un precio fresco vía /api/primary-md,
-    // lo usamos como fuente prioritaria para futuros. Solo NO gana cuando el
-    // user editó manualmente DESPUÉS de la última venta (manualBeatsClose),
-    // que es un override intencional explícito.
+    // lo usamos como fuente para futuros — pero solo si NO hay manual
+    // override. El override manual gana siempre (Modelo unificado:
+    // "el usuario es la fuente de verdad", igual que para bonos).
     const primaryPrice = (g.instrument_type === "future" && futurePrices)
       ? futurePrices[g.ticker]?.price
       : null;
 
-    if (g.instrument_type === "future" && manualBeatsClose) {
+    // Orden de prioridad (unificado entre futuros, bonos, acciones):
+    //   1. manualOverride (current_price cargado por el usuario) → gana siempre.
+    //   2. Para futuros: primaryPrice (Matba-Rofex live).
+    //   3. Para futuros con ventas: lastSellPrice (cierre del lote vendido).
+    //   4. Para bonos/ONs: bondPrices del feed (BYMA/data912).
+    //   5. ppp (fallback a costo).
+    //
+    // Bug reportado por LP en mayo/2026: para futuros, el override manual
+    // se guardaba en BD pero el render seguía mostrando el precio de
+    // Primary. Causa: el orden anterior priorizaba Primary > manual
+    // (excepto si había una venta posterior — "manualBeatsClose"). Esto
+    // hacía imposible editar el precio de un futuro abierto sin ventas.
+    // Fix: el manual gana antes que cualquier otra fuente, sin importar
+    // el tipo de instrumento. Si el manual está obsoleto, el usuario lo
+    // borra y vuelve al feed.
+    if (manualOverride != null) {
       currentPrice = manualOverride;
       priceSource = "manual";
     } else if (g.instrument_type === "future" && primaryPrice != null && primaryPrice > 0) {
@@ -7845,12 +7839,9 @@ function consolidatePositions(positions, bondPrices, futurePrices) {
       g.instrument_type === "future" &&
       g.lastSellPrice != null
     ) {
-      // Sin Primary y sin manual post-cierre: usamos el último precio de venta.
+      // Futuro sin Primary y sin manual: usamos el último precio de venta.
       currentPrice = g.lastSellPrice;
       priceSource = "close"; // badge "CIERRE"
-    } else if (manualOverride != null) {
-      currentPrice = manualOverride;
-      priceSource = "manual";
     } else if (
       bondPrices &&
       ticker_isBondLike(g.instrument_type) &&
