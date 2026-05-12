@@ -13057,86 +13057,65 @@ function AddPositionDrawer({ editingPosition, onClose, onSubmit }) {
            * directamente en el cash_movement desde el libro de
            * operaciones.
            *
-           * Sugerido mercado: calculamos en vivo la comisión estándar
-           * de A3 según ticker + cantidad + precio. Si Cocos / Balanz /
-           * IOL lo facturan distinto, el user lo sobreescribe.
+           * Cartel siempre visible (cuando hay cantidad+precio válidos):
+           *   - Sin valor tipeado → "Posible comisión" + monto sugerido
+           *     según tarifa A3 + botón "Usar este valor" para auto-
+           *     llenar el input.
+           *   - Con valor tipeado → "Comisión a descontar" + monto del
+           *     usuario + fecha T+1 efectiva del débito.
+           * Todo se recalcula en vivo al cambiar ticker / cantidad /
+           * precio / fecha.
            */}
-          {form.instrument_type === "future" && !editingPosition && (() => {
-            const suggested = calcSuggestedFutureCommission(
-              form.ticker,
-              form.quantity,
-              form.entry_price
-            );
-            return (
-              <FormSection
-                label={
-                  <>
-                    Comisión (opcional)
-                    {suggested != null && (
-                      <span
-                        style={{
-                          color: C.dim,
-                          fontWeight: 400,
-                          textTransform: "none",
-                          letterSpacing: "0.02em",
-                          marginLeft: 8,
-                          fontSize: 10,
-                        }}
-                      >
-                        — sugerido mercado:{" "}
-                        <button
-                          type="button"
-                          onClick={() => setField("commission", suggested.toFixed(2))}
-                          style={{
-                            backgroundColor: "transparent",
-                            border: "none",
-                            color: C.accent,
-                            padding: 0,
-                            cursor: "pointer",
-                            fontFamily: "'Roboto Mono', monospace",
-                            fontSize: 10,
-                            textDecoration: "underline",
-                            textDecorationStyle: "dotted",
-                            textUnderlineOffset: 2,
-                          }}
-                          title="Click para usar este valor"
-                        >
-                          {fmtCurrencyValue(suggested, (form.entry_currency || "ARS") === "ARS" ? "ARS" : "USD")}
-                        </button>
-                      </span>
-                    )}
-                  </>
-                }
-                error={errors.commission}
-                hint="Derechos de mercado + IVA · se descuenta T+1"
-              >
+          {form.instrument_type === "future" && !editingPosition && (
+            <FormSection
+              label="Comisión (opcional)"
+              error={errors.commission}
+              hint="Derechos de mercado + IVA · se descuenta T+1"
+            >
               <Input
                 type="number"
                 value={form.commission}
                 onChange={(v) => setField("commission", v)}
-                placeholder={
-                  suggested != null
-                    ? `Ej. ${suggested.toFixed(2)} (click "sugerido" arriba)`
-                    : "0,00"
-                }
+                placeholder="0,00"
                 step="any"
                 hasError={Boolean(errors.commission)}
               />
               {(() => {
-                const comm = Number(form.commission);
-                if (!Number.isFinite(comm) || comm <= 0) return null;
+                const userCommission = Number(form.commission);
+                const hasUserCommission =
+                  Number.isFinite(userCommission) && userCommission > 0;
+
+                const suggested = calcSuggestedFutureCommission(
+                  form.ticker, form.quantity, form.entry_price
+                );
+
+                // No mostramos cartel si no hay sugerido posible Y el
+                // user tampoco tipeó nada — sería ruido vacío.
+                if (!hasUserCommission && suggested == null) return null;
+
+                const displayAmount = hasUserCommission ? userCommission : suggested;
                 const ccy = form.entry_currency || "ARS";
+                const title = hasUserCommission
+                  ? "Comisión a descontar"
+                  : "Posible comisión";
+
                 // Calcular T+1 hábil para mostrar al usuario la fecha
-                // efectiva del débito.
-                const start = new Date(form.entry_date + "T00:00:00");
-                const dt = new Date(start);
-                dt.setDate(dt.getDate() + 1);
-                while (dt.getDay() === 0 || dt.getDay() === 6) {
+                // efectiva del débito (solo si tipeó algo: si no, es
+                // estimación de referencia y no nos comprometemos con
+                // una fecha).
+                let dtStr = null;
+                if (hasUserCommission && form.entry_date) {
+                  const start = new Date(form.entry_date + "T00:00:00");
+                  const dt = new Date(start);
                   dt.setDate(dt.getDate() + 1);
+                  while (dt.getDay() === 0 || dt.getDay() === 6) {
+                    dt.setDate(dt.getDate() + 1);
+                  }
+                  dtStr = dt.toLocaleDateString("es-AR", {
+                    day: "2-digit", month: "2-digit", year: "numeric",
+                  });
                 }
-                const dtStr = dt.toLocaleDateString("es-AR", {
-                  day: "2-digit", month: "2-digit", year: "numeric",
-                });
+
                 return (
                   <div
                     style={{
@@ -13150,20 +13129,50 @@ function AddPositionDrawer({ editingPosition, onClose, onSubmit }) {
                     }}
                   >
                     <div style={{ color: C.muted, fontSize: 10, letterSpacing: "0.10em", textTransform: "uppercase", marginBottom: 3, fontWeight: 600 }}>
-                      Comisión a descontar
+                      {title}
                     </div>
                     <div style={{ fontFamily: "'Roboto Mono', monospace", fontSize: 13, fontWeight: 500 }}>
-                      {fmtCurrencyValue(comm, ccy === "ARS" ? "ARS" : "USD")}
+                      {fmtCurrencyValue(displayAmount, ccy === "ARS" ? "ARS" : "USD")}
                     </div>
-                    <div style={{ color: C.dim, fontSize: 10.5, marginTop: 3 }}>
-                      Se debita el {dtStr} (T+1 hábil)
-                    </div>
+                    {hasUserCommission ? (
+                      <div style={{ color: C.dim, fontSize: 10.5, marginTop: 3 }}>
+                        Se debita el {dtStr} (T+1 hábil)
+                      </div>
+                    ) : (
+                      <>
+                        <div style={{ color: C.dim, fontSize: 10.5, marginTop: 3 }}>
+                          Estimación según tarifa A3 Mercados
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => setField("commission", suggested.toFixed(2))}
+                          style={{
+                            backgroundColor: "transparent",
+                            border: `1px solid ${C.border}`,
+                            color: C.accent,
+                            padding: "3px 10px",
+                            fontSize: 10.5,
+                            cursor: "pointer",
+                            letterSpacing: "0.04em",
+                            marginTop: 6,
+                            transition: "all 100ms ease",
+                          }}
+                          onMouseEnter={(e) => {
+                            e.currentTarget.style.borderColor = C.accentBorder;
+                          }}
+                          onMouseLeave={(e) => {
+                            e.currentTarget.style.borderColor = C.border;
+                          }}
+                        >
+                          Usar este valor
+                        </button>
+                      </>
+                    )}
                   </div>
                 );
               })()}
-              </FormSection>
-            );
-          })()}
+            </FormSection>
+          )}
 
           {/* Campos extra: opción */}
           {form.instrument_type === "option" && (
