@@ -1764,7 +1764,7 @@ const INSTRUMENT_TYPES = {
     description: "Lecaps, Boncaps, Bonares, AL30, GD30 (en ARS o USD)",
     icon: Receipt,
     color: "emerald",
-    quantityLabel: "Cantidad",
+    quantityLabel: "Cantidad / VN",
     quantityHint: "Ej. 35.945.426",
     priceLabel: "Precio",
     priceHint: "Ej. 1394,50 (ARS) o 72,50 (USD)",
@@ -1775,7 +1775,7 @@ const INSTRUMENT_TYPES = {
     description: "Lecaps, Boncaps, Bonares en pesos",
     icon: Receipt,
     color: "emerald",
-    quantityLabel: "Cantidad",
+    quantityLabel: "Cantidad / VN",
     quantityHint: "Ej. 35.945.426",
     priceLabel: "Precio",
     priceHint: "Ej. 1394,50",
@@ -1786,7 +1786,7 @@ const INSTRUMENT_TYPES = {
     description: "AL30, GD30, Bonares hardollar",
     icon: Landmark,
     color: "cyan",
-    quantityLabel: "Cantidad",
+    quantityLabel: "Cantidad / VN",
     quantityHint: "Ej. 100.000",
     priceLabel: "Precio",
     priceHint: "Ej. 72,50 USD",
@@ -1797,7 +1797,7 @@ const INSTRUMENT_TYPES = {
     description: "ONs corporativas",
     icon: Building2,
     color: "indigo",
-    quantityLabel: "Cantidad",
+    quantityLabel: "Cantidad / VN",
     priceLabel: "Precio",
     defaultCurrency: "USD",
   },
@@ -1859,8 +1859,10 @@ const INSTRUMENT_TYPES = {
     description: "Fondos Comunes de Inversión",
     icon: Coins,
     color: "amber",
-    quantityLabel: "Cantidad",
+    quantityLabel: "Cantidad / VN",
+    quantityHint: "Cuotapartes",
     priceLabel: "Precio",
+    priceHint: "VCP (valor cuotaparte)",
     defaultCurrency: "ARS",
   },
   usd: {
@@ -7761,8 +7763,11 @@ function consolidatePositions(positions, bondPrices, futurePrices) {
 
   // Tipos donde NO consolidamos: cada operación queda individual.
   // Son instrumentos donde el "ticker" no identifica unívocamente un
-  // activo fungible (ej. distintas cauciones a distinto plazo).
-  const NO_CONSOLIDATE = new Set(["caucion", "option", "fci"]);
+  // activo fungible (cauciones a distinto plazo, opciones con strike
+  // distinto). Los FCI sí consolidan: comprar más cuotapartes del mismo
+  // ticker es ampliar la misma posición — el VCP es uno solo para todas
+  // las cuotapartes del fondo.
+  const NO_CONSOLIDATE = new Set(["caucion", "option"]);
 
   /**
    * Construye el detalle "neteado" de operaciones para mostrar en el
