@@ -12743,6 +12743,10 @@ function AddPositionDrawer({ editingPosition, onClose, onSubmit }) {
                * ruido. Da al usuario una sanity check rápida antes de
                * guardar: si esperaba ~5,03M y el preview dice ~50M, sabe
                * que tipeó mal alguna unidad.
+               *
+               * El verbo cambia según operation_type:
+               *   - buy / Colocar → "Cobrarás" (prestás y al vencer cobrás capital + intereses)
+               *   - sell / Tomar  → "Pagarás" (te prestan y al vencer devolvés capital + intereses)
                */}
               {(() => {
                 const capital = Number(form.quantity);
@@ -12764,11 +12768,20 @@ function AddPositionDrawer({ editingPosition, onClose, onSubmit }) {
                   day: "2-digit", month: "2-digit", year: "numeric",
                 });
                 const ccy = form.entry_currency || "ARS";
+                const isTomar = form.operation_type === "sell";
+                const verbLabel = isTomar ? "Pagarás al vencimiento" : "Cobrarás al vencimiento";
+                const interesLabel = isTomar ? "Costo intereses" : "Intereses";
+                const borderRgba = isTomar
+                  ? "rgba(248,113,113,0.20)"
+                  : "rgba(56,189,248,0.20)";
+                const bgRgba = isTomar
+                  ? "rgba(248,113,113,0.06)"
+                  : "rgba(56,189,248,0.06)";
                 return (
                   <div
                     style={{
-                      backgroundColor: "rgba(56,189,248,0.06)",
-                      border: `1px solid rgba(56,189,248,0.20)`,
+                      backgroundColor: bgRgba,
+                      border: `1px solid ${borderRgba}`,
                       padding: "10px 12px",
                       marginBottom: 16,
                       fontSize: 12,
@@ -12777,13 +12790,13 @@ function AddPositionDrawer({ editingPosition, onClose, onSubmit }) {
                     }}
                   >
                     <div style={{ color: C.muted, fontSize: 10.5, letterSpacing: "0.10em", textTransform: "uppercase", marginBottom: 4, fontWeight: 600 }}>
-                      Cobrarás al vencimiento
+                      {verbLabel}
                     </div>
                     <div style={{ fontFamily: "'Roboto Mono', monospace", fontSize: 14, fontWeight: 500 }}>
                       {fmtCurrencyValue(totalAtMaturity, ccy === "ARS" ? "ARS" : "USD")}
                     </div>
                     <div style={{ color: C.dim, fontSize: 11, marginTop: 4 }}>
-                      Intereses: {fmtCurrencyValue(intereses, ccy === "ARS" ? "ARS" : "USD")} · Vence el {maturityStr}
+                      {interesLabel}: {fmtCurrencyValue(intereses, ccy === "ARS" ? "ARS" : "USD")} · Vence el {maturityStr}
                     </div>
                   </div>
                 );
