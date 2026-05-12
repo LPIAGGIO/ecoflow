@@ -6735,9 +6735,26 @@ function computeDailyPnL(p, bondPrices, futurePrices, stockPrices, futureAdjLook
     if (fp?.price != null && !fp.error) {
       const last = Number(fp.price);
       const lookupEntry = futureAdjLookup ? futureAdjLookup.get(p.id) : null;
-      const settle = lookupEntry?.lastSettle != null
+      let settle = lookupEntry?.lastSettle != null
         ? Number(lookupEntry.lastSettle)
-        : (fp.settlement != null ? Number(fp.settlement) : null);
+        : null;
+
+      // Si no hay adjustments en BD para esta posición:
+      //   - Si entry_date === HOY (la compró hoy mismo), su "base del día"
+      //     es el entry_price (el usuario percibe que su día arrancó en
+      //     el momento de comprar, no contra el settle de ayer del feed).
+      //   - Caso contrario (posición más vieja, sin ajustes históricos
+      //     porque la app aún no lleva mucho tiempo), caemos al settle
+      //     del feed Primary (mejor disponible).
+      if (settle == null) {
+        const todayIso = new Date().toISOString().slice(0, 10);
+        if (p.entry_date === todayIso && Number(p.entry_price) > 0) {
+          settle = Number(p.entry_price);
+        } else if (fp.settlement != null) {
+          settle = Number(fp.settlement);
+        }
+      }
+
       if (Number.isFinite(last) && settle != null && Number.isFinite(settle) && settle > 0) {
         const multiplier = Number(p.extra?.contract_size) || 1000;
         // signo: COMPRA gana si sube, VENTA gana si baja.
@@ -10374,9 +10391,22 @@ function ConsolidatedRow({ group, bondPrices, futurePrices, stockPrices, futureA
         }
       }
     }
-    // Fallback al feed si no hay ningún adjustment en BD para este grupo.
-    if (settle == null && fp.settlement != null) {
-      settle = Number(fp.settlement);
+    // Sin adjustments en BD para ninguna op del grupo:
+    //   - Si TODAS las ops se abrieron HOY (primera vez que opera el
+    //     ticker), el P&L del día debe medirse desde el PPP del grupo:
+    //     el "día" del usuario arrancó en el momento de comprar, no
+    //     contra el settle de ayer del feed.
+    //   - Caso contrario, caemos al settle del feed Primary.
+    if (settle == null) {
+      const todayIso = new Date().toISOString().slice(0, 10);
+      const allOpsToday = group.operations.every(
+        (op) => op.entry_date === todayIso
+      );
+      if (allOpsToday && Number(group.ppp) > 0) {
+        settle = Number(group.ppp);
+      } else if (fp.settlement != null) {
+        settle = Number(fp.settlement);
+      }
     }
     if (settle == null || !Number.isFinite(last) || !Number.isFinite(settle) || settle <= 0) {
       return { dailyPnl: null, dailyPct: null };
