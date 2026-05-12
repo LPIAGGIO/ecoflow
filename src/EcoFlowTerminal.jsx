@@ -4166,7 +4166,7 @@ function useFutureAdjustments(positions, futurePrices) {
           multiplier: getFutureMultiplier(p),
         };
       }
-      const sign = p.operation_type === "venta" ? -1 : 1;
+      const sign = p.operation_type === "sell" ? -1 : 1;
       const qty = Number(p.quantity) || 0;
       futureGroups[ticker].netQty += sign * qty;
       futureGroups[ticker].ops.push(p);
@@ -6760,7 +6760,7 @@ function computeDailyPnL(p, bondPrices, futurePrices, stockPrices, futureAdjLook
       if (Number.isFinite(last) && settle != null && Number.isFinite(settle) && settle > 0) {
         const multiplier = Number(p.extra?.contract_size) || 1000;
         // signo: COMPRA gana si sube, VENTA gana si baja.
-        const sign = (p.operation_type === "venta") ? -1 : 1;
+        const sign = (p.operation_type === "sell") ? -1 : 1;
         const diffPerUnit = last - settle;
         const pnl = sign * diffPerUnit * qty * multiplier;
         const pct = (diffPerUnit / settle) * 100;
@@ -6787,7 +6787,7 @@ function computeDailyPnL(p, bondPrices, futurePrices, stockPrices, futureAdjLook
       if (prev != null && prev > 0) {
         // Bonos cotizan cada 100 VN. P&L unidad = (price - prev) / 100 × cantidad
         const diffPer100 = m.price - prev;
-        const sign = (p.operation_type === "venta") ? -1 : 1;
+        const sign = (p.operation_type === "sell") ? -1 : 1;
         const pnl = sign * (diffPer100 / 100) * qty;
         const pct = (diffPer100 / prev) * 100;
         return { pnl, pct };
@@ -6817,7 +6817,7 @@ function computeDailyPnL(p, bondPrices, futurePrices, stockPrices, futureAdjLook
       }
       if (prev != null && prev > 0) {
         const diffPerUnit = m.price - prev;
-        const sign = (p.operation_type === "venta") ? -1 : 1;
+        const sign = (p.operation_type === "sell") ? -1 : 1;
         const pnl = sign * diffPerUnit * qty;
         const pct = (diffPerUnit / prev) * 100;
         return { pnl, pct };
