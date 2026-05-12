@@ -4657,7 +4657,7 @@ function useUserPositions() {
  * Tipos de instrumento que disparan un cash_movement automático al
  * crear/editar una operación.
  *
- * Bonos / ON / Stocks / CEDEARs:
+ * Bonos / ON / Stocks / CEDEARs / FCI:
  *   - Compra → purchase_cost = qty × price (con /100 para bonos/ON)
  *   - Venta  → sale_proceeds = qty × price (con /100 para bonos/ON)
  *   - Settlement determina la fecha del cash (CI = mismo día, T1 = +1 hábil)
@@ -4672,7 +4672,7 @@ function useUserPositions() {
  *   - Si la venta es short puro (sin compras previas), se trata como
  *     apertura — no genera cash hasta que hayan compras que neteen.
  */
-const CASH_AUTO_TYPES = new Set(["bond_ars", "bond_usd", "on", "stock", "cedear", "future"]);
+const CASH_AUTO_TYPES = new Set(["bond_ars", "bond_usd", "on", "stock", "cedear", "fci", "future"]);
 
 /**
  * Calcula el P&L realizado de una venta de futuro contra las compras
@@ -11092,18 +11092,37 @@ function PositionRow({ position, bondPrices, onEdit, onDelete, onUpdatePrice }) 
   // Total operado en esta operación (NO es el total a mercado actual).
   // Es la plata que movió la operación cuando ocurrió:
   //   - Bonos: cantidad × precio / 100
-  //   - Futuros: cantidad × 1000 × precio (notional movido)
   //   - Opciones: cantidad × 100 × prima
   //   - Resto: cantidad × precio
-  // Para ventas, lo mostramos en negativo (saliste de la posición → te
-  // entró plata, pero a efectos de "delta de posición" es negativo).
-  const operationTotal = position.entry_price != null
+  //
+  // FUTUROS: NO mostramos un total porque la compra/venta de un contrato
+  // de futuro no implica cash flow real (solo se ponen garantías y se
+  // liquidan MTM diarios). El notional (qty × 1000 × precio) es la
+  // exposición nominal, no plata movida. Lo mostramos como nota en la
+  // columna de notas para que la info siga visible sin confundir.
+  const isFuture = position.instrument_type === "future";
+  const operationTotal = (!isFuture && position.entry_price != null)
     ? applyConventionToValue(
         position.instrument_type,
         Math.abs(Number(position.quantity) || 0),
         Number(position.entry_price)
       )
     : null;
+
+  // Notional para futuros (qty × 1000 × precio): exposición nominal del
+  // contrato. Va a la columna de notas como "Vale por $X operado".
+  const futureNotional = (isFuture && position.entry_price != null)
+    ? Math.abs(Number(position.quantity) || 0) * 1000 * Number(position.entry_price)
+    : null;
+
+  // Texto de la columna Notas. Para futuros prependemos el "Vale por…";
+  // si el usuario también cargó notes manualmente, lo concatenamos.
+  const userNotes = (position.notes || "").trim();
+  let displayedNotes = userNotes;
+  if (isFuture && futureNotional != null && futureNotional > 0) {
+    const valePor = `Vale por ${fmtNumber(futureNotional, { maxDecimals: 0 })} ${position.entry_currency || "ARS"} operado`;
+    displayedNotes = userNotes ? `${valePor} · ${userNotes}` : valePor;
+  }
 
   return (
     <tr
@@ -11196,8 +11215,8 @@ function PositionRow({ position, bondPrices, onEdit, onDelete, onUpdatePrice }) 
         <span style={{ fontSize: 11, color: C.muted }}>{fmtDateShort(position.entry_date)}</span>
       </PTd>
       <PTd dense>
-        <span style={{ fontSize: 10.5, color: C.dim, maxWidth: 180, display: "inline-block", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={position.notes || ""}>
-          {position.notes || "—"}
+        <span style={{ fontSize: 10.5, color: C.dim, maxWidth: 220, display: "inline-block", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={displayedNotes || ""}>
+          {displayedNotes || "—"}
         </span>
       </PTd>
       <PTd dense align="right">
