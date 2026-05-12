@@ -7141,6 +7141,43 @@ function generateCaucionTicker(entryDate, termDays) {
 }
 
 /**
+ * Calcula la comisión "estándar de mercado" sugerida para una operación
+ * de futuros, según las tarifas oficiales de A3 Mercados (ex-ROFEX).
+ *
+ * Sirve de referencia al usuario al cargar la operación — si Cocos /
+ * Balanz / IOL lo facturan distinto, lo edita manualmente.
+ *
+ * Tarifas (PDF oficial A3, productos financieros):
+ *   - Futuros DLR / YUAN: Negociación 0,14 + Clearing 0,06 = 0,20 fijo
+ *     por contrato (Prioridad precio tiempo). + IVA 21%.
+ *   - Resto de futuros financieros (Oro, Petróleo, ROFEX20, Acciones,
+ *     BTC, CER): 0,0200% Neg + 0,0040% Clearing = 0,024% del notional.
+ *     + IVA 21%.
+ *
+ * Devuelve null si el ticker es desconocido o faltan datos para calcular.
+ */
+function calcSuggestedFutureCommission(ticker, qty, price) {
+  const t = String(ticker || "").toUpperCase();
+  const q = Number(qty);
+  if (!Number.isFinite(q) || q <= 0) return null;
+
+  const IVA = 1.21;
+
+  // DLR / YUAN: tarifa fija por contrato (no depende del precio).
+  if (t.startsWith("DLR") || t.startsWith("YUAN")) {
+    const baseFeePerContract = 0.20; // 0,14 Neg + 0,06 Clearing
+    return q * baseFeePerContract * IVA;
+  }
+
+  // Resto: porcentual sobre notional. Necesitamos precio.
+  const p = Number(price);
+  if (!Number.isFinite(p) || p <= 0) return null;
+  const notional = q * p * 1000; // multiplier estándar de futuros financieros
+  const baseFeePct = 0.024 / 100; // 0,024% en decimal
+  return notional * baseFeePct * IVA;
+}
+
+/**
  * Valor de la posición a mercado actual (impacta en wealth/cartera).
  *
  *   - Cauciones: capital + intereses devengados prorata a HOY.
@@ -13019,18 +13056,69 @@ function AddPositionDrawer({ editingPosition, onClose, onSubmit }) {
            * editar la comisión de una position existente, lo hace
            * directamente en el cash_movement desde el libro de
            * operaciones.
+           *
+           * Sugerido mercado: calculamos en vivo la comisión estándar
+           * de A3 según ticker + cantidad + precio. Si Cocos / Balanz /
+           * IOL lo facturan distinto, el user lo sobreescribe.
            */}
-          {form.instrument_type === "future" && !editingPosition && (
-            <FormSection
-              label="Comisión (opcional)"
-              error={errors.commission}
-              hint="Derechos de mercado + IVA · se descuenta T+1"
-            >
+          {form.instrument_type === "future" && !editingPosition && (() => {
+            const suggested = calcSuggestedFutureCommission(
+              form.ticker,
+              form.quantity,
+              form.entry_price
+            );
+            return (
+              <FormSection
+                label={
+                  <>
+                    Comisión (opcional)
+                    {suggested != null && (
+                      <span
+                        style={{
+                          color: C.dim,
+                          fontWeight: 400,
+                          textTransform: "none",
+                          letterSpacing: "0.02em",
+                          marginLeft: 8,
+                          fontSize: 10,
+                        }}
+                      >
+                        — sugerido mercado:{" "}
+                        <button
+                          type="button"
+                          onClick={() => setField("commission", suggested.toFixed(2))}
+                          style={{
+                            backgroundColor: "transparent",
+                            border: "none",
+                            color: C.accent,
+                            padding: 0,
+                            cursor: "pointer",
+                            fontFamily: "'Roboto Mono', monospace",
+                            fontSize: 10,
+                            textDecoration: "underline",
+                            textDecorationStyle: "dotted",
+                            textUnderlineOffset: 2,
+                          }}
+                          title="Click para usar este valor"
+                        >
+                          {fmtCurrencyValue(suggested, (form.entry_currency || "ARS") === "ARS" ? "ARS" : "USD")}
+                        </button>
+                      </span>
+                    )}
+                  </>
+                }
+                error={errors.commission}
+                hint="Derechos de mercado + IVA · se descuenta T+1"
+              >
               <Input
                 type="number"
                 value={form.commission}
                 onChange={(v) => setField("commission", v)}
-                placeholder="0,00"
+                placeholder={
+                  suggested != null
+                    ? `Ej. ${suggested.toFixed(2)} (click "sugerido" arriba)`
+                    : "0,00"
+                }
                 step="any"
                 hasError={Boolean(errors.commission)}
               />
@@ -13073,8 +13161,9 @@ function AddPositionDrawer({ editingPosition, onClose, onSubmit }) {
                   </div>
                 );
               })()}
-            </FormSection>
-          )}
+              </FormSection>
+            );
+          })()}
 
           {/* Campos extra: opción */}
           {form.instrument_type === "option" && (
