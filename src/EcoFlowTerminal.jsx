@@ -4009,22 +4009,28 @@ function useFuturePrices(tickers) {
 
   // Auto-poll: 10 seg en horario hábil / 30 min fuera.
   // Usamos `tick` para forzar re-evaluación del horario en cada ciclo
-  // (al cruzar las 10:00 o las 17:00, el intervalo cambia automáticamente).
+  // (al cruzar las 10:30 o las 17:30, el intervalo cambia automáticamente).
   const [tick, setTick] = useState(0);
   useEffect(() => {
     if (!tickersKey) return;
 
-    // Determinar frecuencia
+    // Determinar frecuencia. Usamos minutos para que 10:30 / 17:30 sean
+    // exactos y no 10 / 17 (cubre pre-apertura BYMA 10:30 y subasta de
+    // cierre 17:00-17:05).
     const now = new Date();
     const arDateStr = now.toLocaleDateString("en-CA", {
       timeZone: "America/Argentina/Buenos_Aires",
     });
-    const arHourStr = now.toLocaleTimeString("en-GB", {
+    const arTimeStr = now.toLocaleTimeString("en-GB", {
       timeZone: "America/Argentina/Buenos_Aires",
       hour12: false,
     });
-    const arHour = parseInt(arHourStr.slice(0, 2), 10);
-    const isMarketHours = arHour >= 10 && arHour < 17;
+    const arHour = parseInt(arTimeStr.slice(0, 2), 10);
+    const arMinute = parseInt(arTimeStr.slice(3, 5), 10);
+    const arNowMinutes = arHour * 60 + arMinute;
+    const isMarketHours =
+      arNowMinutes >= 10 * 60 + 30 &&
+      arNowMinutes < 17 * 60 + 30;
     const isBizDay = !isNonBusinessDay(arDateStr);
     const intervalMs = (isMarketHours && isBizDay)
       ? 10 * 1000          // 10 seg en horario hábil
@@ -8836,14 +8842,16 @@ function PortfolioDashboard({ onNavigate }) {
   const futureAdjustmentsState = useFutureAdjustments(positions, futurePricesState.prices);
 
   // Refresh global: el botón "Actualizar" en el header de Posiciones
-  // consolidadas (y el auto-refresh inteligente) refresca AMBAS fuentes:
-  // FX + precios de bonos. Loading combinado se usa para mostrar el
-  // estado en el botón.
+  // consolidadas (y el auto-refresh inteligente) refresca las TRES
+  // fuentes de precios: FX (dólar), bonos (BYMA/DATA912) y futuros
+  // (Primary). Antes solo refrescaba FX + bonos, dejando los precios
+  // de futuros stale hasta que el auto-poll de 10s los actualizara.
   const handleRefreshAll = useCallback(() => {
     fxState.refresh();
     bondPricesState.refresh();
-  }, [fxState, bondPricesState]);
-  const anyLoading = fxState.loading || bondPricesState.loading;
+    futurePricesState.refresh();
+  }, [fxState, bondPricesState, futurePricesState]);
+  const anyLoading = fxState.loading || bondPricesState.loading || futurePricesState.loading;
 
   // ─────────────── Auto-refresh inteligente ───────────────
   //
@@ -8864,33 +8872,38 @@ function PortfolioDashboard({ onNavigate }) {
   // isNonBusinessDay() que ya excluye fines de semana + feriados BYMA.
   //
   // El intervalo se recalcula cada vez que cambia la hora (al cruzar
-  // las 10:00 o las 17:00, o al cambiar de día), gracias al useEffect
+  // las 10:30 o las 17:30, o al cambiar de día), gracias al useEffect
   // que se reejecuta con `tick`.
   const [tick, setTick] = useState(0);
 
   useEffect(() => {
-    // Determinar frecuencia según horario actual
+    // Determinar frecuencia según horario actual. Usamos minutos para
+    // que 10:30 / 17:30 sean exactos (cubre pre-apertura BYMA y subasta
+    // de cierre 17:00-17:05).
     const now = new Date();
     const arDateStr = now.toLocaleDateString("en-CA", {
       timeZone: "America/Argentina/Buenos_Aires",
     });
-    const arHourStr = now.toLocaleTimeString("en-GB", {
+    const arTimeStr = now.toLocaleTimeString("en-GB", {
       timeZone: "America/Argentina/Buenos_Aires",
       hour12: false,
     });
-    const arHour = parseInt(arHourStr.slice(0, 2), 10);
-
-    const isMarketHours = arHour >= 10 && arHour < 17;
+    const arHour = parseInt(arTimeStr.slice(0, 2), 10);
+    const arMinute = parseInt(arTimeStr.slice(3, 5), 10);
+    const arNowMinutes = arHour * 60 + arMinute;
+    const isMarketHours =
+      arNowMinutes >= 10 * 60 + 30 &&
+      arNowMinutes < 17 * 60 + 30;
     const isBizDay = !isNonBusinessDay(arDateStr);
 
     const intervalMs = (isMarketHours && isBizDay)
-      ? 5 * 60 * 1000   // 5 min en horario de mercado
+      ? 60 * 1000       // 1 min en horario de mercado (data fresca para trading activo)
       : 30 * 60 * 1000; // 30 min fuera de horario
 
     const id = setInterval(() => {
       handleRefreshAll();
       // Forzamos re-evaluación del intervalo por si cambió el horario
-      // (ej: a las 17:00 cruzamos de "mercado abierto" a "cerrado")
+      // (ej: a las 17:30 cruzamos de "mercado abierto" a "cerrado")
       setTick((t) => t + 1);
     }, intervalMs);
 
@@ -18343,7 +18356,6 @@ function typeLabel(type) {
     default: return type;
   }
 }
-
 
 function formatDate(iso) {
   if (!iso) return "—";
