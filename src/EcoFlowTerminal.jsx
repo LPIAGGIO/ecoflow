@@ -4983,8 +4983,14 @@ function useCashMovements() {
     if (!user) throw new Error("No hay sesión activa");
     if (!position?.id) return;
 
-    // Buscar movement existente en el state local
-    const existing = movements.find((m) => m.related_position_id === position.id);
+    // Buscar movement existente en el state local. EXCLUIMOS los
+    // movements de comisión (notes que empiezan con "Comisión") porque
+    // esos los gestiona insertCommissionMovement y syncForPosition no
+    // los tiene que tocar — son un movement aparte del principal.
+    const existing = movements.find(
+      (m) => m.related_position_id === position.id &&
+             !((m.notes || "").startsWith("Comisión"))
+    );
     const payload = buildCashMovementPayload(position, user.id, allPositions);
 
     if (!payload) {
@@ -5038,6 +5044,60 @@ function useCashMovements() {
   const removeForPosition = useCallback((positionId) => {
     setMovements((prev) => prev.filter((m) => m.related_position_id !== positionId));
   }, []);
+
+  /**
+   * Inserta un cash_movement de tipo purchase_cost por la comisión que
+   * el usuario tipeó en el form de futuros (campo opcional). Se ejecuta
+   * SOLO al crear la position (no al editar) para evitar duplicar.
+   *
+   * Detalles:
+   *   - movement_type = "purchase_cost" (los brokers facturan al cliente)
+   *   - amount = position.extra.commission (lo que el user cargó)
+   *   - currency = position.entry_currency
+   *   - related_position_id = position.id (cumple constraint
+   *     cash_movements_related_position_logic)
+   *   - movement_date = entry_date + 1 día hábil (Cocos/Balanz/IOL
+   *     liquidan derechos de mercado de derivados a T+1)
+   *   - notes prefijadas con "Comisión" para que syncForPosition los
+   *     pueda excluir del find y no se pisen.
+   */
+  const insertCommissionMovement = useCallback(async (position) => {
+    if (!user) throw new Error("No hay sesión activa");
+    if (!position?.id) return null;
+    const amount = Number(position.extra?.commission);
+    if (!Number.isFinite(amount) || amount <= 0) return null;
+    if (!position.entry_date) return null;
+
+    // T+1 hábil: avanzamos 1 día y si cae sábado o domingo, seguimos
+    // hasta el lunes. NO contemplamos feriados — el cron MAE va a
+    // corregir desviaciones cuando se publique el dato oficial.
+    const start = new Date(position.entry_date + "T00:00:00");
+    const dt = new Date(start);
+    dt.setDate(dt.getDate() + 1);
+    while (dt.getDay() === 0 || dt.getDay() === 6) {
+      dt.setDate(dt.getDate() + 1);
+    }
+    const movementDate = dt.toISOString().slice(0, 10);
+
+    const payload = {
+      user_id: user.id,
+      movement_type: "purchase_cost",
+      currency: position.entry_currency,
+      amount,
+      movement_date: movementDate,
+      related_position_id: position.id,
+      notes: `Comisión por derechos de mercado · ${position.ticker}`,
+    };
+
+    const { data, error: err } = await supabase
+      .from("cash_movements")
+      .insert([payload])
+      .select()
+      .single();
+    if (err) throw err;
+    setMovements((prev) => [data, ...prev]);
+    return data;
+  }, [user]);
 
   /**
    * Elimina un movement manual (típicamente un deposit/withdrawal cargado
@@ -5111,6 +5171,7 @@ function useCashMovements() {
     updateManualMovement,
     syncForPosition,
     removeForPosition,
+    insertCommissionMovement,
     deleteManualMovement,
     loading,
     error,
@@ -8879,11 +8940,12 @@ function PortfolioDashboard({ onNavigate }) {
       savedPosition = await addPosition(payload);
     }
     // Sincronizar cash_movement asociado: si la position es de tipo
-    // bond_ars/bond_usd/on/stock/cedear, inserta o actualiza el movement
-    // correspondiente. Para futuros, solo genera cash en ventas que netean
-    // contra compras previas (P&L del par cerrado, ARS, T+1).
-    // Si no aplica, syncForPosition borra el movement existente
-    // (caso edge: cambiaste el tipo a uno no soportado al editar).
+    // bond_ars/bond_usd/on/stock/cedear/fci, inserta o actualiza el
+    // movement correspondiente. Para futuros, solo genera cash en
+    // ventas que netean contra compras previas (P&L del par cerrado,
+    // ARS, T+1). Si no aplica, syncForPosition borra el movement
+    // existente (caso edge: cambiaste el tipo a uno no soportado al
+    // editar).
     if (savedPosition) {
       try {
         await cashState.syncForPosition(savedPosition, positions);
@@ -8892,6 +8954,23 @@ function PortfolioDashboard({ onNavigate }) {
         // y la position queda guardada. Se puede reintentar abriendo y guardando
         // de nuevo, o desde un futuro botón "Recalcular cash".
         console.error("Error sincronizando cash_movement:", err);
+      }
+
+      // Comisión de futuros: si el user la tipeó al crear, generamos un
+      // cash_movement adicional (purchase_cost a T+1). Solo en ALTAS:
+      // al editar la position, el flag !editingPosition del form evita
+      // que extra.commission llegue al payload, por lo cual no se
+      // duplica.
+      if (
+        !editingPosition &&
+        savedPosition.instrument_type === "future" &&
+        Number(savedPosition.extra?.commission) > 0
+      ) {
+        try {
+          await cashState.insertCommissionMovement(savedPosition);
+        } catch (err) {
+          console.error("Error insertando cash_movement de comisión:", err);
+        }
       }
     }
     closeDrawer();
@@ -11878,12 +11957,56 @@ function CashMovementModal({ type, editingMovement, onCancel, onSubmit }) {
           </FieldHint>
         </FormSection>
 
-        {/* Notas (opcional) */}
+        {/* Notas (opcional)
+         *
+         * Los chips de arriba pre-llenan el campo con prefijos comunes
+         * (Comisión, Ajuste futuro, Suscripción FCI, etc.). Cubren el
+         * 80% de los casos de uso típicos. El usuario puede agregar
+         * detalles después de seleccionar el chip, o tipear todo libre.
+         */}
         <FormSection label="Notas (opcional)">
+          {/* Chips de categorías */}
+          <div className="flex flex-wrap gap-1" style={{ marginBottom: 6 }}>
+            {[
+              "Comisión ROFEX",
+              "Ajuste futuro",
+              "Suscripción FCI",
+              "Rescate FCI",
+              "Caución",
+              "Arancel",
+              "Transferencia bancaria",
+            ].map((chipText) => (
+              <button
+                key={chipText}
+                type="button"
+                onClick={() => setField("notes", chipText)}
+                style={{
+                  backgroundColor: "transparent",
+                  border: `1px solid ${C.border}`,
+                  color: C.muted,
+                  padding: "2px 8px",
+                  fontSize: 10.5,
+                  cursor: "pointer",
+                  letterSpacing: "0.02em",
+                  transition: "all 100ms ease",
+                }}
+                onMouseEnter={(e) => {
+                  e.currentTarget.style.color = C.accent;
+                  e.currentTarget.style.borderColor = C.accentBorder;
+                }}
+                onMouseLeave={(e) => {
+                  e.currentTarget.style.color = C.muted;
+                  e.currentTarget.style.borderColor = C.border;
+                }}
+              >
+                {chipText}
+              </button>
+            ))}
+          </div>
           <Input
             value={form.notes}
             onChange={(v) => setField("notes", v)}
-            placeholder="Ej: transferencia desde banco BBVA"
+            placeholder="Ej: transferencia desde banco BBVA · click chip para auto-llenar"
           />
         </FormSection>
 
@@ -12228,6 +12351,7 @@ function AddPositionDrawer({ editingPosition, onClose, onSubmit }) {
         strike: editingPosition.extra?.strike ?? "",
         expiry: editingPosition.extra?.expiry ?? "",
         option_type: editingPosition.extra?.option_type ?? "call",
+        commission: editingPosition.extra?.commission ?? "",
       };
     }
     return {
@@ -12245,6 +12369,7 @@ function AddPositionDrawer({ editingPosition, onClose, onSubmit }) {
       strike: "",
       expiry: "",
       option_type: "call",
+      commission: "",
     };
   });
 
@@ -12398,6 +12523,14 @@ function AddPositionDrawer({ editingPosition, onClose, onSubmit }) {
       if (!form.expiry) errs.expiry = "Vencimiento requerido";
     }
 
+    // Comisión (futuros): opcional, pero si está debe ser número >= 0.
+    if (form.instrument_type === "future" && form.commission !== "" && form.commission != null) {
+      const c = Number(form.commission);
+      if (isNaN(c) || c < 0) {
+        errs.commission = "Comisión inválida";
+      }
+    }
+
     return errs;
   };
 
@@ -12419,6 +12552,20 @@ function AddPositionDrawer({ editingPosition, onClose, onSubmit }) {
       extra.strike = Number(form.strike);
       extra.expiry = form.expiry;
       extra.option_type = form.option_type;
+    }
+    // Comisión: la guardamos en extra para que el handler externo
+    // (PortfolioDashboard / LibroOperaciones) la procese y genere el
+    // cash_movement separado. Sólo aplica a futuros nuevos.
+    if (
+      form.instrument_type === "future" &&
+      !editingPosition &&
+      form.commission !== "" &&
+      form.commission != null
+    ) {
+      const c = Number(form.commission);
+      if (Number.isFinite(c) && c > 0) {
+        extra.commission = c;
+      }
     }
 
     // El tipo "bond" del form es virtual: lo desambiguamos a bond_ars o
@@ -12856,6 +13003,77 @@ function AddPositionDrawer({ editingPosition, onClose, onSubmit }) {
                 );
               })()}
             </>
+          )}
+
+          {/* Campos extra: futuro
+           *
+           * El campo "Comisión" es opcional. Si el usuario lo completa,
+           * generamos un cash_movement adicional de tipo purchase_cost
+           * por ese monto (con related_position_id apuntando a esta
+           * position). La fecha del movement es T+1 hábil porque los
+           * brokers (Cocos, Balanz, IOL) liquidan comisiones de
+           * derivados al día hábil siguiente a la operación.
+           *
+           * Solo aparece al CREAR position de futuro. Al editar, lo
+           * ocultamos para evitar duplicar movements: si el user quiere
+           * editar la comisión de una position existente, lo hace
+           * directamente en el cash_movement desde el libro de
+           * operaciones.
+           */}
+          {form.instrument_type === "future" && !editingPosition && (
+            <FormSection
+              label="Comisión (opcional)"
+              error={errors.commission}
+              hint="Derechos de mercado + IVA · se descuenta T+1"
+            >
+              <Input
+                type="number"
+                value={form.commission}
+                onChange={(v) => setField("commission", v)}
+                placeholder="0,00"
+                step="any"
+                hasError={Boolean(errors.commission)}
+              />
+              {(() => {
+                const comm = Number(form.commission);
+                if (!Number.isFinite(comm) || comm <= 0) return null;
+                const ccy = form.entry_currency || "ARS";
+                // Calcular T+1 hábil para mostrar al usuario la fecha
+                // efectiva del débito.
+                const start = new Date(form.entry_date + "T00:00:00");
+                const dt = new Date(start);
+                dt.setDate(dt.getDate() + 1);
+                while (dt.getDay() === 0 || dt.getDay() === 6) {
+                  dt.setDate(dt.getDate() + 1);
+                }
+                const dtStr = dt.toLocaleDateString("es-AR", {
+                  day: "2-digit", month: "2-digit", year: "numeric",
+                });
+                return (
+                  <div
+                    style={{
+                      backgroundColor: "rgba(248,113,113,0.06)",
+                      border: `1px solid rgba(248,113,113,0.20)`,
+                      padding: "8px 12px",
+                      marginTop: 8,
+                      fontSize: 11.5,
+                      color: C.text,
+                      letterSpacing: "0.01em",
+                    }}
+                  >
+                    <div style={{ color: C.muted, fontSize: 10, letterSpacing: "0.10em", textTransform: "uppercase", marginBottom: 3, fontWeight: 600 }}>
+                      Comisión a descontar
+                    </div>
+                    <div style={{ fontFamily: "'Roboto Mono', monospace", fontSize: 13, fontWeight: 500 }}>
+                      {fmtCurrencyValue(comm, ccy === "ARS" ? "ARS" : "USD")}
+                    </div>
+                    <div style={{ color: C.dim, fontSize: 10.5, marginTop: 3 }}>
+                      Se debita el {dtStr} (T+1 hábil)
+                    </div>
+                  </div>
+                );
+              })()}
+            </FormSection>
           )}
 
           {/* Campos extra: opción */}
