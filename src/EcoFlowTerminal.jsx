@@ -7042,6 +7042,25 @@ function caucionValueAtMaturity(p) {
 }
 
 /**
+ * Genera un ticker auto para una caución a partir de la fecha de alta y
+ * el plazo en días. Formato: CAUC-DDMMM-NND (ej. CAUC-12MAY-7D).
+ *
+ * Sirve como default cuando el usuario no quiere ponerle un nombre custom
+ * (lo común — las cauciones son contratos privados sin ticker oficial).
+ * Si querés distinguir contrapartes (BYMA / Cocos / IOL), tipeá un ticker
+ * manual con esa info.
+ */
+function generateCaucionTicker(entryDate, termDays) {
+  if (!entryDate || !Number.isFinite(Number(termDays))) return "CAUC";
+  const d = new Date(entryDate + "T00:00:00");
+  if (isNaN(d.getTime())) return "CAUC";
+  const dd = String(d.getDate()).padStart(2, "0");
+  const months = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"];
+  const mmm = months[d.getMonth()] || "XXX";
+  return `CAUC-${dd}${mmm}-${Number(termDays)}D`;
+}
+
+/**
  * Valor de la posición a mercado actual (impacta en wealth/cartera).
  *
  *   - Cauciones: capital + intereses devengados prorata a HOY.
@@ -12284,7 +12303,10 @@ function AddPositionDrawer({ editingPosition, onClose, onSubmit }) {
   // Validación
   const validate = () => {
     const errs = {};
-    if (!form.ticker.trim()) errs.ticker = "Ticker requerido";
+    // Ticker: requerido excepto para cauciones (se auto-genera CAUC-DDMMM-NND).
+    if (form.instrument_type !== "caucion" && !form.ticker.trim()) {
+      errs.ticker = "Ticker requerido";
+    }
     if (form.ticker.length > 16) errs.ticker = "Máximo 16 caracteres";
 
     const qty = Number(form.quantity);
@@ -12358,10 +12380,19 @@ function AddPositionDrawer({ editingPosition, onClose, onSubmit }) {
         ? (BOND_REGISTRY[form.ticker.trim().toUpperCase()] ? "bond_ars" : "bond_usd")
         : form.instrument_type;
 
+    // Ticker final: para cauciones, si el usuario lo dejó vacío,
+    // auto-generamos CAUC-DDMMM-NND para que la posición tenga un label
+    // legible en consolidación y reportes. Si tipeó algo, respetamos su
+    // elección (típicamente para distinguir contrapartes: CAUC-COCOS-7D).
+    let finalTicker = form.ticker.trim().toUpperCase();
+    if (form.instrument_type === "caucion" && !finalTicker) {
+      finalTicker = generateCaucionTicker(form.entry_date, Number(form.term_days));
+    }
+
     const payload = {
       instrument_type: persistedType,
       operation_type: form.operation_type,
-      ticker: form.ticker.trim().toUpperCase(),
+      ticker: finalTicker,
       quantity: Number(form.quantity),
       entry_price: meta.priceLabel != null && form.entry_price !== "" ? Number(form.entry_price) : null,
       entry_currency: form.entry_currency,
@@ -12591,14 +12622,26 @@ function AddPositionDrawer({ editingPosition, onClose, onSubmit }) {
               );
             }
             return (
-              <FormSection label="Ticker" error={errors.ticker}>
+              <FormSection
+                label="Ticker"
+                error={errors.ticker}
+                hint={
+                  form.instrument_type === "caucion"
+                    ? "Opcional. Si lo dejás vacío, se genera automáticamente."
+                    : undefined
+                }
+              >
                 <Input
                   value={form.ticker}
                   onChange={(v) => handleTickerChange(v.toUpperCase())}
                   placeholder={
                     form.instrument_type === "stock" ? "GGAL, YPF, ALUA..." :
                     form.instrument_type === "cedear" ? "AAPL, MSFT, NVDA..." :
-                    form.instrument_type === "caucion" ? "CAUCION..." :
+                    form.instrument_type === "caucion" ? (
+                      form.entry_date && form.term_days
+                        ? generateCaucionTicker(form.entry_date, Number(form.term_days))
+                        : "Auto (opcional)"
+                    ) :
                     "Código del instrumento"
                   }
                   hasError={Boolean(errors.ticker)}
@@ -12669,28 +12712,83 @@ function AddPositionDrawer({ editingPosition, onClose, onSubmit }) {
 
           {/* Campos extra: caución */}
           {form.instrument_type === "caucion" && (
-            <div className="grid grid-cols-2 gap-3">
-              <FormSection label="Tasa TNA (%)" error={errors.rate_tna} hint="Ej. 32,5">
-                <Input
-                  type="number"
-                  value={form.rate_tna}
-                  onChange={(v) => setField("rate_tna", v)}
-                  placeholder="0,00"
-                  step="any"
-                  hasError={Boolean(errors.rate_tna)}
-                />
-              </FormSection>
-              <FormSection label="Plazo (días)" error={errors.term_days} hint="Ej. 1, 7, 30">
-                <Input
-                  type="number"
-                  value={form.term_days}
-                  onChange={(v) => setField("term_days", v)}
-                  placeholder="1"
-                  step="1"
-                  hasError={Boolean(errors.term_days)}
-                />
-              </FormSection>
-            </div>
+            <>
+              <div className="grid grid-cols-2 gap-3">
+                <FormSection label="Tasa TNA (%)" error={errors.rate_tna} hint="Ej. 32,5">
+                  <Input
+                    type="number"
+                    value={form.rate_tna}
+                    onChange={(v) => setField("rate_tna", v)}
+                    placeholder="0,00"
+                    step="any"
+                    hasError={Boolean(errors.rate_tna)}
+                  />
+                </FormSection>
+                <FormSection label="Plazo (días)" error={errors.term_days} hint="Ej. 1, 7, 30">
+                  <Input
+                    type="number"
+                    value={form.term_days}
+                    onChange={(v) => setField("term_days", v)}
+                    placeholder="1"
+                    step="1"
+                    hasError={Boolean(errors.term_days)}
+                  />
+                </FormSection>
+              </div>
+
+              {/* Preview en vivo del monto al vencimiento.
+               *
+               * Se calcula como capital × (1 + TNA × días / 365). Solo
+               * aparece cuando todos los inputs son válidos — sino sería
+               * ruido. Da al usuario una sanity check rápida antes de
+               * guardar: si esperaba ~5,03M y el preview dice ~50M, sabe
+               * que tipeó mal alguna unidad.
+               */}
+              {(() => {
+                const capital = Number(form.quantity);
+                const tna = Number(form.rate_tna);
+                const termDays = Number(form.term_days);
+                if (
+                  !Number.isFinite(capital) || capital <= 0 ||
+                  !Number.isFinite(tna) || tna < 0 ||
+                  !Number.isFinite(termDays) || termDays <= 0 ||
+                  !form.entry_date
+                ) {
+                  return null;
+                }
+                const totalAtMaturity = capital * (1 + (tna / 100) * (termDays / 365));
+                const intereses = totalAtMaturity - capital;
+                const start = new Date(form.entry_date + "T00:00:00");
+                const maturity = new Date(start.getTime() + termDays * 86400000);
+                const maturityStr = maturity.toLocaleDateString("es-AR", {
+                  day: "2-digit", month: "2-digit", year: "numeric",
+                });
+                const ccy = form.entry_currency || "ARS";
+                return (
+                  <div
+                    style={{
+                      backgroundColor: "rgba(56,189,248,0.06)",
+                      border: `1px solid rgba(56,189,248,0.20)`,
+                      padding: "10px 12px",
+                      marginBottom: 16,
+                      fontSize: 12,
+                      color: C.text,
+                      letterSpacing: "0.01em",
+                    }}
+                  >
+                    <div style={{ color: C.muted, fontSize: 10.5, letterSpacing: "0.10em", textTransform: "uppercase", marginBottom: 4, fontWeight: 600 }}>
+                      Cobrarás al vencimiento
+                    </div>
+                    <div style={{ fontFamily: "'Roboto Mono', monospace", fontSize: 14, fontWeight: 500 }}>
+                      {fmtCurrencyValue(totalAtMaturity, ccy === "ARS" ? "ARS" : "USD")}
+                    </div>
+                    <div style={{ color: C.dim, fontSize: 11, marginTop: 4 }}>
+                      Intereses: {fmtCurrencyValue(intereses, ccy === "ARS" ? "ARS" : "USD")} · Vence el {maturityStr}
+                    </div>
+                  </div>
+                );
+              })()}
+            </>
           )}
 
           {/* Campos extra: opción */}
