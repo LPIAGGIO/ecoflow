@@ -3840,15 +3840,44 @@ async function fetchSupabaseBondPrices() {
 
   // ── PASO 2: Intra-day (pisa cierre cuando fresco) ────────────────
   // prices_cache no incluye segmento en el sentido de daily_close (su
-  // `segment_code` usa otro vocabulario: BT/BP/GT/GP). El endpoint
-  // /rentafija de MAE solo devuelve cotizaciones spot, así que no hace
-  // falta filtrar acá.
+  // `segment_code` usa otro vocabulario: BT=Bilateral TRD, BP=Bilateral
+  // PPT, GT=Garantizado TRD, GP=Garantizado PPT). MAE en /rentafija
+  // devuelve solo TRD por ahora (Trading directo, precio spot), pero
+  // pedimos amount y priorizamos BT > GT por las dudas y para tener
+  // un criterio de desempate determinístico cuando un mismo ticker
+  // aparece en varios segmentos en el mismo ciclo del worker.
+  //
+  // Currency: por ahora solo procesamos "$" (ARS). Los bonos USD se
+  // siguen sirviendo desde BYMA hasta que tengamos el mapeo de currency
+  // del feed MAE bien validado (e.g. para T30J6 hay una fila con
+  // currency D y precio 0.001 que daría una catástrofe si la tomamos).
+  function intraPriority(row) {
+    // Segmento como prioridad absoluta. BT (Bilateral Trading) es la
+    // operatoria spot más cercana al precio negociado en BYMA → primer
+    // criterio. GT (Garantizado Trading) es segundo. Si aparecen BP/GP
+    // (Pases), score 0 → casi nunca ganan.
+    //
+    // El segScore va escalado por 1e15 para que SIEMPRE gane sobre el
+    // amount real (que en pesos puede llegar a miles de millones pero
+    // queda bien debajo de 1e15). Sin esa separación, dos rows BT con
+    // amounts ~1e10 quedan empatados por clamp y el desempate vuelve a
+    // ser indeterminado.
+    const seg = String(row.segment_code || "");
+    const segScore =
+      seg === "BT" ? 3
+        : seg === "GT" ? 2
+          : seg === "BP" ? 1
+            : 0;
+    const amountScore = Number(row.amount) || 0;
+    return segScore * 1e15 + amountScore;
+  }
+
   try {
     const { data: intraRows, error: intraErr } = await supabase
       .from("prices_cache")
       .select(
         "ticker, currency, last_price, close_price, prev_close, " +
-          "variation_pct, fetched_at, segment_code"
+          "variation_pct, fetched_at, segment_code, amount"
       )
       .eq("source", "mae_rentafija");
 
@@ -3856,6 +3885,8 @@ async function fetchSupabaseBondPrices() {
 
     const intraByTicker = new Map();
     for (const row of intraRows || []) {
+      // Solo bonos en pesos por ahora.
+      if (row.currency !== "$") continue;
       const cls = classifyTicker(row.ticker);
       if (!cls) continue;
       const rawPrice = Number(row.last_price) || Number(row.close_price);
@@ -3865,18 +3896,26 @@ async function fetchSupabaseBondPrices() {
 
       const price = rawPrice * cls.unitFactor;
       const existing = intraByTicker.get(cls.base);
-      if (!existing || existing.fetched_at < row.fetched_at) {
+
+      // Decisión:
+      //   1) Si no hay existing, este row gana.
+      //   2) Si este row es más fresco que el existing, gana.
+      //   3) Si tienen el mismo fetched_at, gana el de mayor priority
+      //      (BT > GT, después por amount).
+      let wins = !existing;
+      if (existing) {
+        if (row.fetched_at > existing.fetched_at) wins = true;
+        else if (row.fetched_at === existing.fetched_at) {
+          wins = intraPriority(row) > intraPriority(existing);
+        }
+      }
+      if (wins) {
         intraByTicker.set(cls.base, { ...row, _price: price, _factor: cls.unitFactor });
       }
     }
 
     for (const [base, row] of intraByTicker) {
-      const currency =
-        row.currency === "$"
-          ? "ARS"
-          : row.currency === "D"
-            ? "USD"
-            : null;
+      const currency = "ARS"; // ya filtramos a $
       // Si el intra-day no trae variation_pct/prev_close (puede pasar
       // temprano en la rueda o en segmento bilateral), reutilizamos lo
       // del cierre del día anterior para no perder esos datos en la UI.
@@ -3891,7 +3930,7 @@ async function fetchSupabaseBondPrices() {
         price: row._price,
         bid: null,
         ask: null,
-        volume: null,
+        volume: row.amount != null ? Number(row.amount) : null,
         source: "mae_intraday",
         currency: currency || existing?.currency || null,
         changePct:
