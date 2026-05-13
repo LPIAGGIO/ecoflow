@@ -4104,22 +4104,24 @@ function useBondPrices() {
         // P&L HOY contra el cierre de BYMA, no contra el cierre de MAE
         // (MAE y BYMA son mercados distintos con cierres que difieren
         // ~5-7 centavos en LECAPs). Para que el P&L HOY de Midas
-        // coincida con la pantalla de Cocos, si BYMA traía un
-        // previousClose válido, lo preferimos sobre el de mae_close.
-        // changePct se recalcula consistente con ese prev nuevo.
+        // coincida con la pantalla de Cocos, si el entry previo (de
+        // BYMA o data912) traía un previousClose válido, lo preferimos
+        // sobre el de mae_close. data912 deriva su previousClose desde
+        // pct_change, que también es contra el cierre BYMA. changePct
+        // se recalcula consistente con el nuevo prev.
         for (const [ticker, supaEntry] of Object.entries(supabaseMap)) {
           const prior = map[ticker] || {};
 
-          const bymaPrev =
-            prior.source === "byma" && prior.previousClose != null && prior.previousClose > 0
+          const priorPrev =
+            prior.previousClose != null && prior.previousClose > 0
               ? Number(prior.previousClose)
               : null;
           const maePrev =
             supaEntry.previousClose != null && supaEntry.previousClose > 0
               ? Number(supaEntry.previousClose)
               : null;
-          // BYMA gana cuando ambos están disponibles.
-          const finalPrev = bymaPrev != null ? bymaPrev : maePrev;
+          // Prev de BYMA/data912 gana cuando está disponible.
+          const finalPrev = priorPrev != null ? priorPrev : maePrev;
 
           const finalPrice = Number(supaEntry.price);
           const finalChangePct =
