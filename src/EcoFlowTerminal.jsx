@@ -8378,7 +8378,18 @@ function consolidatePositions(positions, bondPrices, futurePrices) {
       bondPrices[g.ticker]?.price > 0
     ) {
       currentPrice = bondPrices[g.ticker].price;
-      priceSource = "market";
+      // El priceSource refleja la fuente REAL del entry (byma/data912/
+      // mae_intraday/mae_close), no un genérico "market". Esto permite
+      // que el badge UI muestre el label correcto y que las métricas
+      // de cobertura ("X de Y a mercado") consideren MAE como fuente
+      // legítima. Supabase consolida sus dos sub-fuentes bajo "mae".
+      const entrySource = bondPrices[g.ticker].source;
+      priceSource =
+        entrySource === "byma" || entrySource === "data912"
+          ? entrySource
+          : entrySource === "mae_intraday" || entrySource === "mae_close"
+            ? "mae"
+            : "market";
     } else if (ppp != null) {
       currentPrice = ppp;
       priceSource = "cost";
