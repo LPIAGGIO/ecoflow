@@ -3916,16 +3916,24 @@ async function fetchSupabaseBondPrices() {
 
     for (const [base, row] of intraByTicker) {
       const currency = "ARS"; // ya filtramos a $
-      // Si el intra-day no trae variation_pct/prev_close (puede pasar
-      // temprano en la rueda o en segmento bilateral), reutilizamos lo
-      // del cierre del día anterior para no perder esos datos en la UI.
-      // Validamos > 0 explícito porque la BD a veces guarda 0 como
-      // sentinel — eso rompería el cálculo de P&L HOY downstream.
+      // Cálculo de previousClose para P&L HOY:
+      //   1) Si prices_cache trae prev_close > 0, usarlo (path ideal,
+      //      pero el worker price-cache hoy lo guarda en 0 — bug aparte).
+      //   2) Fallback: el `price` del entry existente en mae_close, que
+      //      es el `precio_cierre_hoy` de la última fila del boletín.
+      //      Eso representa el cierre del día hábil ANTERIOR, que es lo
+      //      que querés para "P&L de hoy".
+      //   3) Si ni siquiera hay close, null y el cálculo downstream cae
+      //      a la derivada desde variation_pct.
+      //
+      // Antes usaba existing.previousClose como fallback, pero ese es el
+      // `precio_cierre_ayer` de la fila del 12/05 — o sea, el cierre del
+      // 11/05. Para P&L HOY del 13/05 necesitamos el cierre del 12/05.
       const existing = map[base];
       const intraPrevRaw = numPositive(row.prev_close);
       const prevClose = intraPrevRaw != null
         ? intraPrevRaw * row._factor
-        : (existing?.previousClose ?? null);
+        : (existing?.price ?? existing?.previousClose ?? null);
       map[base] = {
         price: row._price,
         bid: null,
@@ -3933,10 +3941,13 @@ async function fetchSupabaseBondPrices() {
         volume: row.amount != null ? Number(row.amount) : null,
         source: "mae_intraday",
         currency: currency || existing?.currency || null,
-        changePct:
-          row.variation_pct != null
-            ? Number(row.variation_pct)
-            : (existing?.changePct ?? null),
+        // changePct se recalcula desde el nuevo prevClose para que sea
+        // consistente: la variación intra-day respecto al cierre de
+        // ayer, no respecto a la apertura. Si no podemos calcularlo,
+        // dejamos en null y downstream se las arregla.
+        changePct: prevClose != null && prevClose > 0
+          ? ((row._price - prevClose) / prevClose) * 100
+          : (existing?.changePct ?? null),
         previousClose: prevClose,
         fetchedAt: row.fetched_at,
       };
