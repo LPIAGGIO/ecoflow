@@ -4099,11 +4099,39 @@ function useBondPrices() {
         // mergeamos: las claves que existen en supabaseMap pisan a
         // BYMA/data912. Preservamos campos enriquecidos (maturityDate,
         // daysToMaturity) que BYMA tiene y MAE no.
+        //
+        // Caso especial: previousClose. Cocos y otros brokers calculan
+        // P&L HOY contra el cierre de BYMA, no contra el cierre de MAE
+        // (MAE y BYMA son mercados distintos con cierres que difieren
+        // ~5-7 centavos en LECAPs). Para que el P&L HOY de Midas
+        // coincida con la pantalla de Cocos, si BYMA traía un
+        // previousClose válido, lo preferimos sobre el de mae_close.
+        // changePct se recalcula consistente con ese prev nuevo.
         for (const [ticker, supaEntry] of Object.entries(supabaseMap)) {
           const prior = map[ticker] || {};
+
+          const bymaPrev =
+            prior.source === "byma" && prior.previousClose != null && prior.previousClose > 0
+              ? Number(prior.previousClose)
+              : null;
+          const maePrev =
+            supaEntry.previousClose != null && supaEntry.previousClose > 0
+              ? Number(supaEntry.previousClose)
+              : null;
+          // BYMA gana cuando ambos están disponibles.
+          const finalPrev = bymaPrev != null ? bymaPrev : maePrev;
+
+          const finalPrice = Number(supaEntry.price);
+          const finalChangePct =
+            finalPrev != null && finalPrev > 0 && finalPrice > 0
+              ? ((finalPrice - finalPrev) / finalPrev) * 100
+              : (supaEntry.changePct ?? prior.changePct ?? null);
+
           map[ticker] = {
             ...prior,
             ...supaEntry,
+            previousClose: finalPrev,
+            changePct: finalChangePct,
             // Si BYMA traía maturityDate/daysToMaturity, los conservamos
             maturityDate: prior.maturityDate ?? supaEntry.maturityDate ?? null,
             daysToMaturity:
