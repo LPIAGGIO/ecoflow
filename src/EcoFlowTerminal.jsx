@@ -3700,26 +3700,56 @@ function normalizeMaeTicker(maeTicker) {
  * refrescado cada minuto por worker price-cache) y daily_close_prices
  * (cierre oficial, refrescado por worker mae-boletin a las 22 ART).
  *
- * Merge: intra-day fresco (< 10 min) gana sobre el último cierre.
- * Cuando hay duplicados (ticker × segmento × plazo), preferimos el
- * de mayor `monto` operado. La columna `monto` solo existe en
- * daily_close_prices; para intra-day desempatamos por `fetched_at`.
+ * Manejo de las dos convenciones de MAE:
+ *   - Tickers CON sufijo (AL30/CI, S29Y6/24hs): precios en "por 100 VN",
+ *     misma unidad que BYMA/data912 y el resto del front. Se usan tal cual.
+ *   - Tickers SIN sufijo (AL30, S29Y6): precios en "por 1 VN". Se usan
+ *     solo si en algún momento de los últimos 14 días el ticker cotizó
+ *     CON sufijo (lo llamamos "ticker dual"), y se multiplican × 100.
+ *   - Tickers que nunca cotizaron con sufijo: skip (no sabemos la unidad).
  *
- * Devuelve Map<TICKER_UPPER, entry> con shape compatible con BYMA/
- * data912 — el merge en useBondPrices es transparente para los
- * consumers.
+ * Esto permite capturar precios intra-day frescos de instrumentos como
+ * T30J6 o S29Y6, que algunos días solo operan en segmento bilateral sin
+ * sufijo, pero sabemos que su unidad es "por 1 VN" porque otros días
+ * sí cotizaron con sufijo.
+ *
+ * Merge: intra-day fresco (< 10 min) gana sobre el último cierre.
+ * Cuando hay duplicados (ticker × segmento × plazo × convención),
+ * preferimos el de mayor `monto` operado (más líquido).
  */
 async function fetchSupabaseBondPrices() {
   const map = {};
   const now = Date.now();
 
-  // ── PASO 1: Cierre oficial (últimos 14 días) ─────────────────────
-  // Base de fallback: si el ticker no operó hoy intra-day, usamos el
-  // último cierre disponible. Cubre instrumentos ilíquidos.
   const lookback = new Date();
   lookback.setDate(lookback.getDate() - SUPABASE_CLOSE_LOOKBACK_DAYS);
   const fromDate = lookback.toISOString().slice(0, 10);
 
+  // Set de tickers con convención dual: cotizaron CON sufijo en algún
+  // momento de la ventana. Lo armamos primero recorriendo los rows del
+  // boletín, después lo usamos como gate para aceptar/multiplicar las
+  // filas SIN sufijo. Se computa una vez y se comparte entre los 2 pasos.
+  const dualTickers = new Set();
+
+  const suffixRegex = /^(.+?)\/(CI|24HS|48HS)$/i;
+  // Devuelve { base, unitFactor } o null si la row no es usable.
+  // unitFactor = 1 para filas con sufijo (ya en por 100 VN),
+  // unitFactor = 100 para filas sin sufijo de tickers duales.
+  function classifyTicker(rawTicker) {
+    if (!rawTicker) return null;
+    const t = String(rawTicker).trim();
+    const m = t.match(suffixRegex);
+    if (m) return { base: m[1].toUpperCase(), unitFactor: 1 };
+    const baseUpper = t.toUpperCase();
+    if (dualTickers.has(baseUpper)) {
+      return { base: baseUpper, unitFactor: 100 };
+    }
+    return null;
+  }
+
+  // ── PASO 1: Cierre oficial (últimos 14 días) ─────────────────────
+  // Base de fallback: si el ticker no operó hoy intra-day, usamos el
+  // último cierre disponible. Cubre instrumentos ilíquidos.
   try {
     const { data: closeRows, error: closeErr } = await supabase
       .from("daily_close_prices")
@@ -3732,37 +3762,42 @@ async function fetchSupabaseBondPrices() {
 
     if (closeErr) throw closeErr;
 
-    // Agrupar por ticker normalizado:
+    // Primera pasada: identificar tickers duales.
+    for (const row of closeRows || []) {
+      const m = String(row.ticker || "").trim().match(suffixRegex);
+      if (m) dualTickers.add(m[1].toUpperCase());
+    }
+
+    // Segunda pasada: agrupar por ticker normalizado.
     //   1. fecha más reciente gana
     //   2. dentro de la misma fecha, mayor `monto` gana (más líquido)
     //
     // Solo usamos `precio_cierre_hoy`. Razón: el run de arranque del
     // worker mae-boletin a veces inserta filas con cierre 0 cuando el
-    // boletín aún no firmó (cron de las 22 todavía no corrió). En esos
-    // casos `precio_ultimo` puede venir en unidad "por 1 VN" (no "por
-    // 100 VN" como el resto del front), polluyendo el cache. El cron
+    // boletín aún no firmó (cron de las 22 todavía no corrió). El cron
     // de las 22 sobrescribe esas filas con valores reales por upsert.
     const closeByTicker = new Map();
     for (const row of closeRows || []) {
-      const base = normalizeMaeTicker(row.ticker);
-      if (!base) continue;
-      const price = Number(row.precio_cierre_hoy);
-      if (!price || price <= 0) continue;
+      const cls = classifyTicker(row.ticker);
+      if (!cls) continue;
+      const rawPrice = Number(row.precio_cierre_hoy);
+      if (!rawPrice || rawPrice <= 0) continue;
+      const price = rawPrice * cls.unitFactor;
 
-      const existing = closeByTicker.get(base);
+      const existing = closeByTicker.get(cls.base);
       if (!existing) {
-        closeByTicker.set(base, { ...row, _price: price });
+        closeByTicker.set(cls.base, { ...row, _price: price, _factor: cls.unitFactor });
         continue;
       }
       if (row.trade_date > existing.trade_date) {
-        closeByTicker.set(base, { ...row, _price: price });
+        closeByTicker.set(cls.base, { ...row, _price: price, _factor: cls.unitFactor });
         continue;
       }
       if (row.trade_date === existing.trade_date) {
         const existingMonto = Number(existing.monto) || 0;
         const rowMonto = Number(row.monto) || 0;
         if (rowMonto > existingMonto) {
-          closeByTicker.set(base, { ...row, _price: price });
+          closeByTicker.set(cls.base, { ...row, _price: price, _factor: cls.unitFactor });
         }
       }
     }
@@ -3774,6 +3809,12 @@ async function fetchSupabaseBondPrices() {
           : row.moneda_codigo === "D"
             ? "USD"
             : null;
+      // variacion y precio_cierre_ayer también se reescalan con el
+      // mismo factor de unidad para mantener consistencia interna.
+      const prevClose =
+        row.precio_cierre_ayer != null
+          ? Number(row.precio_cierre_ayer) * row._factor
+          : null;
       map[base] = {
         price: row._price,
         bid: null,
@@ -3782,10 +3823,7 @@ async function fetchSupabaseBondPrices() {
         source: "mae_close",
         currency,
         changePct: row.variacion != null ? Number(row.variacion) : null,
-        previousClose:
-          row.precio_cierre_ayer != null
-            ? Number(row.precio_cierre_ayer)
-            : null,
+        previousClose: prevClose,
         tradeDate: row.trade_date,
       };
     }
@@ -3799,7 +3837,7 @@ async function fetchSupabaseBondPrices() {
   // ── PASO 2: Intra-day (pisa cierre cuando fresco) ────────────────
   // prices_cache se actualiza cada minuto en horario de mercado.
   // Filtramos filas stale (> 10 min) para no mostrar precios viejos
-  // disfrazados de "tiempo real".
+  // disfrazados de "tiempo real". Reusa el set dualTickers del paso 1.
   try {
     const { data: intraRows, error: intraErr } = await supabase
       .from("prices_cache")
@@ -3813,16 +3851,17 @@ async function fetchSupabaseBondPrices() {
 
     const intraByTicker = new Map();
     for (const row of intraRows || []) {
-      const base = normalizeMaeTicker(row.ticker);
-      if (!base) continue;
-      const price = Number(row.last_price) || Number(row.close_price);
-      if (!price || price <= 0) continue;
+      const cls = classifyTicker(row.ticker);
+      if (!cls) continue;
+      const rawPrice = Number(row.last_price) || Number(row.close_price);
+      if (!rawPrice || rawPrice <= 0) continue;
       const age = now - new Date(row.fetched_at).getTime();
       if (age > SUPABASE_INTRADAY_FRESH_MS) continue;
 
-      const existing = intraByTicker.get(base);
+      const price = rawPrice * cls.unitFactor;
+      const existing = intraByTicker.get(cls.base);
       if (!existing || existing.fetched_at < row.fetched_at) {
-        intraByTicker.set(base, { ...row, _price: price });
+        intraByTicker.set(cls.base, { ...row, _price: price, _factor: cls.unitFactor });
       }
     }
 
@@ -3837,6 +3876,10 @@ async function fetchSupabaseBondPrices() {
       // temprano en la rueda), reutilizamos lo del cierre del día
       // anterior para no perder esos datos en la UI.
       const existing = map[base];
+      const prevClose =
+        row.prev_close != null
+          ? Number(row.prev_close) * row._factor
+          : (existing?.previousClose ?? null);
       map[base] = {
         price: row._price,
         bid: null,
@@ -3848,10 +3891,7 @@ async function fetchSupabaseBondPrices() {
           row.variation_pct != null
             ? Number(row.variation_pct)
             : (existing?.changePct ?? null),
-        previousClose:
-          row.prev_close != null
-            ? Number(row.prev_close)
-            : (existing?.previousClose ?? null),
+        previousClose: prevClose,
         fetchedAt: row.fetched_at,
       };
     }
@@ -6423,11 +6463,22 @@ function DonutChart({ slices, size = 100 }) {
   const total = slices.reduce((acc, s) => acc + s.value, 0);
   if (total <= 0 || slices.length === 0) return null;
 
-  // Caso especial: una sola slice del 100%. Un path SVG con start = end
+  // Filtrar slices microscópicas que rompen el rendering. Cuando una
+  // slice tiene fraction ~1.0 (e.g. RF ARS al 99.9999%) y otra tiene
+  // fraction ~epsilon (e.g. saldo cash residual de centavos), los
+  // ángulos de inicio y fin del path SVG colapsan y el donut sale
+  // vacío. Threshold conservador: 0.5% del total. Las slices bajo ese
+  // umbral siguen apareciendo en la leyenda de la card (que usa el
+  // array original `slices`), pero no se dibujan en el donut.
+  const significantSlices = slices.filter((s) => s.value / total >= 0.005);
+  if (significantSlices.length === 0) return null;
+  const sigTotal = significantSlices.reduce((acc, s) => acc + s.value, 0);
+
+  // Caso especial: una sola slice del ~100%. Un path SVG con start = end
   // colapsa a 0, así que dibujamos un anillo perfecto con un <circle>
   // que solo tiene stroke (sin fill). El stroke pintado sobre el radio
   // medio entre el outer y el inner queda como un anillo lleno.
-  if (slices.length === 1) {
+  if (significantSlices.length === 1) {
     const ringMidRadius = (radius + innerRadius) / 2;
     const ringWidth = radius - innerRadius;
     return (
@@ -6437,7 +6488,7 @@ function DonutChart({ slices, size = 100 }) {
           cy={cy}
           r={ringMidRadius}
           fill="none"
-          stroke={slices[0].color}
+          stroke={significantSlices[0].color}
           strokeWidth={ringWidth}
         />
       </svg>
@@ -6447,8 +6498,8 @@ function DonutChart({ slices, size = 100 }) {
   let cumulative = 0;
   return (
     <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`} style={{ flexShrink: 0 }}>
-      {slices.map((s, idx) => {
-        const fraction = s.value / total;
+      {significantSlices.map((s, idx) => {
+        const fraction = s.value / sigTotal;
         const startAngle = cumulative * Math.PI * 2 - Math.PI / 2;
         cumulative += fraction;
         const endAngle = cumulative * Math.PI * 2 - Math.PI / 2;
