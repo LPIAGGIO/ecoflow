@@ -3635,8 +3635,16 @@ function useDashboardFx() {
  * bonos (consistente con el módulo Carry Trade existente).
  */
 
-const BOND_PRICES_CACHE_KEY = "ecoflow_bond_prices_v2";
+// Bump version para invalidar caches sessionStorage viejos al deployar
+// el refactor de Supabase (Fase 3). Los caches v2 quedan ignorados.
+const BOND_PRICES_CACHE_KEY = "ecoflow_bond_prices_v3";
 const BOND_PRICES_TTL_MS = 5 * 60 * 1000; // 5 minutos
+// Ventana en la que confiamos en intra-day de prices_cache. Si la fila
+// es más vieja, la ignoramos y caemos al cierre o a BYMA/data912.
+const SUPABASE_INTRADAY_FRESH_MS = 10 * 60 * 1000;
+// Días hacia atrás que buscamos cierres en daily_close_prices cuando
+// un ticker no operó hoy. 14 días cubre feriados largos (Semana Santa).
+const SUPABASE_CLOSE_LOOKBACK_DAYS = 14;
 
 function readBondPricesCache() {
   try {
@@ -3656,6 +3664,199 @@ function writeBondPricesCache(payload) {
   } catch {
     /* sessionStorage puede fallar en private mode */
   }
+}
+
+/**
+ * Normaliza un ticker MAE al formato del frontend (BYMA-like).
+ *
+ * MAE cotiza con dos convenciones distintas que están en UNIDADES
+ * distintas:
+ *
+ *   - "AL30" (sin sufijo): cotiza por 1 VN — ~828 ARS por unidad.
+ *   - "AL30/CI" (con sufijo): cotiza por 100 VN — ~91300 ARS, igual
+ *     que BYMA y el resto del frontend.
+ *
+ * Como el front asume "precio por 100 VN", solo nos sirven las filas
+ * con sufijo /CI, /24hs o /48hs. Las "limpias" las descartamos.
+ *
+ * La "D" para USD ya viene embebida antes del slash en el ticker MAE
+ * ("AL30D/CI"), así que no hay que agregarla acá.
+ *
+ *   "AL30/CI"   → "AL30"
+ *   "AL30/24hs" → "AL30"
+ *   "AL30D/CI"  → "AL30D"
+ *   "AL30"      → null
+ *   "S29Y6"     → null (LECAPs sin sufijo, caen al fallback)
+ */
+function normalizeMaeTicker(maeTicker) {
+  if (!maeTicker) return null;
+  const m = String(maeTicker).trim().match(/^(.+?)\/(CI|24HS|48HS)$/i);
+  if (!m) return null;
+  return m[1].toUpperCase();
+}
+
+/**
+ * Lee precios de bonos de Supabase: prices_cache (intra-day MAE,
+ * refrescado cada minuto por worker price-cache) y daily_close_prices
+ * (cierre oficial, refrescado por worker mae-boletin a las 22 ART).
+ *
+ * Merge: intra-day fresco (< 10 min) gana sobre el último cierre.
+ * Cuando hay duplicados (ticker × segmento × plazo), preferimos el
+ * de mayor `monto` operado. La columna `monto` solo existe en
+ * daily_close_prices; para intra-day desempatamos por `fetched_at`.
+ *
+ * Devuelve Map<TICKER_UPPER, entry> con shape compatible con BYMA/
+ * data912 — el merge en useBondPrices es transparente para los
+ * consumers.
+ */
+async function fetchSupabaseBondPrices() {
+  const map = {};
+  const now = Date.now();
+
+  // ── PASO 1: Cierre oficial (últimos 14 días) ─────────────────────
+  // Base de fallback: si el ticker no operó hoy intra-day, usamos el
+  // último cierre disponible. Cubre instrumentos ilíquidos.
+  const lookback = new Date();
+  lookback.setDate(lookback.getDate() - SUPABASE_CLOSE_LOOKBACK_DAYS);
+  const fromDate = lookback.toISOString().slice(0, 10);
+
+  try {
+    const { data: closeRows, error: closeErr } = await supabase
+      .from("daily_close_prices")
+      .select(
+        "ticker, moneda_codigo, plazo, segmento_codigo, " +
+          "precio_cierre_hoy, precio_cierre_ayer, precio_ultimo, " +
+          "variacion, monto, trade_date"
+      )
+      .gte("trade_date", fromDate);
+
+    if (closeErr) throw closeErr;
+
+    // Agrupar por ticker normalizado:
+    //   1. fecha más reciente gana
+    //   2. dentro de la misma fecha, mayor `monto` gana (más líquido)
+    const closeByTicker = new Map();
+    for (const row of closeRows || []) {
+      const base = normalizeMaeTicker(row.ticker);
+      if (!base) continue;
+      const price =
+        Number(row.precio_cierre_hoy) || Number(row.precio_ultimo);
+      if (!price || price <= 0) continue;
+
+      const existing = closeByTicker.get(base);
+      if (!existing) {
+        closeByTicker.set(base, { ...row, _price: price });
+        continue;
+      }
+      if (row.trade_date > existing.trade_date) {
+        closeByTicker.set(base, { ...row, _price: price });
+        continue;
+      }
+      if (row.trade_date === existing.trade_date) {
+        const existingMonto = Number(existing.monto) || 0;
+        const rowMonto = Number(row.monto) || 0;
+        if (rowMonto > existingMonto) {
+          closeByTicker.set(base, { ...row, _price: price });
+        }
+      }
+    }
+
+    for (const [base, row] of closeByTicker) {
+      const currency =
+        row.moneda_codigo === "$"
+          ? "ARS"
+          : row.moneda_codigo === "D"
+            ? "USD"
+            : null;
+      map[base] = {
+        price: row._price,
+        bid: null,
+        ask: null,
+        volume: row.monto != null ? Number(row.monto) : null,
+        source: "mae_close",
+        currency,
+        changePct: row.variacion != null ? Number(row.variacion) : null,
+        previousClose:
+          row.precio_cierre_ayer != null
+            ? Number(row.precio_cierre_ayer)
+            : null,
+        tradeDate: row.trade_date,
+      };
+    }
+  } catch (e) {
+    console.warn(
+      "[useBondPrices] Supabase daily_close_prices falló:",
+      e.message
+    );
+  }
+
+  // ── PASO 2: Intra-day (pisa cierre cuando fresco) ────────────────
+  // prices_cache se actualiza cada minuto en horario de mercado.
+  // Filtramos filas stale (> 10 min) para no mostrar precios viejos
+  // disfrazados de "tiempo real".
+  try {
+    const { data: intraRows, error: intraErr } = await supabase
+      .from("prices_cache")
+      .select(
+        "ticker, currency, last_price, close_price, prev_close, " +
+          "variation_pct, fetched_at, segment_code"
+      )
+      .eq("source", "mae_rentafija");
+
+    if (intraErr) throw intraErr;
+
+    const intraByTicker = new Map();
+    for (const row of intraRows || []) {
+      const base = normalizeMaeTicker(row.ticker);
+      if (!base) continue;
+      const price = Number(row.last_price) || Number(row.close_price);
+      if (!price || price <= 0) continue;
+      const age = now - new Date(row.fetched_at).getTime();
+      if (age > SUPABASE_INTRADAY_FRESH_MS) continue;
+
+      const existing = intraByTicker.get(base);
+      if (!existing || existing.fetched_at < row.fetched_at) {
+        intraByTicker.set(base, { ...row, _price: price });
+      }
+    }
+
+    for (const [base, row] of intraByTicker) {
+      const currency =
+        row.currency === "$"
+          ? "ARS"
+          : row.currency === "D"
+            ? "USD"
+            : null;
+      // Si el intra-day no trae variation_pct/prev_close (puede pasar
+      // temprano en la rueda), reutilizamos lo del cierre del día
+      // anterior para no perder esos datos en la UI.
+      const existing = map[base];
+      map[base] = {
+        price: row._price,
+        bid: null,
+        ask: null,
+        volume: null,
+        source: "mae_intraday",
+        currency: currency || existing?.currency || null,
+        changePct:
+          row.variation_pct != null
+            ? Number(row.variation_pct)
+            : (existing?.changePct ?? null),
+        previousClose:
+          row.prev_close != null
+            ? Number(row.prev_close)
+            : (existing?.previousClose ?? null),
+        fetchedAt: row.fetched_at,
+      };
+    }
+  } catch (e) {
+    console.warn(
+      "[useBondPrices] Supabase prices_cache falló:",
+      e.message
+    );
+  }
+
+  return map;
 }
 
 function useBondPrices() {
@@ -3689,30 +3890,54 @@ function useBondPrices() {
         const bust = refreshKey > 0 ? `?t=${Date.now()}` : "";
         const fetchOpts = refreshKey > 0 ? { cache: "no-store" } : undefined;
 
-        // ── PASO 1: Intentar BYMA (fuente primaria) ──────────────────
-        // BYMA Open Data es la fuente directa (data912 también pega ahí).
-        // Ventajas: más completo (~494 bonos), incluye fechas de vto,
-        // currency tagging explícito (ARS/USD/EXT), bid/ask separados.
-        // Si BYMA falla por cualquier razón (timeout, mantenimiento,
-        // rate limit), caemos a data912 como antes.
+        // Lanzamos las 3 fuentes en paralelo. Si una falla, la otra
+        // sigue siendo útil. La cadena de prioridad en el merge es:
+        //   Supabase intra-day > Supabase close > BYMA > data912
+        const [supabaseMap, bymaResult, data912Result] = await Promise.all([
+          fetchSupabaseBondPrices().catch((e) => {
+            console.warn("[useBondPrices] Supabase falló:", e?.message);
+            return {};
+          }),
+          (async () => {
+            try {
+              const r = await fetch(`/api/byma/public-bonds${bust}`, fetchOpts);
+              if (!r.ok) throw new Error(`BYMA HTTP ${r.status}`);
+              const j = await r.json();
+              if (!j?.ok || !Array.isArray(j.data)) {
+                throw new Error("BYMA respuesta inválida");
+              }
+              return { data: j.data };
+            } catch (e) {
+              console.warn("[useBondPrices] BYMA falló:", e.message);
+              return { data: null };
+            }
+          })(),
+          (async () => {
+            try {
+              const [bondsRes, letrasRes] = await Promise.all([
+                fetch(`/api/data912?type=bonos&_=${Date.now()}`, fetchOpts),
+                fetch(`/api/data912?type=letras&_=${Date.now()}`, fetchOpts),
+              ]);
+              const bonds = bondsRes.ok ? await bondsRes.json() : [];
+              const letras = letrasRes.ok ? await letrasRes.json() : [];
+              return { bonds, letras };
+            } catch (e) {
+              console.warn("[useBondPrices] data912 falló:", e.message);
+              return { bonds: [], letras: [] };
+            }
+          })(),
+        ]);
+
+        // ── PASO 1: Empezamos con BYMA como base de fallback ─────
+        // BYMA Open Data (~494 bonos) llena tickers que MAE no opera
+        // (CCL "AL30C", instrumentos ilíquidos, fines de semana).
         let map = {};
-        let primarySource = "byma";
-        let bymaFailed = false;
-
-        try {
-          const bymaRes = await fetch(`/api/byma/public-bonds${bust}`, fetchOpts);
-          if (!bymaRes.ok) throw new Error(`BYMA HTTP ${bymaRes.status}`);
-          const bymaJson = await bymaRes.json();
-          if (!bymaJson?.ok || !Array.isArray(bymaJson.data)) {
-            throw new Error("BYMA respuesta inválida");
-          }
-
-          for (const bond of bymaJson.data) {
+        if (bymaResult.data) {
+          for (const bond of bymaResult.data) {
             if (!bond?.symbol) continue;
             const ticker = String(bond.symbol).trim().toUpperCase();
-            // Preferimos last (último operado), luego settlement, luego
-            // ask. Si nada, descartamos.
-            const price = bond.last ?? bond.settlementPrice ?? bond.ask ?? null;
+            const price =
+              bond.last ?? bond.settlementPrice ?? bond.ask ?? null;
             if (price == null || price <= 0) continue;
             map[ticker] = {
               price: Number(price),
@@ -3720,7 +3945,6 @@ function useBondPrices() {
               ask: bond.ask,
               volume: bond.volume,
               source: "byma",
-              // Metadata extra de BYMA que data912 no tiene
               maturityDate: bond.maturityDate,
               daysToMaturity: bond.daysToMaturity,
               currency: bond.currency, // "ARS" | "USD" | "EXT"
@@ -3729,52 +3953,30 @@ function useBondPrices() {
               tradeHour: bond.tradeHour,
             };
           }
-        } catch (bymaErr) {
-          // No tiramos error: simplemente caemos al fallback.
-          bymaFailed = true;
-          console.warn("[useBondPrices] BYMA falló, usando data912:", bymaErr.message);
         }
 
-        // ── PASO 2: Fallback a data912 ──────────────────────────────
-        // Lo usamos en 2 escenarios:
-        //   (a) BYMA falló completamente → data912 es nuestra única fuente
-        //   (b) BYMA andvuó pero le falta algún ticker → llenamos huecos
-        // En ambos casos no pisamos lo que ya tenemos de BYMA.
-        if (bymaFailed || Object.keys(map).length === 0) {
-          primarySource = "data912";
-        }
-
-        const [bondsRes, letrasRes] = await Promise.all([
-          fetch(`/api/data912?type=bonos&_=${Date.now()}`, fetchOpts),
-          fetch(`/api/data912?type=letras&_=${Date.now()}`, fetchOpts),
-        ]);
-
-        const bondsArr = bondsRes.ok ? await bondsRes.json() : [];
-        const letrasArr = letrasRes.ok ? await letrasRes.json() : [];
-
-        // Priorizamos letras si hay duplicados (su data es más
-        // específica). El campo `c` es el último precio operado; si no
-        // hay, usamos `px_ask` como fallback (consistente con CarryTrade).
-        // data912 expone `pct_change` (variación % vs cierre anterior) —
-        // de ahí derivamos el cierre anterior matemáticamente para
-        // calcular P&L diario sin necesidad de snapshots históricos.
-        for (const item of [...letrasArr, ...bondsArr]) {
+        // ── PASO 2: data912 rellena huecos que BYMA no tiene ─────
+        // No pisamos lo que BYMA ya proveyó.
+        for (const item of [
+          ...(data912Result.letras || []),
+          ...(data912Result.bonds || []),
+        ]) {
           if (!item?.symbol) continue;
           const ticker = String(item.symbol).trim().toUpperCase();
-          if (map[ticker]) continue; // BYMA gana si ya estaba
+          if (map[ticker]) continue;
           const price = item.c ?? item.px_ask ?? null;
           if (price == null || price <= 0) continue;
 
           // Derivar cierre anterior desde pct_change cuando viene.
-          // Fórmula: cierre_ayer = price / (1 + pct_change/100)
           let changePct = null;
           let previousClose = null;
-          if (item.pct_change != null && Number.isFinite(Number(item.pct_change))) {
+          if (
+            item.pct_change != null &&
+            Number.isFinite(Number(item.pct_change))
+          ) {
             changePct = Number(item.pct_change);
             const denom = 1 + changePct / 100;
-            if (denom > 0) {
-              previousClose = Number(price) / denom;
-            }
+            if (denom > 0) previousClose = Number(price) / denom;
           }
 
           map[ticker] = {
@@ -3788,19 +3990,39 @@ function useBondPrices() {
           };
         }
 
-        if (!mounted) return;
-        const now = new Date().toISOString();
-        setPrices(map);
-        setLastFetch(now);
-        setLoading(false);
-        writeBondPricesCache({ prices: map, lastFetch: now });
+        // ── PASO 3: Supabase pisa todo (mae_intraday > mae_close) ─
+        // El merge en fetchSupabaseBondPrices ya garantiza un único
+        // entry por ticker con la mejor fuente disponible. Acá solo
+        // mergeamos: las claves que existen en supabaseMap pisan a
+        // BYMA/data912. Preservamos campos enriquecidos (maturityDate,
+        // daysToMaturity) que BYMA tiene y MAE no.
+        for (const [ticker, supaEntry] of Object.entries(supabaseMap)) {
+          const prior = map[ticker] || {};
+          map[ticker] = {
+            ...prior,
+            ...supaEntry,
+            // Si BYMA traía maturityDate/daysToMaturity, los conservamos
+            maturityDate: prior.maturityDate ?? supaEntry.maturityDate ?? null,
+            daysToMaturity:
+              prior.daysToMaturity ?? supaEntry.daysToMaturity ?? null,
+          };
+        }
 
-        // Log informativo (visible en DevTools de quien sea curioso)
-        const bymaCount = Object.values(map).filter(v => v.source === "byma").length;
-        const d912Count = Object.values(map).filter(v => v.source === "data912").length;
+        if (!mounted) return;
+        const nowIso = new Date().toISOString();
+        setPrices(map);
+        setLastFetch(nowIso);
+        setLoading(false);
+        writeBondPricesCache({ prices: map, lastFetch: nowIso });
+
+        // Log informativo (visible en DevTools)
+        const counts = Object.values(map).reduce((acc, v) => {
+          acc[v.source] = (acc[v.source] || 0) + 1;
+          return acc;
+        }, {});
         console.info(
           `[useBondPrices] ${Object.keys(map).length} tickers cargados ` +
-          `(BYMA: ${bymaCount}, data912: ${d912Count})`
+          `(${Object.entries(counts).map(([k, v]) => `${k}:${v}`).join(", ")})`
         );
       } catch (e) {
         if (!mounted) return;
