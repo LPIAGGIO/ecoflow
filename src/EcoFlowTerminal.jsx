@@ -3708,14 +3708,15 @@ function normalizeMaeTicker(maeTicker) {
  *     CON sufijo (lo llamamos "ticker dual"), y se multiplican × 100.
  *   - Tickers que nunca cotizaron con sufijo: skip (no sabemos la unidad).
  *
- * Esto permite capturar precios intra-day frescos de instrumentos como
- * T30J6 o S29Y6, que algunos días solo operan en segmento bilateral sin
- * sufijo, pero sabemos que su unidad es "por 1 VN" porque otros días
- * sí cotizaron con sufijo.
+ * Filtro de segmentos: solo aceptamos cotizaciones spot del bono
+ * (segmentos 2=TPN Bilateral, 3=ON/FF Bilateral, 4=TPN Garantizado,
+ * 5=ON/FF Garantizado). Excluimos segmentos 7 (Pases-Ventas), 8 (Pases
+ * con Aforo) y 9 (Cauciones) porque sus precios no representan la
+ * cotización del bono — son operaciones colaterales / de financiamiento
+ * con precio distinto al spot.
  *
  * Merge: intra-day fresco (< 10 min) gana sobre el último cierre.
- * Cuando hay duplicados (ticker × segmento × plazo × convención),
- * preferimos el de mayor `monto` operado (más líquido).
+ * Cuando hay duplicados, preferimos el de mayor `monto` (más líquido).
  */
 async function fetchSupabaseBondPrices() {
   const map = {};
@@ -3725,16 +3726,19 @@ async function fetchSupabaseBondPrices() {
   lookback.setDate(lookback.getDate() - SUPABASE_CLOSE_LOOKBACK_DAYS);
   const fromDate = lookback.toISOString().slice(0, 10);
 
+  // Segmentos donde el precio publicado es la cotización spot del bono.
+  // El resto (Pases-Ventas, Pases con Aforo, Cauciones) tienen precios
+  // que no representan el valor de mercado y contaminarían la elección
+  // por mayor monto.
+  const SPOT_SEGMENTOS = new Set(["2", "3", "4", "5"]);
+
   // Set de tickers con convención dual: cotizaron CON sufijo en algún
   // momento de la ventana. Lo armamos primero recorriendo los rows del
-  // boletín, después lo usamos como gate para aceptar/multiplicar las
-  // filas SIN sufijo. Se computa una vez y se comparte entre los 2 pasos.
+  // boletín (filtrados a segmentos spot), después lo usamos como gate
+  // para aceptar/multiplicar las filas SIN sufijo.
   const dualTickers = new Set();
 
   const suffixRegex = /^(.+?)\/(CI|24HS|48HS)$/i;
-  // Devuelve { base, unitFactor } o null si la row no es usable.
-  // unitFactor = 1 para filas con sufijo (ya en por 100 VN),
-  // unitFactor = 100 para filas sin sufijo de tickers duales.
   function classifyTicker(rawTicker) {
     if (!rawTicker) return null;
     const t = String(rawTicker).trim();
@@ -3747,9 +3751,17 @@ async function fetchSupabaseBondPrices() {
     return null;
   }
 
+  // Convierte un valor de la BD a Number > 0, o null si es 0/null/NaN.
+  // Crítico para `precio_cierre_ayer` y `prev_close` porque la lógica
+  // de P&L HOY downstream requiere `prev > 0`; si guardamos 0 acá, el
+  // fallback de changePct no se dispara y P&L queda en "—".
+  function numPositive(v) {
+    if (v == null) return null;
+    const n = Number(v);
+    return Number.isFinite(n) && n > 0 ? n : null;
+  }
+
   // ── PASO 1: Cierre oficial (últimos 14 días) ─────────────────────
-  // Base de fallback: si el ticker no operó hoy intra-day, usamos el
-  // último cierre disponible. Cubre instrumentos ilíquidos.
   try {
     const { data: closeRows, error: closeErr } = await supabase
       .from("daily_close_prices")
@@ -3762,22 +3774,19 @@ async function fetchSupabaseBondPrices() {
 
     if (closeErr) throw closeErr;
 
-    // Primera pasada: identificar tickers duales.
+    // Primera pasada: identificar tickers duales (solo desde segmentos spot).
     for (const row of closeRows || []) {
+      const seg = String(row.segmento_codigo || "");
+      if (!SPOT_SEGMENTOS.has(seg)) continue;
       const m = String(row.ticker || "").trim().match(suffixRegex);
       if (m) dualTickers.add(m[1].toUpperCase());
     }
 
     // Segunda pasada: agrupar por ticker normalizado.
-    //   1. fecha más reciente gana
-    //   2. dentro de la misma fecha, mayor `monto` gana (más líquido)
-    //
-    // Solo usamos `precio_cierre_hoy`. Razón: el run de arranque del
-    // worker mae-boletin a veces inserta filas con cierre 0 cuando el
-    // boletín aún no firmó (cron de las 22 todavía no corrió). El cron
-    // de las 22 sobrescribe esas filas con valores reales por upsert.
     const closeByTicker = new Map();
     for (const row of closeRows || []) {
+      const seg = String(row.segmento_codigo || "");
+      if (!SPOT_SEGMENTOS.has(seg)) continue;
       const cls = classifyTicker(row.ticker);
       if (!cls) continue;
       const rawPrice = Number(row.precio_cierre_hoy);
@@ -3809,12 +3818,7 @@ async function fetchSupabaseBondPrices() {
           : row.moneda_codigo === "D"
             ? "USD"
             : null;
-      // variacion y precio_cierre_ayer también se reescalan con el
-      // mismo factor de unidad para mantener consistencia interna.
-      const prevClose =
-        row.precio_cierre_ayer != null
-          ? Number(row.precio_cierre_ayer) * row._factor
-          : null;
+      const prevRaw = numPositive(row.precio_cierre_ayer);
       map[base] = {
         price: row._price,
         bid: null,
@@ -3823,7 +3827,7 @@ async function fetchSupabaseBondPrices() {
         source: "mae_close",
         currency,
         changePct: row.variacion != null ? Number(row.variacion) : null,
-        previousClose: prevClose,
+        previousClose: prevRaw != null ? prevRaw * row._factor : null,
         tradeDate: row.trade_date,
       };
     }
@@ -3835,9 +3839,10 @@ async function fetchSupabaseBondPrices() {
   }
 
   // ── PASO 2: Intra-day (pisa cierre cuando fresco) ────────────────
-  // prices_cache se actualiza cada minuto en horario de mercado.
-  // Filtramos filas stale (> 10 min) para no mostrar precios viejos
-  // disfrazados de "tiempo real". Reusa el set dualTickers del paso 1.
+  // prices_cache no incluye segmento en el sentido de daily_close (su
+  // `segment_code` usa otro vocabulario: BT/BP/GT/GP). El endpoint
+  // /rentafija de MAE solo devuelve cotizaciones spot, así que no hace
+  // falta filtrar acá.
   try {
     const { data: intraRows, error: intraErr } = await supabase
       .from("prices_cache")
@@ -3873,13 +3878,15 @@ async function fetchSupabaseBondPrices() {
             ? "USD"
             : null;
       // Si el intra-day no trae variation_pct/prev_close (puede pasar
-      // temprano en la rueda), reutilizamos lo del cierre del día
-      // anterior para no perder esos datos en la UI.
+      // temprano en la rueda o en segmento bilateral), reutilizamos lo
+      // del cierre del día anterior para no perder esos datos en la UI.
+      // Validamos > 0 explícito porque la BD a veces guarda 0 como
+      // sentinel — eso rompería el cálculo de P&L HOY downstream.
       const existing = map[base];
-      const prevClose =
-        row.prev_close != null
-          ? Number(row.prev_close) * row._factor
-          : (existing?.previousClose ?? null);
+      const intraPrevRaw = numPositive(row.prev_close);
+      const prevClose = intraPrevRaw != null
+        ? intraPrevRaw * row._factor
+        : (existing?.previousClose ?? null);
       map[base] = {
         price: row._price,
         bid: null,
