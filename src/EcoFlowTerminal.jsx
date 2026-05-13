@@ -3735,12 +3735,18 @@ async function fetchSupabaseBondPrices() {
     // Agrupar por ticker normalizado:
     //   1. fecha más reciente gana
     //   2. dentro de la misma fecha, mayor `monto` gana (más líquido)
+    //
+    // Solo usamos `precio_cierre_hoy`. Razón: el run de arranque del
+    // worker mae-boletin a veces inserta filas con cierre 0 cuando el
+    // boletín aún no firmó (cron de las 22 todavía no corrió). En esos
+    // casos `precio_ultimo` puede venir en unidad "por 1 VN" (no "por
+    // 100 VN" como el resto del front), polluyendo el cache. El cron
+    // de las 22 sobrescribe esas filas con valores reales por upsert.
     const closeByTicker = new Map();
     for (const row of closeRows || []) {
       const base = normalizeMaeTicker(row.ticker);
       if (!base) continue;
-      const price =
-        Number(row.precio_cierre_hoy) || Number(row.precio_ultimo);
+      const price = Number(row.precio_cierre_hoy);
       if (!price || price <= 0) continue;
 
       const existing = closeByTicker.get(base);
