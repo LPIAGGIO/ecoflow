@@ -6886,7 +6886,16 @@ function resolvePositionPrice(p, bondPrices, futurePrices, stockPrices) {
   ) {
     const m = bondPrices[ticker];
     if (m?.price > 0) {
-      const src = m.source === "byma" || m.source === "data912" ? m.source : "market";
+      // Mapeo del source interno al source "público" usado por el badge
+      // UI. Supabase aporta dos sub-fuentes (mae_intraday, mae_close)
+      // que la UI consolida bajo el badge "MAE". BYMA y data912 se
+      // mantienen como labels propios.
+      const src =
+        m.source === "byma" || m.source === "data912"
+          ? m.source
+          : m.source === "mae_intraday" || m.source === "mae_close"
+            ? "mae"
+            : "market";
       return { price: m.price, source: src };
     }
   }
@@ -7552,7 +7561,8 @@ function computePortfolioTotals(positions, fx, valuationCurrency, bondPrices, fu
       if (convertedRealized != null) realizedFuturesPnL += convertedRealized;
       // costo de futuros = 0, no suma a totalCost
       if (g.priceSource === "market" || g.priceSource === "manual" ||
-          g.priceSource === "close" || g.priceSource === "primary") {
+          g.priceSource === "close" || g.priceSource === "primary" ||
+          g.priceSource === "mae") {
         pricesFromMarket++;
       } else {
         pricesFromCost++;
@@ -7594,12 +7604,13 @@ function computePortfolioTotals(positions, fx, valuationCurrency, bondPrices, fu
       }
 
       // Para clasificar fuente: priceSource del grupo viene de useBondPrices
-      // (byma/data912/manual) o "cost"/"close". Las cerradas siempre son
+      // (byma/data912/mae/manual) o "cost"/"close". Las cerradas siempre son
       // "close" → cuentan como market.
       const src = g.priceSource;
       const fromMarket =
         src === "byma" ||
         src === "data912" ||
+        src === "mae" ||
         src === "market" ||
         src === "manual" ||
         src === "close";
@@ -7639,11 +7650,12 @@ function computePortfolioTotals(positions, fx, valuationCurrency, bondPrices, fu
     }
 
     // Considerar como "from market" cualquier fuente real de mercado
-    // (BYMA, data912, market legacy) o manual (override del usuario).
+    // (BYMA, data912, MAE, market legacy) o manual (override del usuario).
     // Solo "cost" cae a pricesFromCost.
     const fromMarket =
       marketRes.source === "byma" ||
       marketRes.source === "data912" ||
+      marketRes.source === "mae" ||
       marketRes.source === "market" || // legacy
       marketRes.source === "manual";
     if (fromMarket) {
@@ -11949,6 +11961,7 @@ function EditablePriceCell({ position, resolved, onSave }) {
     source === "primary" ? { label: "primary", color: C.accent, bg: C.accentSoft } :
     source === "byma"    ? { label: "byma",    color: C.accent, bg: C.accentSoft } :
     source === "data912" ? { label: "data912", color: C.accent, bg: C.accentSoft } :
+    source === "mae"     ? { label: "mae",     color: C.green,  bg: "rgba(74,222,128,0.10)" } :
     source === "market"  ? { label: "data912", color: C.accent, bg: C.accentSoft } : // legacy fallback
     source === "close"   ? { label: "cierre",  color: C.green,  bg: "rgba(74,222,128,0.10)" } :
     null; // cost: no badge, solo "—"
@@ -11987,6 +12000,7 @@ function EditablePriceCell({ position, resolved, onSave }) {
           source === "manual"  ? "Editar precio manual" :
           source === "byma"    ? "Override del precio (BYMA)" :
           source === "data912" ? "Override del precio (data912)" :
+          source === "mae"     ? "Override del precio (MAE)" :
           source === "market"  ? "Override manual del precio" :
           "Cargar precio actual"
         }
