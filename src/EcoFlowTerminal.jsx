@@ -7363,12 +7363,29 @@ function computeDailyPnL(p, bondPrices, futurePrices, stockPrices, futureAdjLook
         const denom = 1 + Number(m.changePct) / 100;
         if (denom > 0) prev = Number(m.price) / denom;
       }
+      // Si tenemos previousClose válido, calculamos P&L del día estándar.
       if (prev != null && prev > 0) {
         // Bonos cotizan cada 100 VN. P&L unidad = (price - prev) / 100 × cantidad
         const diffPer100 = m.price - prev;
         const sign = (p.operation_type === "sell") ? -1 : 1;
         const pnl = sign * (diffPer100 / 100) * qty;
         const pct = (diffPer100 / prev) * 100;
+        return { pnl, pct };
+      }
+      // Sin previousClose disponible (ticker recién emitido o no
+      // presente en daily_close_prices): fallback a P&L TOTAL usando el
+      // PPP de la posición como base. La idea: si compraste hoy y aún
+      // no hay cierre de "ayer" guardado, el único "P&L del día" que
+      // tiene sentido es lo que subió respecto a tu precio de compra.
+      // Cuando pase el primer cierre y se guarde en daily_close_prices,
+      // este fallback dejará de dispararse y el P&L HOY será la
+      // variación real intra-día.
+      const ppp = Number(p.entry_price);
+      if (ppp > 0) {
+        const diffPer100 = m.price - ppp;
+        const sign = (p.operation_type === "sell") ? -1 : 1;
+        const pnl = sign * (diffPer100 / 100) * qty;
+        const pct = (diffPer100 / ppp) * 100;
         return { pnl, pct };
       }
     }
@@ -7399,6 +7416,17 @@ function computeDailyPnL(p, bondPrices, futurePrices, stockPrices, futureAdjLook
         const sign = (p.operation_type === "sell") ? -1 : 1;
         const pnl = sign * diffPerUnit * qty;
         const pct = (diffPerUnit / prev) * 100;
+        return { pnl, pct };
+      }
+      // Sin previousClose disponible: fallback a P&L TOTAL contra PPP.
+      // Mismo razonamiento que para bonos: si el ticker no tiene cierre
+      // histórico, P&L HOY = lo que subió/bajó vs el precio de compra.
+      const ppp = Number(p.entry_price);
+      if (ppp > 0) {
+        const diffPerUnit = m.price - ppp;
+        const sign = (p.operation_type === "sell") ? -1 : 1;
+        const pnl = sign * diffPerUnit * qty;
+        const pct = (diffPerUnit / ppp) * 100;
         return { pnl, pct };
       }
     }
@@ -11009,12 +11037,18 @@ function ConsolidatedRow({ group, bondPrices, futurePrices, stockPrices, futureA
     // así una posición SHORT genera P&L negativo si el precio sube.
     if (group.instrument_type !== "future") {
       // Tomamos cualquier op del grupo (todas tienen el mismo ticker)
-      // pero le inyectamos la cantidad NETA del grupo (con signo) y un
-      // operation_type 'compra' — el signo ya queda capturado por netQty.
+      // pero le inyectamos la cantidad NETA del grupo (con signo), un
+      // operation_type 'compra' (el signo ya queda capturado por netQty)
+      // y el PPP agregado del grupo como entry_price. Este último sirve
+      // como fallback en computeDailyPnL si el ticker no tiene cierre
+      // histórico todavía (recién emitido o sin datos en
+      // daily_close_prices) — en ese caso P&L HOY = P&L TOTAL hasta que
+      // se guarde el primer cierre de ayer.
       const sampleOp = {
         ...group.operations[0],
         quantity: group.netQty,
         operation_type: "compra",
+        entry_price: group.ppp != null ? group.ppp : group.operations[0]?.entry_price,
       };
       const d = computeDailyPnL(sampleOp, bondPrices, futurePrices, stockPrices);
       if (!d) return { dailyPnl: null, dailyPct: null, marketClosed: false };
