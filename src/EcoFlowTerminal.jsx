@@ -1023,6 +1023,26 @@ function isWithinTradingDay() {
   return !["Sat", "Sun"].includes(wd);
 }
 
+// Período donde "P&L HOY" tiene sentido: lun-vie ≥ 10:30 ART (apertura
+// del mercado) hasta 23:59 ART (medianoche). Antes de 10:30 del día
+// hábil → P&L HOY = 0 (el mercado todavía no abrió hoy, no hay nada que
+// medir contra el cierre de ayer). Después de 23:59 → 0 hasta que vuelva
+// a abrir el próximo día hábil. Fin de semana → 0 todo el día.
+function isTradingDayAndMarketOpened() {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/Argentina/Buenos_Aires",
+    weekday: "short",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).formatToParts(new Date());
+  const wd = parts.find((p) => p.type === "weekday")?.value;
+  if (["Sat", "Sun"].includes(wd)) return false;
+  const hh = parseInt(parts.find((p) => p.type === "hour")?.value || "0", 10);
+  const mm = parseInt(parts.find((p) => p.type === "minute")?.value || "0", 10);
+  return hh * 60 + mm >= 10 * 60 + 30; // >= 10:30 ART
+}
+
 // Formatters
 const fmtARS = (n) =>
   n == null
@@ -6194,14 +6214,16 @@ function TotalCard({ positions, fx, bondPrices, futurePrices, stockPrices, valua
   // posición por posición usando computeDailyPnL, que devuelve el P&L
   // en moneda de la posición. Después convertimos a la valuationCurrency.
   // Posiciones sin pct_change disponible se ignoran (no rompen el total).
-  // Si estamos fuera del día calendario hábil (sábado, domingo o feriado),
-  // early return con marketClosed=true → render en gris. Antes filtrábamos
-  // por horario operativo (10:30-17:30) pero eso ocultaba el P&L HOY toda
-  // la tarde-noche del mismo día hábil. Ahora cubrimos el día entero;
-  // el P&L se resetea naturalmente cuando cambia el día calendario.
+  // Reset a 0 cuando estamos fuera del período de "P&L HOY":
+  //   - Fin de semana: P&L = 0 todo el día
+  //   - Lun-vie 00:00 - 10:29: P&L = 0 (mercado todavía no abrió hoy)
+  //   - Lun-vie 10:30 - 23:59: P&L calculado normal
+  // El reset a 00:00 del día hábil es lo que cambia el "día" desde la
+  // perspectiva del usuario — al apertura del mercado el contador
+  // empieza limpio contra el cierre de ayer.
   const dailyTotals = useMemo(() => {
     if (!fx || !positions) return { pnl: null, base: 0, hasAny: false };
-    if (!isWithinTradingDay()) {
+    if (!isTradingDayAndMarketOpened()) {
       return { pnl: 0, base: 0, hasAny: true, marketClosed: true };
     }
     let pnlInValuation = 0;
@@ -7310,11 +7332,14 @@ function computeDailyPnL(p, bondPrices, futurePrices, stockPrices, futureAdjLook
   // devolvemos 0 con flag marketClosed=true para que el caller pueda
   // renderizarlo en gris. Antes filtrábamos por horario operativo
   // (10:30-17:30) pero eso ocultaba el P&L HOY desde las 17:30 hasta la
-  // medianoche, cuando el usuario quiere ver cuánto ganó en el día.
-  // Ahora dejamos visible TODO el día calendario hábil; el P&L se resetea
-  // naturalmente cuando cambia el día y el cron mae-boletin inserta el
-  // cierre nuevo en daily_close_prices.
-  if (!isWithinTradingDay()) {
+  // Reset a 0 fuera del período "P&L HOY":
+  //   - Fin de semana: 0
+  //   - Lun-vie 00:00 - 10:29: 0 (mercado no abrió hoy todavía)
+  //   - Lun-vie 10:30 - 23:59: calculado normal
+  // El P&L HOY se mantiene visible post-cierre hasta medianoche para que
+  // el usuario vea cuánto ganó en el día, y resetea a 0 a las 00:00 del
+  // próximo día hábil sin esperar a que el mercado vuelva a abrir.
+  if (!isTradingDayAndMarketOpened()) {
     return { pnl: 0, pct: 0, marketClosed: true };
   }
 
@@ -11035,14 +11060,16 @@ function ConsolidatedRow({ group, bondPrices, futurePrices, stockPrices, futureA
   // datos para calcularlo (típico: caucion, fci, opciones), dailyPnl=null.
   // Si el mercado AR está cerrado en sentido amplio (sábado, domingo o
   // feriado nacional), devolvemos 0 con flag marketClosed=true para
-  // mostrarlo en gris. Antes filtrábamos por horario operativo (10:30-
-  // 17:30) pero eso ocultaba el P&L HOY toda la tarde después del cierre
-  // del mercado, cuando el usuario quiere ver cuánto ganó en el día.
-  // Ahora dejamos visible TODO el día calendario hábil; el P&L se
-  // resetea naturalmente a 0 cuando cambia el día y el cron mae-boletin
-  // inserta el cierre nuevo en daily_close_prices.
+  // Reset a 0 fuera del período "P&L HOY":
+  //   - Fin de semana: 0
+  //   - Lun-vie 00:00 - 10:29: 0 (mercado no abrió hoy todavía)
+  //   - Lun-vie 10:30 - 23:59: calculado normal
+  // El P&L HOY se mantiene visible post-cierre hasta medianoche, y se
+  // resetea a 0 a las 00:00 del próximo día hábil. Esto cierra el ciclo
+  // diario sin esperar a la apertura, evitando que de madrugada se vea
+  // el P&L del día anterior como si fuera "de hoy".
   const { dailyPnl, dailyPct, marketClosed } = useMemo(() => {
-    if (!isWithinTradingDay()) {
+    if (!isTradingDayAndMarketOpened()) {
       return { dailyPnl: 0, dailyPct: 0, marketClosed: true };
     }
     if (!group.operations || group.operations.length === 0) {
