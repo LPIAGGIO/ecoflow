@@ -1010,6 +1010,19 @@ function isActiveMarketWindow() {
   return getRefreshIntervalMs() === 15 * 60_000;
 }
 
+// Día hábil completo (lun-vie 00:00-23:59 ART). A diferencia de
+// isActiveMarketWindow (que solo es true en horario de operación
+// 10:30-17:30), esto cubre el día calendario entero, lo que permite
+// que "P&L HOY" se siga mostrando hasta medianoche y se resetee a 0
+// a las 00:00 del día siguiente.
+function isWithinTradingDay() {
+  const wd = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/Argentina/Buenos_Aires",
+    weekday: "short",
+  }).formatToParts(new Date()).find((p) => p.type === "weekday")?.value;
+  return !["Sat", "Sun"].includes(wd);
+}
+
 // Formatters
 const fmtARS = (n) =>
   n == null
@@ -3974,6 +3987,12 @@ function useBondPrices() {
   const [loading, setLoading] = useState(!cached);
   const [error, setError] = useState(null);
   const [refreshKey, setRefreshKey] = useState(0);
+  // Distinguir refresh manual (click "Actualizar") vs auto (setInterval).
+  // El manual muestra spinner; el auto refresca silenciosamente sin
+  // tocar el botón. Si no se hace esta distinción y el auto pone
+  // setLoading(true) cada 5s pero un fetch tarda 6s, el botón queda
+  // "Actualizando..." de manera permanente.
+  const manualRefreshRef = useRef(false);
 
   useEffect(() => {
     let mounted = true;
@@ -3988,9 +4007,11 @@ function useBondPrices() {
     }
 
     setError(null);
-    // Refresh manual: forzamos spinner para feedback visual aunque la
-    // respuesta sea instantánea.
-    if (refreshKey > 0) setLoading(true);
+    // Solo mostrar spinner si es refresh manual o primera carga sin cache.
+    // Los refreshes automáticos del setInterval pasan en background.
+    const wasManual = manualRefreshRef.current;
+    manualRefreshRef.current = false;
+    if (wasManual || (!cached && refreshKey === 0)) setLoading(true);
 
     (async () => {
       try {
@@ -4099,24 +4120,28 @@ function useBondPrices() {
         }
 
         // ── PASO 3: Supabase pisa todo (mae_intraday > mae_close) ─
-        // El merge en fetchSupabaseBondPrices ya garantiza un único
-        // entry por ticker con la mejor fuente disponible. Acá solo
-        // mergeamos: las claves que existen en supabaseMap pisan a
-        // BYMA/data912. Preservamos campos enriquecidos (maturityDate,
-        // daysToMaturity) que BYMA tiene y MAE no.
+        // Reglas:
+        //   - mae_intraday: pisa siempre (es el feed más fresh durante
+        //     horario operativo).
+        //   - mae_close: solo pisa si BYMA y data912 NO trajeron price.
+        //     Si BYMA o data912 ya tienen price actual, ese gana — son
+        //     más cercanos a lo que Cocos muestra (BYMA-aligned) y NO
+        //     dejan precios stale del cierre del día anterior. De
+        //     mae_close solo aprovechamos `previousClose` (cierre del
+        //     día hábil anterior) cuando BYMA/data912 no lo exponen.
         //
-        // Caso especial: previousClose. Cocos y otros brokers calculan
-        // P&L HOY contra el cierre de BYMA, no contra el cierre de MAE
-        // (MAE y BYMA son mercados distintos con cierres que difieren
-        // ~5-7 centavos en LECAPs). Para que el P&L HOY de Midas
-        // coincida con la pantalla de Cocos, si el entry previo (de
-        // BYMA o data912) traía un previousClose válido, lo preferimos
-        // sobre el de mae_close. data912 deriva su previousClose desde
-        // pct_change, que también es contra el cierre BYMA. changePct
-        // se recalcula consistente con el nuevo prev.
+        // Cocos calcula su P&L HOY contra el cierre BYMA, no contra el
+        // cierre MAE — son mercados distintos y los cierres difieren
+        // ~5-7 centavos en LECAPs. Para alinear: usamos previousClose
+        // de BYMA/data912 cuando esté disponible. changePct se recalcula
+        // consistente con el nuevo prev.
         for (const [ticker, supaEntry] of Object.entries(supabaseMap)) {
           const prior = map[ticker] || {};
+          const priorHasFreshPrice =
+            prior.price != null && prior.price > 0 && prior.source != null;
+          const supaIsClose = supaEntry.source === "mae_close";
 
+          // previousClose final: BYMA/data912 > mae_close.
           const priorPrev =
             prior.previousClose != null && prior.previousClose > 0
               ? Number(prior.previousClose)
@@ -4125,25 +4150,39 @@ function useBondPrices() {
             supaEntry.previousClose != null && supaEntry.previousClose > 0
               ? Number(supaEntry.previousClose)
               : null;
-          // Prev de BYMA/data912 gana cuando está disponible.
           const finalPrev = priorPrev != null ? priorPrev : maePrev;
 
-          const finalPrice = Number(supaEntry.price);
-          const finalChangePct =
-            finalPrev != null && finalPrev > 0 && finalPrice > 0
-              ? ((finalPrice - finalPrev) / finalPrev) * 100
-              : (supaEntry.changePct ?? prior.changePct ?? null);
-
-          map[ticker] = {
-            ...prior,
-            ...supaEntry,
-            previousClose: finalPrev,
-            changePct: finalChangePct,
-            // Si BYMA traía maturityDate/daysToMaturity, los conservamos
-            maturityDate: prior.maturityDate ?? supaEntry.maturityDate ?? null,
-            daysToMaturity:
-              prior.daysToMaturity ?? supaEntry.daysToMaturity ?? null,
-          };
+          if (supaIsClose && priorHasFreshPrice) {
+            // BYMA/data912 ya tienen price más representativo del día.
+            // Solo aportamos previousClose de mae_close si BYMA/data912
+            // no lo exponen.
+            const finalPrice = Number(prior.price);
+            const finalChangePct =
+              finalPrev != null && finalPrev > 0 && finalPrice > 0
+                ? ((finalPrice - finalPrev) / finalPrev) * 100
+                : (prior.changePct ?? null);
+            map[ticker] = {
+              ...prior,
+              previousClose: finalPrev,
+              changePct: finalChangePct,
+            };
+          } else {
+            // mae_intraday O no hay prior con price → supaEntry pisa.
+            const finalPrice = Number(supaEntry.price);
+            const finalChangePct =
+              finalPrev != null && finalPrev > 0 && finalPrice > 0
+                ? ((finalPrice - finalPrev) / finalPrev) * 100
+                : (supaEntry.changePct ?? prior.changePct ?? null);
+            map[ticker] = {
+              ...prior,
+              ...supaEntry,
+              previousClose: finalPrev,
+              changePct: finalChangePct,
+              maturityDate: prior.maturityDate ?? supaEntry.maturityDate ?? null,
+              daysToMaturity:
+                prior.daysToMaturity ?? supaEntry.daysToMaturity ?? null,
+            };
+          }
         }
 
         if (!mounted) return;
@@ -4172,7 +4211,10 @@ function useBondPrices() {
     return () => { mounted = false; };
   }, [refreshKey]);
 
-  const refresh = useCallback(() => setRefreshKey((k) => k + 1), []);
+  const refresh = useCallback(() => {
+    manualRefreshRef.current = true;
+    setRefreshKey((k) => k + 1);
+  }, []);
 
   // Auto-refresh casi tiempo real: cada BOND_PRICES_LIVE_MS dispara un
   // refresh, pero SOLO si el mercado AR está abierto (horario hábil
@@ -4182,6 +4224,7 @@ function useBondPrices() {
   useEffect(() => {
     const tick = () => {
       if (isActiveMarketWindow()) {
+        // NO seteamos manualRefreshRef.current → auto-refresh sin spinner
         setRefreshKey((k) => k + 1);
       }
     };
@@ -10870,12 +10913,16 @@ function ConsolidatedRow({ group, bondPrices, futurePrices, stockPrices, futureA
   // Para futuros usamos LA-SE; para bonos/acciones/CEDEARs usamos
   // pct_change (derivamos cierre anterior). Si ninguna op del grupo tiene
   // datos para calcularlo (típico: caucion, fci, opciones), dailyPnl=null.
-  // Si el mercado AR está cerrado (fin de semana, feriado o fuera de
-  // horario hábil), devolvemos 0 con flag marketClosed=true para
-  // mostrarlo en gris — el feed sigue devolviendo precios stale del
-  // último día hábil y eso inflaría el "P&L HOY" con datos viejos.
+  // Si el mercado AR está cerrado en sentido amplio (sábado, domingo o
+  // feriado nacional), devolvemos 0 con flag marketClosed=true para
+  // mostrarlo en gris. Antes filtrábamos por horario operativo (10:30-
+  // 17:30) pero eso ocultaba el P&L HOY toda la tarde después del cierre
+  // del mercado, cuando el usuario quiere ver cuánto ganó en el día.
+  // Ahora dejamos visible TODO el día calendario hábil; el P&L se
+  // resetea naturalmente a 0 cuando cambia el día y el cron mae-boletin
+  // inserta el cierre nuevo en daily_close_prices.
   const { dailyPnl, dailyPct, marketClosed } = useMemo(() => {
-    if (!isActiveMarketWindow()) {
+    if (!isWithinTradingDay()) {
       return { dailyPnl: 0, dailyPct: 0, marketClosed: true };
     }
     if (!group.operations || group.operations.length === 0) {
