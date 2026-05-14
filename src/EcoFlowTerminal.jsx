@@ -3792,12 +3792,30 @@ async function fetchSupabaseBondPrices() {
 
     if (closeErr) throw closeErr;
 
-    // Primera pasada: identificar tickers duales (solo desde segmentos spot).
+    // Primera pasada: identificar tickers cotizados "por 1 VN":
+    //   (a) Con sufijo /CI o /24hs en el feed (caso ideal: MAE marca
+    //       explícitamente la convención).
+    //   (b) Sin sufijo PERO en pesos ($) con precio < 10. Heurística
+    //       para bonos AR que ya no se publican con sufijo pero igual
+    //       cotizan por 1 VN (e.g. T30J6 hoy: aparece como "T30J6"
+    //       con precio 1.4086, nunca como "T30J6/24hs"). Si el ticker
+    //       cotizara por 100 VN, su precio rondaría 100-150, no < 10.
     for (const row of closeRows || []) {
       const seg = String(row.segmento_codigo || "");
       if (!SPOT_SEGMENTOS.has(seg)) continue;
-      const m = String(row.ticker || "").trim().match(suffixRegex);
-      if (m) dualTickers.add(m[1].toUpperCase());
+      const t = String(row.ticker || "").trim();
+      const m = t.match(suffixRegex);
+      if (m) {
+        dualTickers.add(m[1].toUpperCase());
+        continue;
+      }
+      // Sin sufijo: aplicar heurística solo a filas en pesos.
+      if (row.moneda_codigo === "$") {
+        const price = Number(row.precio_cierre_hoy);
+        if (price > 0 && price < 10) {
+          dualTickers.add(t.toUpperCase());
+        }
+      }
     }
 
     // Segunda pasada: agrupar por ticker normalizado.
