@@ -1938,6 +1938,32 @@ const INSTRUMENT_TYPE_KEYS = [
   "future", "option", "caucion", "fci",
 ];
 
+/* ─────────────── FCI_TICKER_MAP ───────────────
+ *
+ * Mapeo de los tickers de FCI que el usuario puede cargar a su par
+ * (fondo, categoria) tal como aparecen en la tabla fci_quotes de
+ * Supabase. El hook useFciPrices usa este mapa para saber qué fila
+ * de fci_quotes corresponde a cada ticker de una posición.
+ *
+ * Cobertura actual: los 3 fondos de Cocos Capital (todos Clase A),
+ * verificado al 2026-05-13. Para sumar un fondo nuevo, agregar acá
+ * el ticker con su fondo y categoria exactos de fci_quotes.
+ */
+const FCI_TICKER_MAP = {
+  COCORMA: {
+    fondo: "Cocos Rendimiento - Clase A",
+    categoria: "rentaMixta",
+  },
+  COCOAUSD: {
+    fondo: "Cocos Ahorro Dólares - Clase A",
+    categoria: "rentaFija",
+  },
+  COCOSPPA: {
+    fondo: "Cocos Pesos Plus - Clase A",
+    categoria: "retornoTotal",
+  },
+};
+
 /* ─────────────── Catálogos de tickers por tipo ───────────────
  *
  * Para evitar que el usuario tipee tickers con errores (T03J6 en lugar
@@ -4465,6 +4491,142 @@ function useStockPrices() {
   return { prices, loading, error, lastFetch, refresh };
 }
 
+/* ─────────────── Hook: useFciPrices ───────────────
+ *
+ * Lee los VCP (valor cuotaparte) de los FCI desde la tabla
+ * fci_quotes de Supabase, poblada por el worker fci-snapshot una
+ * vez por día hábil post-cierre (cron 20:30 ART).
+ *
+ * Para cada ticker de FCI_TICKER_MAP busca las dos últimas filas
+ * del fondo (hoy y día hábil anterior) y arma un objeto con el
+ * mismo shape que useBondPrices / useStockPrices:
+ *   { [ticker]: { price, previousClose, changePct } }
+ * de modo que resolvePositionPrice y computeDailyPnL lo consuman
+ * sin lógica especial.
+ *
+ * Cache: sessionStorage con TTL de 30 minutos. El VCP cambia una
+ * vez por día, así que no tiene sentido pegarle a Supabase seguido.
+ */
+
+const FCI_PRICES_CACHE_KEY = "ecoflow_fci_prices_v1";
+const FCI_PRICES_TTL_MS = 30 * 60 * 1000;
+
+function readFciPricesCache() {
+  try {
+    const raw = sessionStorage.getItem(FCI_PRICES_CACHE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (!parsed?.lastFetch || !parsed?.prices) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function writeFciPricesCache(payload) {
+  try {
+    sessionStorage.setItem(FCI_PRICES_CACHE_KEY, JSON.stringify(payload));
+  } catch {
+    /* sessionStorage puede fallar en private mode */
+  }
+}
+
+function useFciPrices() {
+  const cached = readFciPricesCache();
+  const [prices, setPrices] = useState(cached?.prices || {});
+  const [lastFetch, setLastFetch] = useState(cached?.lastFetch || null);
+  const [loading, setLoading] = useState(!cached);
+  const [error, setError] = useState(null);
+  const [refreshKey, setRefreshKey] = useState(0);
+
+  useEffect(() => {
+    let mounted = true;
+
+    // Si hay cache fresco y no es refresh manual, no pegamos a Supabase.
+    if (cached && refreshKey === 0) {
+      const age = Date.now() - new Date(cached.lastFetch).getTime();
+      if (age < FCI_PRICES_TTL_MS) {
+        setLoading(false);
+        return () => { mounted = false; };
+      }
+    }
+
+    setError(null);
+    if (!cached || refreshKey > 0) setLoading(true);
+
+    (async () => {
+      try {
+        // Una sola query: traemos las filas de los fondos que nos
+        // interesan, ordenadas por fecha descendente. Después en
+        // memoria nos quedamos con las dos últimas de cada fondo.
+        const fondos = Object.values(FCI_TICKER_MAP).map((m) => m.fondo);
+
+        const { data, error: qErr } = await supabase
+          .from("fci_quotes")
+          .select("fondo, categoria, vcp, fecha")
+          .in("fondo", fondos)
+          .order("fecha", { ascending: false });
+
+        if (qErr) throw qErr;
+
+        // Agrupamos las filas por fondo, preservando el orden (ya viene
+        // ordenado por fecha desc, así que la primera de cada fondo es
+        // la más reciente y la segunda es el día hábil anterior).
+        const byFondo = {};
+        for (const row of data || []) {
+          if (!byFondo[row.fondo]) byFondo[row.fondo] = [];
+          byFondo[row.fondo].push(row);
+        }
+
+        // Para cada ticker del mapa, armamos su entry de precio.
+        const map = {};
+        for (const [ticker, meta] of Object.entries(FCI_TICKER_MAP)) {
+          const rows = byFondo[meta.fondo];
+          if (!rows || rows.length === 0) continue;
+
+          const today = rows[0];
+          const prev = rows[1] || null;
+
+          const price = Number(today.vcp);
+          if (!Number.isFinite(price) || price <= 0) continue;
+
+          let previousClose = null;
+          let changePct = null;
+          if (prev) {
+            const prevVcp = Number(prev.vcp);
+            if (Number.isFinite(prevVcp) && prevVcp > 0) {
+              previousClose = prevVcp;
+              changePct = ((price - prevVcp) / prevVcp) * 100;
+            }
+          }
+
+          map[ticker] = { price, previousClose, changePct };
+        }
+
+        if (!mounted) return;
+        const nowIso = new Date().toISOString();
+        setPrices(map);
+        setLastFetch(nowIso);
+        setLoading(false);
+        writeFciPricesCache({ prices: map, lastFetch: nowIso });
+
+        console.info(
+          `[useFciPrices] ${Object.keys(map).length} FCI cargados`
+        );
+      } catch (e) {
+        if (!mounted) return;
+        setError(e.message || "Error cargando precios de FCI");
+        setLoading(false);
+      }
+    })();
+
+    return () => { mounted = false; };
+  }, [refreshKey]);
+
+  const refresh = useCallback(() => setRefreshKey((k) => k + 1), []);
+
+  return { prices, loading, error, lastFetch, refresh };
+}
 
 /* ─────────────── Hook: useFuturePrices ───────────────
  *
