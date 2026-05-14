@@ -3638,7 +3638,12 @@ function useDashboardFx() {
 // Bump version para invalidar caches sessionStorage viejos al deployar
 // el refactor de Supabase (Fase 3). Los caches v2 quedan ignorados.
 const BOND_PRICES_CACHE_KEY = "ecoflow_bond_prices_v3";
-const BOND_PRICES_TTL_MS = 5 * 60 * 1000; // 5 minutos
+// TTL bajo (5s) para casi tiempo real durante el horario de mercado. El
+// hook useBondPrices además dispara un setInterval cada BOND_PRICES_LIVE_MS
+// cuando el mercado está abierto para empujar los precios sin esperar a
+// que el cache caduque solo por consulta.
+const BOND_PRICES_TTL_MS = 5 * 1000;
+const BOND_PRICES_LIVE_MS = 5 * 1000;
 // Ventana en la que confiamos en intra-day de prices_cache. Si la fila
 // es más vieja, la ignoramos y caemos al cierre o a BYMA/data912.
 const SUPABASE_INTRADAY_FRESH_MS = 10 * 60 * 1000;
@@ -4168,6 +4173,21 @@ function useBondPrices() {
   }, [refreshKey]);
 
   const refresh = useCallback(() => setRefreshKey((k) => k + 1), []);
+
+  // Auto-refresh casi tiempo real: cada BOND_PRICES_LIVE_MS dispara un
+  // refresh, pero SOLO si el mercado AR está abierto (horario hábil
+  // 11-18 ART). Fuera de eso paramos polling para no machacar las APIs
+  // gratuitas (data912, BYMA Open Data) sin necesidad — los precios no
+  // van a cambiar.
+  useEffect(() => {
+    const tick = () => {
+      if (isActiveMarketWindow()) {
+        setRefreshKey((k) => k + 1);
+      }
+    };
+    const id = setInterval(tick, BOND_PRICES_LIVE_MS);
+    return () => clearInterval(id);
+  }, []);
 
   return { prices, loading, error, lastFetch, refresh };
 }
@@ -11072,7 +11092,19 @@ function ConsolidatedRow({ group, bondPrices, futurePrices, stockPrices, futureA
             resolvedForCell?.price != null ? (
               <div className="flex items-center justify-end gap-2">
                 <span className="eco-mono">
-                  {fmtNumber(resolvedForCell.price, { maxDecimals: 4, smartDecimals: true })}
+                  {fmtNumber(resolvedForCell.price, {
+                    maxDecimals: 4,
+                    // Bonos cotizan a 3 decimales en BYMA/Cocos (140.870,
+                    // 130.910). Forzamos minDecimals=3 para que Midas
+                    // muestre el mismo nivel de detalle.
+                    minDecimals:
+                      group.instrument_type === "bond_ars" ||
+                      group.instrument_type === "bond_usd" ||
+                      group.instrument_type === "on"
+                        ? 3
+                        : 0,
+                    smartDecimals: true,
+                  })}
                 </span>
                 {resolvedForCell.source === "close" && (
                   <span
@@ -12122,7 +12154,18 @@ function EditablePriceCell({ position, resolved, onSave }) {
       ) : (
         <div className="flex items-center gap-2">
           <span className="eco-mono">
-            {fmtNumber(resolved.price, { maxDecimals: 4, smartDecimals: true })}
+            {fmtNumber(resolved.price, {
+              maxDecimals: 4,
+              // Bonos cotizan a 3 decimales en BYMA/Cocos. minDecimals=3
+              // fuerza ese nivel de detalle para coincidir visualmente.
+              minDecimals:
+                position?.instrument_type === "bond_ars" ||
+                position?.instrument_type === "bond_usd" ||
+                position?.instrument_type === "on"
+                  ? 3
+                  : 0,
+              smartDecimals: true,
+            })}
           </span>
           {sourceBadge && (
             <span
