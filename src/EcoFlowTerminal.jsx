@@ -6152,13 +6152,14 @@ function TotalCard({ positions, fx, bondPrices, futurePrices, stockPrices, valua
   // posición por posición usando computeDailyPnL, que devuelve el P&L
   // en moneda de la posición. Después convertimos a la valuationCurrency.
   // Posiciones sin pct_change disponible se ignoran (no rompen el total).
-  // Si el mercado AR está cerrado (fin de semana, feriado o fuera de
-  // horario hábil), early return con marketClosed=true → render en gris.
-  // Sin este check, sumaríamos el P&L del último día hábil como si fuera
-  // "del día" y daría números engañosos durante el weekend.
+  // Si estamos fuera del día calendario hábil (sábado, domingo o feriado),
+  // early return con marketClosed=true → render en gris. Antes filtrábamos
+  // por horario operativo (10:30-17:30) pero eso ocultaba el P&L HOY toda
+  // la tarde-noche del mismo día hábil. Ahora cubrimos el día entero;
+  // el P&L se resetea naturalmente cuando cambia el día calendario.
   const dailyTotals = useMemo(() => {
     if (!fx || !positions) return { pnl: null, base: 0, hasAny: false };
-    if (!isActiveMarketWindow()) {
+    if (!isWithinTradingDay()) {
       return { pnl: 0, base: 0, hasAny: true, marketClosed: true };
     }
     let pnlInValuation = 0;
@@ -7263,14 +7264,15 @@ function computeDailyPnL(p, bondPrices, futurePrices, stockPrices, futureAdjLook
   const qty = Number(p.quantity) || 0;
   if (qty === 0) return null;
 
-  // Si el mercado AR está cerrado (sábado, domingo o fuera de 11-18 hs
-  // hábil), devolvemos 0 con flag marketClosed=true para que el caller
-  // pueda renderizarlo en gris. Sin este check, el cálculo
-  // (price - previousClose) o (current - lastSettle) muestra el delta
-  // del último día hábil como si fuera "P&L de hoy", lo cual confunde
-  // (típico: domingo viendo "+131.000 ARS" en un bono porque data912
-  // sigue devolviendo el precio del viernes y previousClose del jueves).
-  if (!isActiveMarketWindow()) {
+  // Si estamos fuera del día calendario hábil (sábado, domingo o feriado),
+  // devolvemos 0 con flag marketClosed=true para que el caller pueda
+  // renderizarlo en gris. Antes filtrábamos por horario operativo
+  // (10:30-17:30) pero eso ocultaba el P&L HOY desde las 17:30 hasta la
+  // medianoche, cuando el usuario quiere ver cuánto ganó en el día.
+  // Ahora dejamos visible TODO el día calendario hábil; el P&L se resetea
+  // naturalmente cuando cambia el día y el cron mae-boletin inserta el
+  // cierre nuevo en daily_close_prices.
+  if (!isWithinTradingDay()) {
     return { pnl: 0, pct: 0, marketClosed: true };
   }
 
