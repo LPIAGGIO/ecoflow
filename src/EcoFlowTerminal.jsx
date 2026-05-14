@@ -5966,7 +5966,7 @@ function fmtDateShort(iso) {
  * useBondPrices se encarga de fetchear y cachear esos precios.
  */
 
-function DashboardOverview({ positions, fxState, bondPricesState, futurePricesState, stockPricesState, cashState, futureAdjustmentsState, onIngresar, onRetirar }) {
+function DashboardOverview({ positions, fxState, bondPricesState, futurePricesState, stockPricesState, fciPricesState, cashState, futureAdjustmentsState, onIngresar, onRetirar }) {
   const { fx, loading: fxLoading, error: fxError, lastUpdated: fxLastUpdated, refresh: refreshFx } = fxState;
   const { prices: bondPrices, loading: pricesLoading, error: pricesError, lastFetch: pricesLastFetch, refresh: refreshBondPrices } = bondPricesState;
   // futurePricesState viene de PortfolioDashboard (un solo hook compartido
@@ -5975,6 +5975,9 @@ function DashboardOverview({ positions, fxState, bondPricesState, futurePricesSt
   // stockPricesState viene del nivel PortfolioDashboard (un único hook
   // useStockPrices compartido). Si no llega (caso edge), usamos {} vacío.
   const stockPrices = stockPricesState?.prices || {};
+  // fciPricesState viene del nivel PortfolioDashboard (un único hook
+  // useFciPrices compartido). Mismo criterio que stockPrices.
+  const fciPrices = fciPricesState?.prices || {};
   const balanceByCurrency = cashState?.balanceByCurrency || { "ARS": 0, "USD-MEP": 0, "USD-CCL": 0 };
   const movements = cashState?.movements || [];
 
@@ -6028,6 +6031,7 @@ function DashboardOverview({ positions, fxState, bondPricesState, futurePricesSt
           bondPrices={bondPrices}
           futurePrices={futurePrices}
           stockPrices={stockPrices}
+          fciPrices={fciPrices}
           valuationCurrency={valuationCurrency}
           balanceByCurrency={balanceByCurrency}
           futureAdjLookup={futureAdjLookup}
@@ -6039,6 +6043,8 @@ function DashboardOverview({ positions, fxState, bondPricesState, futurePricesSt
           fx={fx}
           bondPrices={bondPrices}
           futurePrices={futurePrices}
+          stockPrices={stockPrices}
+          fciPrices={fciPrices}
           valuationCurrency={valuationCurrency}
           balanceByCurrency={balanceByCurrency}
           futureAdjLookup={futureAdjLookup}
@@ -6371,13 +6377,13 @@ function ValuationToggle({ value, onChange }) {
 
 /* ─────────────── Card 1: Total de cartera ─────────────── */
 
-function TotalCard({ positions, fx, bondPrices, futurePrices, stockPrices, valuationCurrency, balanceByCurrency, futureAdjLookup, onIngresar, onRetirar }) {
+function TotalCard({ positions, fx, bondPrices, futurePrices, stockPrices, fciPrices, valuationCurrency, balanceByCurrency, futureAdjLookup, onIngresar, onRetirar }) {
   // V2: ahora usamos precios de mercado de data912 cuando están disponibles.
   // El P&L se calcula como market - cost. Si no hay precio actualizado para
   // alguna posición, esa cae al fallback "a costo" y aparece en pricesFromCost.
   const totals = useMemo(
-    () => computePortfolioTotals(positions, fx, valuationCurrency, bondPrices, futurePrices, futureAdjLookup),
-    [positions, fx, valuationCurrency, bondPrices, futurePrices, futureAdjLookup]
+    () => computePortfolioTotals(positions, fx, valuationCurrency, bondPrices, futurePrices, futureAdjLookup, stockPrices, fciPrices),
+    [positions, fx, valuationCurrency, bondPrices, futurePrices, futureAdjLookup, stockPrices, fciPrices]
   );
 
   // P&L del día (variación intra-día desde el cierre anterior). Se suma
@@ -6401,7 +6407,7 @@ function TotalCard({ positions, fx, bondPrices, futurePrices, stockPrices, valua
     let hasAny = false;
 
     for (const p of positions) {
-      const d = computeDailyPnL(p, bondPrices, futurePrices, stockPrices, futureAdjLookup);
+      const d = computeDailyPnL(p, bondPrices, futurePrices, stockPrices, futureAdjLookup, fciPrices);
       if (!d || d.pnl == null || !Number.isFinite(d.pnl)) continue;
 
       // Moneda de la posición (igual lógica que en computePortfolioTotals)
@@ -6413,7 +6419,7 @@ function TotalCard({ positions, fx, bondPrices, futurePrices, stockPrices, valua
 
       // Valor "ayer" de la posición (para % vs cierre anterior).
       // Aproximamos como valor_actual - pnl_diario en la misma moneda.
-      const valNow = positionValueAtMarket(p, bondPrices, futurePrices, stockPrices);
+      const valNow = positionValueAtMarket(p, bondPrices, futurePrices, stockPrices, fciPrices);
       if (valNow?.value != null) {
         const valNowConv = convertValue(valNow.value, cur, valuationCurrency, fx);
         if (valNowConv != null) {
@@ -6428,7 +6434,7 @@ function TotalCard({ positions, fx, bondPrices, futurePrices, stockPrices, valua
       base: prevValueInValuation,
       hasAny,
     };
-  }, [positions, bondPrices, futurePrices, stockPrices, fx, valuationCurrency, futureAdjLookup]);
+  }, [positions, bondPrices, futurePrices, stockPrices, fciPrices, fx, valuationCurrency, futureAdjLookup]);
 
   const showDaily = dailyTotals.hasAny && dailyTotals.pnl != null;
   const dailyIsPositive = showDaily && dailyTotals.pnl >= 0;
@@ -6716,10 +6722,10 @@ function TotalCard({ positions, fx, bondPrices, futurePrices, stockPrices, valua
  *     denominación.
  */
 
-function DistributionCard({ positions, fx, bondPrices, futurePrices, valuationCurrency, balanceByCurrency, futureAdjLookup, view, onViewChange }) {
+function DistributionCard({ positions, fx, bondPrices, futurePrices, stockPrices, fciPrices, valuationCurrency, balanceByCurrency, futureAdjLookup, view, onViewChange }) {
   // Vista "Instrumentos": donut con categorías + cash como una porción más.
   const instrumentSlices = useMemo(() => {
-    const groups = groupByCategory(positions, fx, valuationCurrency, bondPrices);
+    const groups = groupByCategory(positions, fx, valuationCurrency, bondPrices, fciPrices);
 
     // Cash agregado: convertimos cada moneda a la valuationCurrency y sumamos.
     let cashTotal = 0;
@@ -6747,12 +6753,12 @@ function DistributionCard({ positions, fx, bondPrices, futurePrices, valuationCu
         color: PROVIDER_COLORS[idx % PROVIDER_COLORS.length],
       }))
       .sort((a, b) => b.value - a.value);
-  }, [positions, fx, valuationCurrency, bondPrices, balanceByCurrency]);
+  }, [positions, fx, valuationCurrency, bondPrices, fciPrices, balanceByCurrency]);
 
   // Vista "Monedas": 4 renglones (Instrumentos + 3 cash por moneda).
   const monedaRows = useMemo(() => {
     // Renglón 1: Instrumentos = total a mercado en valuationCurrency
-    const totals = computePortfolioTotals(positions, fx, valuationCurrency, bondPrices, futurePrices, futureAdjLookup);
+    const totals = computePortfolioTotals(positions, fx, valuationCurrency, bondPrices, futurePrices, futureAdjLookup, stockPrices, fciPrices);
     const instrumentsTotal = totals.value ?? 0;
 
     // Renglones 2-4: cash por moneda (NO convertido — en su moneda nativa).
@@ -6780,7 +6786,7 @@ function DistributionCard({ positions, fx, bondPrices, futurePrices, valuationCu
     // diferencia exacta era el delta del precio del DLR multiplicado por
     // net_qty × multiplier. futureAdjLookup también se incluye porque define
     // cuánto del P&L del futuro es no acreditado (afecta el "value").
-  }, [positions, fx, valuationCurrency, bondPrices, futurePrices, futureAdjLookup, balanceByCurrency]);
+  }, [positions, fx, valuationCurrency, bondPrices, futurePrices, futureAdjLookup, stockPrices, fciPrices, balanceByCurrency]);
 
   return (
     <div style={cardBaseStyle()}>
@@ -7989,7 +7995,7 @@ function calcSuggestedFutureCommission(ticker, qty, price) {
  *
  * Retorna `{ value, source }` o null si no se puede valuar.
  */
-function positionValueAtMarket(p, bondPrices, futurePrices, stockPrices) {
+function positionValueAtMarket(p, bondPrices, futurePrices, stockPrices, fciPrices) {
   // Cauciones: devengamiento prorata lineal sobre el capital colocado.
   // El valor "a mercado" hoy es capital + intereses corridos. Eso se
   // refleja directamente en TOTAL CARTERA. Y el P&L de la caución
@@ -8006,7 +8012,7 @@ function positionValueAtMarket(p, bondPrices, futurePrices, stockPrices) {
   if (p.instrument_type === "future") {
     return positionFuturePnL(p, bondPrices, futurePrices);
   }
-  const resolved = resolvePositionPrice(p, bondPrices, futurePrices, stockPrices);
+  const resolved = resolvePositionPrice(p, bondPrices, futurePrices, stockPrices, fciPrices);
   if (!resolved) return null;
   return {
     value: applyPriceToPosition(p, resolved.price),
@@ -8036,7 +8042,7 @@ function positionValue(p) {
   return r ? r.value : null;
 }
 
-function computePortfolioTotals(positions, fx, valuationCurrency, bondPrices, futurePrices, futureAdjLookup) {
+function computePortfolioTotals(positions, fx, valuationCurrency, bondPrices, futurePrices, futureAdjLookup, stockPrices, fciPrices) {
   let totalMarket = 0;
   let totalCost = 0;
   let unvalued = 0;
@@ -8183,7 +8189,7 @@ function computePortfolioTotals(positions, fx, valuationCurrency, bondPrices, fu
 
   // ── (3) INDIVIDUALES: loop simple (caucion, fci, usd, crypto, option) ──
   for (const p of individualPositions) {
-    const marketRes = positionValueAtMarket(p, bondPrices, futurePrices);
+    const marketRes = positionValueAtMarket(p, bondPrices, futurePrices, stockPrices, fciPrices);
     const cost = positionValueAtCost(p);
 
     if (marketRes == null) {
@@ -8215,6 +8221,7 @@ function computePortfolioTotals(positions, fx, valuationCurrency, bondPrices, fu
       marketRes.source === "byma" ||
       marketRes.source === "data912" ||
       marketRes.source === "mae" ||
+      marketRes.source === "fci" ||
       marketRes.source === "market" || // legacy
       marketRes.source === "manual";
     if (fromMarket) {
@@ -8247,7 +8254,7 @@ function computePortfolioTotals(positions, fx, valuationCurrency, bondPrices, fu
 }
 
 
-function groupByCategory(positions, fx, valuationCurrency, bondPrices) {
+function groupByCategory(positions, fx, valuationCurrency, bondPrices, fciPrices) {
   const result = {};
 
   // Excluir futuros (su valor es solo P&L mark-to-market, no es wealth
@@ -8261,7 +8268,7 @@ function groupByCategory(positions, fx, valuationCurrency, bondPrices) {
   // arregla el bug de que una venta del mismo ticker SUMABA al donut
   // en lugar de restar (porque positionValueAtMarket no respeta
   // operation_type='sell').
-  const groups = consolidatePositions(nonFuture, bondPrices);
+  const groups = consolidatePositions(nonFuture, bondPrices, undefined, fciPrices);
   for (const g of groups) {
     if (g.valueAtMarket == null) continue;
     const v = convertValue(g.valueAtMarket, g.currency || "ARS", valuationCurrency, fx);
@@ -8661,7 +8668,7 @@ function getPositionMaturity(p) {
  * @param {Object} bondPrices  Mapa ticker → { price } de useBondPrices
  * @returns {Array} grupos consolidados, ordenados por valor de mercado desc
  */
-function consolidatePositions(positions, bondPrices, futurePrices) {
+function consolidatePositions(positions, bondPrices, futurePrices, fciPrices) {
   if (!positions?.length) return [];
 
   // Tipos donde NO consolidamos: cada operación queda individual.
@@ -8949,6 +8956,16 @@ function consolidatePositions(positions, bondPrices, futurePrices) {
           : entrySource === "mae_intraday" || entrySource === "mae_close"
             ? "mae"
             : "market";
+    } else if (
+      g.instrument_type === "fci" &&
+      fciPrices &&
+      fciPrices[g.ticker]?.price > 0
+    ) {
+      // FCI: VCP del hook useFciPrices (tabla fci_quotes de Supabase).
+      // ticker_isBondLike() NO cubre "fci", así que sin esta rama el FCI
+      // caería a `ppp` (costo) y nunca se valuaría al VCP.
+      currentPrice = fciPrices[g.ticker].price;
+      priceSource = "fci"; // badge "FCI"
     } else if (ppp != null) {
       currentPrice = ppp;
       priceSource = "cost";
@@ -9628,6 +9645,12 @@ function PortfolioDashboard({ onNavigate }) {
   // para calcular P&L diario sin snapshots históricos.
   const stockPricesState = useStockPrices();
 
+  // Precios de FCI (VCP) desde la tabla fci_quotes de Supabase. Mismo
+  // patrón/shape que useBondPrices y useStockPrices: lo levantamos acá
+  // para compartir una sola instancia entre DashboardOverview y
+  // ConsolidatedSection.
+  const fciPricesState = useFciPrices();
+
   // Tickers de futuros únicos en cartera para suscribirse a Primary API.
   // Los calculamos a este nivel (PortfolioDashboard) en vez de DashboardOverview
   // porque ConsolidatedSection también necesita los precios real-time.
@@ -9660,7 +9683,8 @@ function PortfolioDashboard({ onNavigate }) {
     fxState.refresh();
     bondPricesState.refresh();
     futurePricesState.refresh();
-  }, [fxState, bondPricesState, futurePricesState]);
+    fciPricesState.refresh();
+  }, [fxState, bondPricesState, futurePricesState, fciPricesState]);
   const anyLoading = fxState.loading || bondPricesState.loading || futurePricesState.loading;
 
   // ─────────────── Auto-refresh inteligente ───────────────
@@ -9892,6 +9916,7 @@ function PortfolioDashboard({ onNavigate }) {
             bondPricesState={bondPricesState}
             futurePricesState={futurePricesState}
             stockPricesState={stockPricesState}
+            fciPricesState={fciPricesState}
             cashState={cashState}
             futureAdjustmentsState={futureAdjustmentsState}
             onIngresar={() => setCashModalType("deposit")}
@@ -9905,6 +9930,7 @@ function PortfolioDashboard({ onNavigate }) {
             bondPrices={bondPricesState.prices}
             futurePrices={futurePricesState.prices}
             stockPrices={stockPricesState.prices}
+            fciPrices={fciPricesState.prices}
             futureAdjustmentsState={futureAdjustmentsState}
             filter={filter}
             setFilter={setFilter}
@@ -10676,6 +10702,7 @@ function ConsolidatedSection({
   bondPrices,
   futurePrices,
   stockPrices,
+  fciPrices,
   futureAdjustmentsState,
   filter,
   setFilter,
@@ -10691,8 +10718,8 @@ function ConsolidatedSection({
   // Después separamos en `open` y `closed` para que cada una vaya a su
   // propia sección.
   const allConsolidated = useMemo(
-    () => consolidatePositions(filteredPositions, bondPrices, futurePrices),
-    [filteredPositions, bondPrices, futurePrices]
+    () => consolidatePositions(filteredPositions, bondPrices, futurePrices, fciPrices),
+    [filteredPositions, bondPrices, futurePrices, fciPrices]
   );
 
   // Modal state para acreditación de ajustes futuros pendientes.
@@ -10884,6 +10911,7 @@ function ConsolidatedSection({
           bondPrices={bondPrices}
           futurePrices={futurePrices}
           stockPrices={stockPrices}
+          fciPrices={fciPrices}
           futureAdjLookup={futureAdjLookup}
           onEdit={onEdit}
           onDelete={onDelete}
@@ -10898,6 +10926,7 @@ function ConsolidatedSection({
           bondPrices={bondPrices}
           futurePrices={futurePrices}
           stockPrices={stockPrices}
+          fciPrices={fciPrices}
           futureAdjLookup={futureAdjLookup}
           onEdit={onEdit}
           onDelete={onDelete}
@@ -10918,7 +10947,7 @@ function ConsolidatedSection({
  * El P&L acá ya es REALIZADO (efectivo en tu comitente, no mark-to-market).
  */
 
-function ClosedPositionsSection({ closed, bondPrices, futurePrices, stockPrices, futureAdjLookup, onEdit, onDelete, onUpdatePrice }) {
+function ClosedPositionsSection({ closed, bondPrices, futurePrices, stockPrices, fciPrices, futureAdjLookup, onEdit, onDelete, onUpdatePrice }) {
   const [open, setOpen] = useState(false);
 
   // Sumamos el P&L total de las cerradas para mostrarlo en el header
@@ -10984,6 +11013,7 @@ function ClosedPositionsSection({ closed, bondPrices, futurePrices, stockPrices,
             bondPrices={bondPrices}
             futurePrices={futurePrices}
             stockPrices={stockPrices}
+            fciPrices={fciPrices}
             futureAdjLookup={futureAdjLookup}
             onEdit={onEdit}
             onDelete={onDelete}
@@ -11191,7 +11221,7 @@ function OperationsHistorySection({
  * Las acciones (editar, borrar, cambiar precio) operan sobre las ops
  * individuales y delegan al callback del padre.
  */
-function ConsolidatedTable({ consolidated, bondPrices, futurePrices, stockPrices, futureAdjLookup, onEdit, onDelete, onUpdatePrice, variant = "open" }) {
+function ConsolidatedTable({ consolidated, bondPrices, futurePrices, stockPrices, fciPrices, futureAdjLookup, onEdit, onDelete, onUpdatePrice, variant = "open" }) {
   const [expanded, setExpanded] = useState(new Set());
   const isClosed = variant === "closed";
 
@@ -11237,6 +11267,7 @@ function ConsolidatedTable({ consolidated, bondPrices, futurePrices, stockPrices
                 bondPrices={bondPrices}
                 futurePrices={futurePrices}
                 stockPrices={stockPrices}
+                fciPrices={fciPrices}
                 futureAdjLookup={futureAdjLookup}
                 expanded={expanded.has(g.groupKey)}
                 onToggle={() => toggle(g.groupKey)}
@@ -11254,7 +11285,7 @@ function ConsolidatedTable({ consolidated, bondPrices, futurePrices, stockPrices
 }
 
 
-function ConsolidatedRow({ group, bondPrices, futurePrices, stockPrices, futureAdjLookup, expanded, onToggle, onEdit, onDelete, onUpdatePrice, readOnlyPrice = false }) {
+function ConsolidatedRow({ group, bondPrices, futurePrices, stockPrices, fciPrices, futureAdjLookup, expanded, onToggle, onEdit, onDelete, onUpdatePrice, readOnlyPrice = false }) {
   const meta = INSTRUMENT_TYPES[group.instrument_type] || {};
   const TypeIcon = meta.icon || Activity;
   const typeColor = meta.color ? C.cat[meta.color] : C.muted;
@@ -11308,7 +11339,7 @@ function ConsolidatedRow({ group, bondPrices, futurePrices, stockPrices, futureA
         operation_type: "compra",
         entry_price: group.ppp != null ? group.ppp : group.operations[0]?.entry_price,
       };
-      const d = computeDailyPnL(sampleOp, bondPrices, futurePrices, stockPrices);
+      const d = computeDailyPnL(sampleOp, bondPrices, futurePrices, stockPrices, futureAdjLookup, fciPrices);
       if (!d) return { dailyPnl: null, dailyPct: null, marketClosed: false };
       return { dailyPnl: d.pnl, dailyPct: d.pct, marketClosed: false };
     }
@@ -11376,7 +11407,7 @@ function ConsolidatedRow({ group, bondPrices, futurePrices, stockPrices, futureA
       dailyPnl: diffPerUnit * netQty * multiplier,
       dailyPct: (diffPerUnit / settle) * 100,
     };
-  }, [group, bondPrices, futurePrices, stockPrices, futureAdjLookup]);
+  }, [group, bondPrices, futurePrices, stockPrices, fciPrices, futureAdjLookup]);
 
   const dailyColor = (dailyPnl == null || marketClosed) ? C.dim : dailyPnl >= 0 ? C.green : C.red;
   const dailySign = (dailyPnl == null || marketClosed) ? "" : dailyPnl >= 0 ? "+" : "";
@@ -12556,6 +12587,7 @@ function EditablePriceCell({ position, resolved, onSave }) {
     source === "byma"    ? { label: "byma",    color: C.accent, bg: C.accentSoft } :
     source === "data912" ? { label: "data912", color: C.accent, bg: C.accentSoft } :
     source === "mae"     ? { label: "mae",     color: C.green,  bg: "rgba(74,222,128,0.10)" } :
+    source === "fci"     ? { label: "fci",     color: C.green,  bg: "rgba(74,222,128,0.10)" } :
     source === "market"  ? { label: "data912", color: C.accent, bg: C.accentSoft } : // legacy fallback
     source === "close"   ? { label: "cierre",  color: C.green,  bg: "rgba(74,222,128,0.10)" } :
     null; // cost: no badge, solo "—"
