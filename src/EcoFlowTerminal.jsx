@@ -4178,12 +4178,14 @@ function useBondPrices() {
           // a las 22:30), `previousClose` (precio_cierre_ayer) ES el de
           // ayer.
           let maePrev = null;
+          let maeCloseIsRecent = false;
           if (supaIsClose) {
             if (supaEntry.tradeDate && supaEntry.tradeDate < todayAR) {
               maePrev =
                 supaEntry.price != null && supaEntry.price > 0
                   ? Number(supaEntry.price)
                   : null;
+              maeCloseIsRecent = true;
             } else {
               maePrev =
                 supaEntry.previousClose != null && supaEntry.previousClose > 0
@@ -4198,8 +4200,31 @@ function useBondPrices() {
                 : null;
           }
 
-          // Prioridad: BYMA/data912 prev (si distinto al price) > mae_close
-          const finalPrev = priorPrev != null ? priorPrev : maePrev;
+          // Prioridad: BYMA/data912 prev > mae_close. EXCEPCIÓN: si
+          // mae_close es del día anterior a hoy AR (cierre del día
+          // hábil más reciente disponible) Y prior.price está cerca
+          // del mae_close.price (mismo orden de magnitud, < 1% diff),
+          // entonces mae_close.price es probablemente el "cierre real
+          // de ayer" más actualizado que el prev de data912 (que puede
+          // estar laggeado). En ese caso preferimos mae_close.
+          //
+          // Esto cubre el caso "00:00-09:00 ART del día siguiente":
+          // mae_close ya tiene el cierre del día anterior cargado vía
+          // cron 22:30, pero data912 sigue trayendo el prev del día
+          // hábil de antes (no se actualizó aún post-cierre).
+          let finalPrev = priorPrev != null ? priorPrev : maePrev;
+          if (
+            maeCloseIsRecent &&
+            maePrev != null &&
+            priorPrev != null &&
+            prior.price != null &&
+            Math.abs(prior.price - maePrev) / prior.price < 0.01 &&
+            Math.abs(maePrev - priorPrev) / priorPrev > 0.001
+          ) {
+            // mae_close.price está cerca del current price y difiere
+            // del priorPrev → mae_close es más reciente, preferimos él.
+            finalPrev = maePrev;
+          }
 
           if (supaIsClose && priorHasFreshPrice) {
             // BYMA/data912 tienen price del día. Solo aprovechamos el
