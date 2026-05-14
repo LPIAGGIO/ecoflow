@@ -4263,9 +4263,15 @@ function useBondPrices() {
             finalPrev = maePrev;
           }
 
-          if (supaIsClose && priorHasFreshPrice) {
-            // BYMA/data912 tienen price del día. Solo aprovechamos el
-            // previousClose. price y demás campos siguen siendo del prior.
+          if (priorHasFreshPrice) {
+            // BYMA/data912 tienen price del día. Su cotización está
+            // alineada con lo que muestra Cocos/Matriz (ambos leen el
+            // feed BYMA), mientras que MAE es mercado interbancario y
+            // difiere ~2-5 centavos. Por eso, cuando hay price de
+            // BYMA/data912, ESE gana — incluso sobre mae_intraday.
+            // De MAE solo aprovechamos `previousClose` si BYMA/data912
+            // no exponen uno usable. price, source y changePct quedan
+            // del prior (BYMA/data912).
             const finalPrice = Number(prior.price);
             const finalChangePct =
               finalPrev != null && finalPrev > 0 && finalPrice > 0
@@ -4277,7 +4283,9 @@ function useBondPrices() {
               changePct: finalChangePct,
             };
           } else {
-            // mae_intraday O no hay prior con price → supaEntry pisa.
+            // Sin price de BYMA/data912 → MAE (intraday o close) es la
+            // única fuente disponible. Cubre tickers que data912/BYMA
+            // no exponen (algunos BONCAPs, ONs ilíquidas, etc.).
             const finalPrice = Number(supaEntry.price);
             const finalChangePct =
               finalPrev != null && finalPrev > 0 && finalPrice > 0
