@@ -4126,36 +4126,84 @@ function useBondPrices() {
         //   - mae_close: solo pisa si BYMA y data912 NO trajeron price.
         //     Si BYMA o data912 ya tienen price actual, ese gana — son
         //     más cercanos a lo que Cocos muestra (BYMA-aligned) y NO
-        //     dejan precios stale del cierre del día anterior. De
-        //     mae_close solo aprovechamos `previousClose` (cierre del
-        //     día hábil anterior) cuando BYMA/data912 no lo exponen.
+        //     dejan precios stale del cierre del día anterior.
         //
-        // Cocos calcula su P&L HOY contra el cierre BYMA, no contra el
-        // cierre MAE — son mercados distintos y los cierres difieren
-        // ~5-7 centavos en LECAPs. Para alinear: usamos previousClose
-        // de BYMA/data912 cuando esté disponible. changePct se recalcula
-        // consistente con el nuevo prev.
+        // previousClose para P&L HOY: es CRÍTICO que sea el cierre del
+        // día hábil anterior al día calendario actual. Fuentes posibles:
+        //   1) prior.previousClose (BYMA/data912) — si es distinto del
+        //      prior.price. Si son iguales (típico post-cierre cuando
+        //      BYMA "fija" el close al last_price), es inútil.
+        //   2) mae_close.price si su tradeDate < today AR — ese price
+        //      ES el cierre del día anterior (latest row del boletín
+        //      MAE, que se inserta a las 22:30 ART vía cron).
+        //   3) mae_close.previousClose como último fallback (cierre de
+        //      hace 2 días — solo si nada mejor está disponible).
+        //
+        // Cocos calcula su P&L HOY contra el cierre BYMA. Sería ideal
+        // alinear pero a veces solo tenemos cierre MAE — diff típica
+        // de ~5-7 centavos en LECAPs, manageable.
+        const todayAR = (() => {
+          const parts = new Intl.DateTimeFormat("en-CA", {
+            timeZone: "America/Argentina/Buenos_Aires",
+            year: "numeric",
+            month: "2-digit",
+            day: "2-digit",
+          }).formatToParts(new Date());
+          const y = parts.find((p) => p.type === "year")?.value;
+          const m = parts.find((p) => p.type === "month")?.value;
+          const d = parts.find((p) => p.type === "day")?.value;
+          return `${y}-${m}-${d}`;
+        })();
+
         for (const [ticker, supaEntry] of Object.entries(supabaseMap)) {
           const prior = map[ticker] || {};
           const priorHasFreshPrice =
             prior.price != null && prior.price > 0 && prior.source != null;
           const supaIsClose = supaEntry.source === "mae_close";
 
-          // previousClose final: BYMA/data912 > mae_close.
+          // Candidate prev desde prior (BYMA/data912): solo válido si
+          // existe Y es distinto del price (más que un epsilon). Cuando
+          // post-cierre BYMA fija previousClose=price, lo descartamos.
           const priorPrev =
-            prior.previousClose != null && prior.previousClose > 0
+            prior.previousClose != null &&
+            prior.previousClose > 0 &&
+            prior.price != null &&
+            Math.abs(Number(prior.previousClose) - Number(prior.price)) > 1e-6
               ? Number(prior.previousClose)
               : null;
-          const maePrev =
-            supaEntry.previousClose != null && supaEntry.previousClose > 0
-              ? Number(supaEntry.previousClose)
-              : null;
+
+          // Candidate prev desde mae_close: si la fila es del día
+          // anterior al de hoy AR, su `price` (precio_cierre_hoy) ES el
+          // cierre que queremos. Si la fila es de hoy AR (cron ya corrió
+          // a las 22:30), `previousClose` (precio_cierre_ayer) ES el de
+          // ayer.
+          let maePrev = null;
+          if (supaIsClose) {
+            if (supaEntry.tradeDate && supaEntry.tradeDate < todayAR) {
+              maePrev =
+                supaEntry.price != null && supaEntry.price > 0
+                  ? Number(supaEntry.price)
+                  : null;
+            } else {
+              maePrev =
+                supaEntry.previousClose != null && supaEntry.previousClose > 0
+                  ? Number(supaEntry.previousClose)
+                  : null;
+            }
+          } else {
+            // mae_intraday: previousClose ya viene calculado bien arriba
+            maePrev =
+              supaEntry.previousClose != null && supaEntry.previousClose > 0
+                ? Number(supaEntry.previousClose)
+                : null;
+          }
+
+          // Prioridad: BYMA/data912 prev (si distinto al price) > mae_close
           const finalPrev = priorPrev != null ? priorPrev : maePrev;
 
           if (supaIsClose && priorHasFreshPrice) {
-            // BYMA/data912 ya tienen price más representativo del día.
-            // Solo aportamos previousClose de mae_close si BYMA/data912
-            // no lo exponen.
+            // BYMA/data912 tienen price del día. Solo aprovechamos el
+            // previousClose. price y demás campos siguen siendo del prior.
             const finalPrice = Number(prior.price);
             const finalChangePct =
               finalPrev != null && finalPrev > 0 && finalPrice > 0
