@@ -7179,12 +7179,23 @@ function convertValue(amount, fromCurrency, toCurrency, fx) {
  *
  * @returns {{ price: number, source: 'primary'|'manual'|'byma'|'data912'|'market'|'cost' } | null}
  */
-function resolvePositionPrice(p, bondPrices, futurePrices, stockPrices) {
+
+
+function resolvePositionPrice(p, bondPrices, futurePrices, stockPrices, fciPrices) {
   const ticker = (p.ticker || "").trim().toUpperCase();
 
   // 1) Override manual del usuario — máxima prioridad.
   if (p.current_price != null) {
     return { price: Number(p.current_price), source: "manual" };
+  }
+
+  // 1b) FCI: VCP desde Supabase (hook useFciPrices). No tienen feed
+  //     intra-día, el VCP se publica una vez por día hábil post-cierre.
+  if (p.instrument_type === "fci" && fciPrices && ticker) {
+    const fp = fciPrices[ticker];
+    if (fp?.price != null && fp.price > 0) {
+      return { price: Number(fp.price), source: "fci" };
+    }
   }
 
   // 2) Para futuros, feed Primary (tiempo real).
@@ -7330,7 +7341,7 @@ function buildFutureAdjLookup(pendingAdjustments, confirmedAdjustments) {
  * o si la fuente no expone cierre anterior, retorna null → la UI debe
  * mostrar "—".
  */
-function computeDailyPnL(p, bondPrices, futurePrices, stockPrices, futureAdjLookup) {
+function computeDailyPnL(p, bondPrices, futurePrices, stockPrices, futureAdjLookup, fciPrices) {
   if (!p || !p.ticker) return null;
   const ticker = (p.ticker || "").trim().toUpperCase();
   const qty = Number(p.quantity) || 0;
@@ -7484,10 +7495,42 @@ function computeDailyPnL(p, bondPrices, futurePrices, stockPrices, futureAdjLook
     return null;
   }
 
-  // Otros tipos (caucion, fci, option, etc.): no tienen P&L diario por ahora.
+// ─── FCI ──────────────────────────────────────────────────
+  // VCP de hoy vs VCP del día hábil anterior (las dos últimas filas
+  // de fci_quotes). El VCP no tiene convención /100 ni multiplicador:
+  // valor = cuotapartes × VCP, así que el P&L diario es directo.
+  if (p.instrument_type === "fci" && fciPrices) {
+    const fp = fciPrices[ticker];
+    if (fp?.price > 0) {
+      let prev = fp.previousClose;
+      if (prev == null && fp.changePct != null) {
+        const denom = 1 + Number(fp.changePct) / 100;
+        if (denom > 0) prev = Number(fp.price) / denom;
+      }
+      if (prev != null && prev > 0) {
+        const diffPerUnit = fp.price - prev;
+        const sign = (p.operation_type === "sell") ? -1 : 1;
+        const pnl = sign * diffPerUnit * qty;
+        const pct = (diffPerUnit / prev) * 100;
+        return { pnl, pct };
+      }
+      // Sin previousClose: fallback a P&L total contra PPP, igual que
+      // bonos y acciones cuando el ticker no tiene cierre histórico.
+      const ppp = Number(p.entry_price);
+      if (ppp > 0) {
+        const diffPerUnit = fp.price - ppp;
+        const sign = (p.operation_type === "sell") ? -1 : 1;
+        const pnl = sign * diffPerUnit * qty;
+        const pct = (diffPerUnit / ppp) * 100;
+        return { pnl, pct };
+      }
+    }
+    return null;
+  }
+
+  // Otros tipos (caucion, option, etc.): no tienen P&L diario por ahora.
   return null;
 }
-
 /**
  * Convierte un precio (cada 100 VN para bonos, unitario para acciones) en el
  * VALOR TOTAL de la posición (precio × cantidad, ajustado por convención
