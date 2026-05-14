@@ -4200,29 +4200,28 @@ function useBondPrices() {
                 : null;
           }
 
-          // Prioridad: BYMA/data912 prev > mae_close. EXCEPCIÓN: si
-          // mae_close es del día anterior a hoy AR (cierre del día
-          // hábil más reciente disponible) Y prior.price está cerca
-          // del mae_close.price (mismo orden de magnitud, < 1% diff),
-          // entonces mae_close.price es probablemente el "cierre real
-          // de ayer" más actualizado que el prev de data912 (que puede
-          // estar laggeado). En ese caso preferimos mae_close.
+          // Prioridad simplificada:
+          //   1) Si mae_close tiene fila del día hábil anterior a hoy AR
+          //      (= cierre real más reciente disponible), usar su price
+          //      como previousClose. Esto es lo más confiable porque
+          //      mae-boletin corre 22:30 ART y carga el cierre del día
+          //      que termina.
+          //   2) Si no hay close reciente, usar priorPrev (BYMA/data912).
+          //   3) Como último fallback, usar maePrev "viejo" (precio_cierre
+          //      _ayer de la fila más reciente).
           //
-          // Esto cubre el caso "00:00-09:00 ART del día siguiente":
-          // mae_close ya tiene el cierre del día anterior cargado vía
-          // cron 22:30, pero data912 sigue trayendo el prev del día
-          // hábil de antes (no se actualizó aún post-cierre).
-          let finalPrev = priorPrev != null ? priorPrev : maePrev;
-          if (
-            maeCloseIsRecent &&
-            maePrev != null &&
-            priorPrev != null &&
-            prior.price != null &&
-            Math.abs(prior.price - maePrev) / prior.price < 0.01 &&
-            Math.abs(maePrev - priorPrev) / priorPrev > 0.001
-          ) {
-            // mae_close.price está cerca del current price y difiere
-            // del priorPrev → mae_close es más reciente, preferimos él.
+          // Antes intentábamos elegir entre priorPrev y maePrev con un
+          // threshold de diff, pero eso fallaba en el caso típico
+          // post-cambio-de-día: data912 aún reporta el prev de hace 2
+          // días (diff 0.04% vs el cierre real), por debajo del umbral
+          // que habíamos puesto. Esta versión es determinística: el
+          // boletín MAE manda cuando está disponible.
+          let finalPrev;
+          if (maeCloseIsRecent && maePrev != null) {
+            finalPrev = maePrev;
+          } else if (priorPrev != null) {
+            finalPrev = priorPrev;
+          } else {
             finalPrev = maePrev;
           }
 
