@@ -13713,7 +13713,16 @@ function AddPositionDrawer({ editingPosition, onClose, onSubmit }) {
     // auto-generamos CAUC-DDMMM-NND para que la posición tenga un label
     // legible en consolidación y reportes. Si tipeó algo, respetamos su
     // elección (típicamente para distinguir contrapartes: CAUC-COCOS-7D).
-    let finalTicker = form.ticker.trim().toUpperCase();
+    //
+    // Para FCI: NO uppercaseamos. El ticker es la clave compuesta
+    // "fondo|categoria" del catálogo (ej "Cocos Rendimiento - Clase A|
+    // rentaMixta"), y la RPC get_fci_prices la matchea case-sensitive
+    // contra fci_quotes — si uppercaseamos, no encuentra match y los FCI
+    // se quedan sin VCP / "Precio Actual" en —.
+    const trimmedTicker = form.ticker.trim();
+    let finalTicker = form.instrument_type === "fci"
+      ? trimmedTicker
+      : trimmedTicker.toUpperCase();
     if (form.instrument_type === "caucion" && !finalTicker) {
       finalTicker = generateCaucionTicker(form.entry_date, Number(form.term_days));
     }
