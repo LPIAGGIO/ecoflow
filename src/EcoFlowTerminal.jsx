@@ -8368,20 +8368,33 @@ function computePortfolioTotals(positions, fx, valuationCurrency, bondPrices, fu
     const marketRes = positionValueAtMarket(p, bondPrices, futurePrices, stockPrices, fciPrices);
     const cost = positionValueAtCost(p);
 
-    if (marketRes == null) {
+    // Si no hay precio de mercado, caemos a costo — la posición sigue
+    // siendo parte de la cartera y tiene que sumar al TOTAL, no quedarse
+    // "unvalued". consolidatePositions hace el mismo fallback (cuando
+    // fciPrices/bondPrices no tienen la clave, currentPrice = ppp y
+    // priceSource = "cost"), y sin esta rama acá el TOTAL del top card
+    // quedaba incoherente con los totales que ves en la tabla consolidada.
+    let positionValue, positionSource;
+    if (marketRes != null) {
+      positionValue = marketRes.value;
+      positionSource = marketRes.source;
+    } else if (cost != null) {
+      positionValue = cost;
+      positionSource = "cost";
+    } else {
       unvalued++;
       continue;
     }
 
-    const convertedMarket = convertValue(
-      marketRes.value, p.entry_currency || "ARS", valuationCurrency, fx
+    const convertedValue = convertValue(
+      positionValue, p.entry_currency || "ARS", valuationCurrency, fx
     );
-    if (convertedMarket == null) {
+    if (convertedValue == null) {
       unvalued++;
       continue;
     }
     valuedAny = true;
-    totalMarket += convertedMarket;
+    totalMarket += convertedValue;
 
     if (cost != null) {
       const convertedCost = convertValue(
@@ -8394,12 +8407,12 @@ function computePortfolioTotals(positions, fx, valuationCurrency, bondPrices, fu
     // (BYMA, data912, MAE, market legacy) o manual (override del usuario).
     // Solo "cost" cae a pricesFromCost.
     const fromMarket =
-      marketRes.source === "byma" ||
-      marketRes.source === "data912" ||
-      marketRes.source === "mae" ||
-      marketRes.source === "fci" ||
-      marketRes.source === "market" || // legacy
-      marketRes.source === "manual";
+      positionSource === "byma" ||
+      positionSource === "data912" ||
+      positionSource === "mae" ||
+      positionSource === "fci" ||
+      positionSource === "market" || // legacy
+      positionSource === "manual";
     if (fromMarket) {
       pricesFromMarket++;
     } else {
