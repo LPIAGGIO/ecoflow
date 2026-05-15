@@ -230,6 +230,56 @@ export default function EcoFlowTerminal() {
   const [open, setOpen] = useState({ bcra: false, mercado: false, analizadores: false, calculadoras: false, reportes: false });
   const [active, setActive] = useState("dashboard");
 
+  // Estado de brokers vinculados — alimenta el badge del engranaje y el
+  // banner global que invita a vincular IOL.
+  const { user: authUser } = useAuth();
+  const { data: linkedBrokers, loading: brokersLoading } = useLinkedBrokers(authUser?.id);
+  const hasIolLinked = linkedBrokers.some(
+    (b) => b.broker === "iol" && b.status === "active"
+  );
+  const hasAnyBroker = linkedBrokers.length > 0;
+  const hasBrokerError = linkedBrokers.some(
+    (b) => b.status === "error" || b.status === "expired"
+  );
+
+  // Banner de onboarding "Conectá IOL" — el usuario lo puede dismissear
+  // y queda guardado en localStorage para no insistir.
+  const [bannerDismissed, setBannerDismissed] = useState(() => {
+    try {
+      return localStorage.getItem("midas:iol-banner-dismissed") === "1";
+    } catch {
+      return false;
+    }
+  });
+  const dismissBanner = () => {
+    try {
+      localStorage.setItem("midas:iol-banner-dismissed", "1");
+    } catch {
+      // ignore quota / privacy errors
+    }
+    setBannerDismissed(true);
+  };
+  // Show solo si: auth resuelta, fetch terminó, no hay IOL, no dismisseó, no está
+  // ya en settings.
+  const showIolBanner =
+    !!authUser &&
+    !brokersLoading &&
+    !hasIolLinked &&
+    !bannerDismissed &&
+    active !== "settings";
+
+  // Mostrar badge en engranaje: punto rojo si algún broker está en error/expired,
+  // punto azul si no hay ningún broker vinculado todavía. Solo después de
+  // resolver auth + carga inicial.
+  const gearBadgeColor =
+    !authUser || brokersLoading
+      ? null
+      : hasBrokerError
+      ? C.red
+      : !hasAnyBroker
+      ? C.accent
+      : null;
+
   useEffect(() => {
     const t = setInterval(() => setNow(new Date()), 1000);
     return () => clearInterval(t);
@@ -585,8 +635,24 @@ export default function EcoFlowTerminal() {
               className="eco-icon-btn"
               aria-label="Configuración"
               onClick={() => setActive("settings")}
+              style={{ position: "relative" }}
             >
               <Settings size={15} strokeWidth={1.6} />
+              {gearBadgeColor && (
+                <span
+                  style={{
+                    position: "absolute",
+                    top: 8,
+                    right: 8,
+                    width: 6,
+                    height: 6,
+                    borderRadius: "50%",
+                    background: gearBadgeColor,
+                    boxShadow: `0 0 0 2px ${C.bg}`,
+                    pointerEvents: "none",
+                  }}
+                />
+              )}
             </button>
             <div
               className="px-4 flex items-center"
@@ -693,6 +759,12 @@ export default function EcoFlowTerminal() {
 
           {/* Router del workspace según item activo */}
           <div className="absolute inset-0 overflow-auto eco-scroll" style={{ paddingBottom: 26 }}>
+            {showIolBanner && (
+              <IOLConnectBanner
+                onConnect={() => setActive("settings")}
+                onDismiss={dismissBanner}
+              />
+            )}
             {active === "compara-dolar" ? (
               <ComparaDolarModule />
             ) : active === "carry-trade" ? (
@@ -1105,6 +1177,81 @@ function PortfolioIAModule({ onNavigate }) {
   }
 
   return <PortfolioDashboard onNavigate={onNavigate} />;
+}
+
+
+/* ─────────────── IOLConnectBanner ───────────────
+ *
+ * Banner persistente al tope del workspace que invita al usuario a
+ * vincular su cuenta IOL. Se renderiza desde EcoFlowTerminal solamente
+ * cuando:
+ *   - El usuario no tiene un broker `iol` con status active vinculado, Y
+ *   - No dismisseó el banner previamente (localStorage flag), Y
+ *   - No está en la pantalla settings (donde la info ya está disponible).
+ *
+ * Click en "Conectar" lleva directo a la pantalla de Cuentas vinculadas.
+ * Click en la X lo dismiseasa para siempre (hasta limpiar localStorage).
+ */
+function IOLConnectBanner({ onConnect, onDismiss }) {
+  return (
+    <div
+      style={{
+        background: C.accentSoft,
+        borderBottom: `1px solid ${C.accentBorder}`,
+        padding: "10px 20px",
+        display: "flex",
+        alignItems: "center",
+        gap: 12,
+      }}
+    >
+      <Info size={15} color={C.accent} strokeWidth={1.6} style={{ flexShrink: 0 }} />
+      <div style={{ flex: 1, fontSize: 12, color: C.text, lineHeight: 1.4 }}>
+        <strong style={{ fontWeight: 600 }}>Conectá tu cuenta IOL</strong>
+        <span style={{ color: C.muted }}>
+          {" "}
+          para tener cotizaciones en tiempo real, sincronización automática y bots de
+          trading.
+        </span>
+      </div>
+      <button
+        onClick={onConnect}
+        style={{
+          background: C.accent,
+          color: C.bg,
+          border: "none",
+          borderRadius: 3,
+          padding: "5px 14px",
+          fontSize: 11,
+          letterSpacing: "0.04em",
+          fontWeight: 500,
+          cursor: "pointer",
+          flexShrink: 0,
+        }}
+      >
+        Conectar →
+      </button>
+      <button
+        onClick={onDismiss}
+        aria-label="Dismiss banner"
+        style={{
+          background: "transparent",
+          border: "none",
+          color: C.muted,
+          cursor: "pointer",
+          padding: 4,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          flexShrink: 0,
+          transition: "color 0.15s",
+        }}
+        onMouseEnter={(e) => (e.currentTarget.style.color = C.text)}
+        onMouseLeave={(e) => (e.currentTarget.style.color = C.muted)}
+      >
+        <X size={14} strokeWidth={1.6} />
+      </button>
+    </div>
+  );
 }
 
 
@@ -20201,3 +20348,6 @@ function formatDate(iso) {
   const d = new Date(iso + "T00:00:00");
   return d.toLocaleDateString("es-AR", { day: "2-digit", month: "short", year: "2-digit" }).replace(/\./g, "");
 }
+
+
+
