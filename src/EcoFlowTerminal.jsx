@@ -4544,7 +4544,7 @@ function useStockPrices() {
  * nuevo por día), así que el cache es agresivo.
  */
 
-const FCI_CATALOG_CACHE_KEY = "ecoflow_fci_catalog_v1";
+const FCI_CATALOG_CACHE_KEY = "ecoflow_fci_catalog_v2"; // v2: con paginación (v1 cacheaba un catálogo truncado a 1000 filas)
 
 // Cache a nivel módulo (sobrevive re-mounts del drawer de alta).
 let _moduleFciCatalogCache = null;
@@ -4578,22 +4578,42 @@ function useFciCatalog() {
     let mounted = true;
     (async () => {
       try {
-        // .range generoso: el filtro de "activos" de la vista ya recorta
-        // el universo, pero el default de Supabase es 1000 filas y los FCI
-        // activos pueden superarlo. 5000 cubre con margen.
-        const { data, error: qErr } = await supabase
-          .from("fci_catalog_activos")
-          .select("fondo, categoria, clave, grupo, ultima_fecha")
-          .order("fondo", { ascending: true })
-          .range(0, 4999);
+        // PostgREST corta en 1000 filas por request aunque pidas un .range
+        // más grande — el .range NO sube ese techo, solo pagina dentro de
+        // él (mismo tema documentado en useInstrumentCatalog). El universo
+        // de FCI activos supera las 1000 filas, así que hay que paginar
+        // hasta agotar; si no, el catálogo se corta a mitad del abecedario
+        // y faltan fondos (p. ej. medio Cocos: Medalla, Pesos Plus,
+        // Rendimiento...). Ordenamos por `clave` (única) para que la
+        // paginación sea estable entre páginas.
+        const PAGE_SIZE = 1000;
+        let allRows = [];
+        let from = 0;
 
-        if (qErr) throw qErr;
+        while (true) {
+          const { data: page, error: qErr } = await supabase
+            .from("fci_catalog_activos")
+            .select("fondo, categoria, clave, grupo, ultima_fecha")
+            .order("clave", { ascending: true })
+            .range(from, from + PAGE_SIZE - 1);
+
+          if (qErr) throw qErr;
+          if (!page || page.length === 0) break;
+
+          allRows = allRows.concat(page);
+          if (page.length < PAGE_SIZE) break;
+          from += PAGE_SIZE;
+
+          // Safety cap: el universo de FCI no se acerca ni de lejos a esto;
+          // es solo para no colgar la app si algo sale mal.
+          if (allRows.length >= 20000) break;
+        }
+
         if (!mounted) return;
 
-        const rows = data || [];
-        _moduleFciCatalogCache = rows;
-        writeFciCatalogCache(rows);
-        setCatalog(rows);
+        _moduleFciCatalogCache = allRows;
+        writeFciCatalogCache(allRows);
+        setCatalog(allRows);
         setLoading(false);
       } catch (e) {
         if (!mounted) return;
