@@ -3206,7 +3206,38 @@ function getTickerOptions(instrumentType, currentTicker, catalog) {
     return { mode: "select", groups };
   }
 
-  // Resto (caucion, option, fci): input libre por ahora.
+  // ─── FCI: lista controlada desde FCI_TICKER_MAP ──────────────────────
+  // Los FCI no tienen ticker oficial de mercado: el usuario carga el que
+  // usa su broker. Si lo tipea mal, el (fondo, categoria) no matchea en
+  // fci_quotes y la posición queda valuada a costo SIN error visible. Por
+  // eso ofrecemos un desplegable con los fondos mapeados en FCI_TICKER_MAP.
+  // La lista es chica (los 3 de Cocos hoy); para sumar fondos se agregan
+  // entradas a FCI_TICKER_MAP — esta función no se toca.
+  if (instrumentType === "fci") {
+    const opts = Object.entries(FCI_TICKER_MAP)
+      .map(([ticker, meta]) => ({
+        value: ticker,
+        label: `${ticker} — ${meta.fondo}`,
+      }))
+      .sort((a, b) => a.label.localeCompare(b.label));
+
+    // Si se edita una posición vieja con un ticker FCI que no está en el
+    // mapa, lo agregamos al final para no romper la edición.
+    if (
+      currentTicker &&
+      currentTicker.trim() &&
+      !opts.some((o) => o.value === currentTicker.trim().toUpperCase())
+    ) {
+      opts.push({
+        value: currentTicker,
+        label: `${currentTicker} — (cargado manualmente)`,
+      });
+    }
+
+    return { mode: "select", options: opts };
+  }
+
+  // Resto (caucion, option): input libre por ahora.
   return { mode: "input", options: [] };
 }
 
