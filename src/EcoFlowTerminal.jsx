@@ -581,7 +581,11 @@ export default function EcoFlowTerminal() {
             <button className="eco-icon-btn" aria-label="Notificaciones">
               <Bell size={15} strokeWidth={1.6} />
             </button>
-            <button className="eco-icon-btn" aria-label="Configuración">
+            <button
+              className="eco-icon-btn"
+              aria-label="Configuración"
+              onClick={() => setActive("settings")}
+            >
               <Settings size={15} strokeWidth={1.6} />
             </button>
             <div
@@ -699,6 +703,8 @@ export default function EcoFlowTerminal() {
               <PortfolioIAModule onNavigate={setActive} />
             ) : active === "libro-operaciones" ? (
               <LibroOperacionesModule />
+            ) : active === "settings" ? (
+              <SettingsModule onNavigate={setActive} />
             ) : (
               <EmptyWorkspace key={active} active={active} />
             )}
@@ -1099,6 +1105,484 @@ function PortfolioIAModule({ onNavigate }) {
   }
 
   return <PortfolioDashboard onNavigate={onNavigate} />;
+}
+
+
+/* ─────────────── SettingsModule ───────────────
+ *
+ * Pantalla "Cuentas y configuración" — accedida desde el icono de
+ * engranaje en el header del topbar.
+ *
+ * Tabs:
+ *   - Cuentas vinculadas: lista de brokers conectados (IOL via API, Cocos
+ *     manual, ECO manual, etc.), con status, count de operaciones y acciones.
+ *     Botón "Agregar broker" (selector próximamente).
+ *   - Uso de API: widget de cupo IOL — calls_made / calls_limit, costo
+ *     acumulado por extras, toggle de uso adicional. (Placeholder mientras
+ *     no haya broker API vinculado.)
+ *   - Actividad: log de las últimas calls a API (audit trail). (Placeholder
+ *     hasta que haya activity registrada.)
+ *
+ * Data sources:
+ *   - useLinkedBrokers(userId)        → linked_brokers
+ *   - usePositionsBrokerStats(userId) → posiciones agrupadas por broker
+ *
+ * Catálogo de brokers soportados (estático en frontend; el backend
+ * acepta cualquier string en positions.broker / linked_brokers.broker).
+ */
+
+const BROKER_CATALOG = {
+  iol:    { id: "iol",    label: "InvertirOnline (IOL)", short: "IOL",  type: "api",    color: "#FFD400" },
+  cocos:  { id: "cocos",  label: "Cocos Capital",        short: "COC",  type: "manual", color: "#7C3AED" },
+  eco:    { id: "eco",    label: "ECO Valores",          short: "ECO",  type: "manual", color: "#10B981" },
+  manual: { id: "manual", label: "Otro / Manual",        short: "MAN",  type: "manual", color: "#94A3B8" },
+};
+
+function useLinkedBrokers(userId) {
+  const [data, setData] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+
+  useEffect(() => {
+    if (!userId) {
+      setLoading(false);
+      return;
+    }
+    let cancelled = false;
+    setLoading(true);
+    setError(null);
+    supabase
+      .from("linked_brokers")
+      .select(
+        "id, broker, label, status, status_message, vault_secret_name, bot_enabled, bot_extra_calls_allowed, last_sync_at, last_sync_status, created_at, updated_at"
+      )
+      .eq("user_id", userId)
+      .order("created_at", { ascending: true })
+      .then(({ data: rows, error: err }) => {
+        if (cancelled) return;
+        if (err) {
+          setError(err.message);
+        } else {
+          setData(rows || []);
+        }
+        setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [userId]);
+
+  return { data, loading, error };
+}
+
+function usePositionsBrokerStats(userId) {
+  const [data, setData] = useState({});
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    if (!userId) {
+      setLoading(false);
+      return;
+    }
+    let cancelled = false;
+    supabase
+      .from("positions")
+      .select("broker")
+      .eq("user_id", userId)
+      .then(({ data: rows, error: err }) => {
+        if (cancelled) return;
+        if (!err && rows) {
+          const counts = {};
+          rows.forEach((r) => {
+            const b = r.broker || "manual";
+            counts[b] = (counts[b] || 0) + 1;
+          });
+          setData(counts);
+        }
+        setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [userId]);
+
+  return { data, loading };
+}
+
+function SettingsModule({ onNavigate }) {
+  const { user, loading } = useAuth();
+
+  if (loading) {
+    return (
+      <div className="absolute inset-0 flex items-center justify-center">
+        <Loader2 size={28} color={C.muted} className="eco-spin" strokeWidth={1.5} />
+      </div>
+    );
+  }
+
+  if (!user) {
+    return <PortfolioAuthWall />;
+  }
+
+  return <SettingsDashboard userId={user.id} />;
+}
+
+function SettingsDashboard({ userId }) {
+  const [tab, setTab] = useState("brokers");
+  const { data: brokers, loading: brokersLoading } = useLinkedBrokers(userId);
+  const { data: stats } = usePositionsBrokerStats(userId);
+
+  return (
+    <div style={{ padding: "24px 32px", maxWidth: 1200, margin: "0 auto" }}>
+      {/* Header */}
+      <div style={{ marginBottom: 24 }}>
+        <h1 style={{ fontSize: 22, fontWeight: 600, color: C.text, letterSpacing: "-0.01em", margin: 0 }}>
+          Cuentas y configuración
+        </h1>
+        <p style={{ fontSize: 12, color: C.muted, marginTop: 6, letterSpacing: "0.04em", margin: "6px 0 0 0" }}>
+          Gestioná tus brokers vinculados, el cupo de API y la actividad reciente.
+        </p>
+      </div>
+
+      {/* Tabs */}
+      <div className="flex" style={{ borderBottom: `1px solid ${C.border}`, marginBottom: 24 }}>
+        {[
+          { id: "brokers", label: "Cuentas vinculadas" },
+          { id: "usage", label: "Uso de API" },
+          { id: "activity", label: "Actividad" },
+        ].map((t) => {
+          const isActive = tab === t.id;
+          return (
+            <button
+              key={t.id}
+              onClick={() => setTab(t.id)}
+              style={{
+                padding: "10px 16px",
+                fontSize: 11,
+                letterSpacing: "0.14em",
+                textTransform: "uppercase",
+                fontWeight: 500,
+                color: isActive ? C.text : C.muted,
+                borderBottom: isActive ? `2px solid ${C.accent}` : "2px solid transparent",
+                background: "transparent",
+                border: "none",
+                borderBottomWidth: 2,
+                borderBottomStyle: "solid",
+                borderBottomColor: isActive ? C.accent : "transparent",
+                marginBottom: -1,
+                cursor: "pointer",
+                transition: "color 0.15s",
+              }}
+              onMouseEnter={(e) => {
+                if (!isActive) e.currentTarget.style.color = C.text;
+              }}
+              onMouseLeave={(e) => {
+                if (!isActive) e.currentTarget.style.color = C.muted;
+              }}
+            >
+              {t.label}
+            </button>
+          );
+        })}
+      </div>
+
+      {/* Tab content */}
+      {tab === "brokers" && (
+        <BrokersTab brokers={brokers} loading={brokersLoading} stats={stats} userId={userId} />
+      )}
+      {tab === "usage" && <UsagePlaceholder />}
+      {tab === "activity" && <ActivityPlaceholder />}
+    </div>
+  );
+}
+
+function BrokersTab({ brokers, loading, stats, userId }) {
+  // Merge: si hay positions con un broker pero todavía no hay row en
+  // linked_brokers, lo mostramos igual como "detectado" para que el user
+  // entienda que la app ya conoce ese broker (los manuales pueden no tener
+  // row hasta que el usuario los formalice).
+  const allBrokerIds = new Set([
+    ...Object.keys(stats || {}),
+    ...brokers.map((b) => b.broker),
+  ]);
+  // Aseguramos que IOL siempre aparezca aunque no tenga ni positions ni linked row,
+  // así el usuario ve la opción de vincularlo.
+  allBrokerIds.add("iol");
+
+  const items = Array.from(allBrokerIds).map((bid) => {
+    const linked = brokers.find((b) => b.broker === bid);
+    const meta = BROKER_CATALOG[bid] || BROKER_CATALOG.manual;
+    const positionCount = stats[bid] || 0;
+    return { id: bid, meta, linked, positionCount };
+  });
+
+  // Orden: API primero, después los que tienen más positions, después el resto.
+  items.sort((a, b) => {
+    if (a.meta.type === "api" && b.meta.type !== "api") return -1;
+    if (b.meta.type === "api" && a.meta.type !== "api") return 1;
+    return b.positionCount - a.positionCount;
+  });
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center" style={{ padding: "48px 0" }}>
+        <Loader2 size={24} color={C.muted} className="eco-spin" strokeWidth={1.5} />
+      </div>
+    );
+  }
+
+  const hasIolLinked = brokers.some((b) => b.broker === "iol");
+
+  return (
+    <div>
+      {/* Banner explicativo cuando IOL no está vinculado */}
+      {!hasIolLinked && (
+        <div
+          className="flex items-start gap-3"
+          style={{
+            background: C.accentSoft,
+            border: `1px solid ${C.accentBorder}`,
+            borderRadius: 4,
+            padding: "12px 16px",
+            marginBottom: 20,
+          }}
+        >
+          <Info size={16} color={C.accent} strokeWidth={1.5} style={{ flexShrink: 0, marginTop: 2 }} />
+          <div style={{ fontSize: 12, color: C.text, lineHeight: 1.55 }}>
+            <strong style={{ fontWeight: 600 }}>Conectá tu cuenta IOL</strong> para tener
+            cotizaciones en tiempo real, sincronización automática de tu cartera, y la
+            posibilidad de operar con bots. El plan de IOL incluye 25.000 llamadas a la
+            API por mes sin costo.
+          </div>
+        </div>
+      )}
+
+      {/* Lista de brokers */}
+      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+        {items.map((item) => (
+          <BrokerCard key={item.id} {...item} userId={userId} />
+        ))}
+      </div>
+
+      {/* Botón agregar broker */}
+      <div style={{ marginTop: 16 }}>
+        <button
+          onClick={() =>
+            alert(
+              "Selector de broker manual — próximamente.\n\nPodrás registrar otros brokers que opers manualmente (por ej. Balanz, Bull Market, etc.) para que tus positions queden taggeadas correctamente."
+            )
+          }
+          className="flex items-center"
+          style={{
+            background: "transparent",
+            border: `1px dashed ${C.borderStrong}`,
+            borderRadius: 4,
+            color: C.muted,
+            fontSize: 12,
+            letterSpacing: "0.04em",
+            padding: "8px 14px",
+            gap: 8,
+            cursor: "pointer",
+            transition: "color 0.15s, border-color 0.15s",
+          }}
+          onMouseEnter={(e) => {
+            e.currentTarget.style.color = C.text;
+            e.currentTarget.style.borderColor = C.accentBorder;
+          }}
+          onMouseLeave={(e) => {
+            e.currentTarget.style.color = C.muted;
+            e.currentTarget.style.borderColor = C.borderStrong;
+          }}
+        >
+          <Plus size={14} strokeWidth={1.6} />
+          Agregar broker manual
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function BrokerCard({ id, meta, linked, positionCount, userId }) {
+  const isApi = meta.type === "api";
+  const isConnected = !!linked && linked.status === "active";
+  const hasError = linked && linked.status === "error";
+  const isDetected = !linked && positionCount > 0;
+
+  return (
+    <div
+      className="flex items-center"
+      style={{
+        background: C.panel,
+        border: `1px solid ${C.border}`,
+        borderRadius: 4,
+        padding: "12px 16px",
+        gap: 16,
+      }}
+    >
+      {/* Logo placeholder con la inicial del broker */}
+      <div
+        style={{
+          width: 36,
+          height: 36,
+          borderRadius: 4,
+          background: `${meta.color}22`,
+          border: `1px solid ${meta.color}44`,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          flexShrink: 0,
+        }}
+      >
+        <span style={{ color: meta.color, fontWeight: 700, fontSize: 11, letterSpacing: "0.06em" }}>
+          {meta.short}
+        </span>
+      </div>
+
+      {/* Info principal */}
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div className="flex items-center" style={{ gap: 8 }}>
+          <div style={{ fontSize: 13, fontWeight: 500, color: C.text }}>{meta.label}</div>
+          <span
+            style={{
+              fontSize: 9,
+              letterSpacing: "0.14em",
+              textTransform: "uppercase",
+              color: isApi ? C.accent : C.dim,
+              border: `1px solid ${isApi ? C.accentBorder : C.border}`,
+              borderRadius: 2,
+              padding: "1px 6px",
+            }}
+          >
+            {isApi ? "API" : "Manual"}
+          </span>
+        </div>
+        <div style={{ fontSize: 11, color: C.muted, marginTop: 3 }}>
+          {positionCount > 0
+            ? `${positionCount} ${positionCount === 1 ? "operación" : "operaciones"} cargada${
+                positionCount === 1 ? "" : "s"
+              }`
+            : "Sin operaciones cargadas"}
+          {linked && linked.last_sync_at && (
+            <> · Último sync: {new Date(linked.last_sync_at).toLocaleString("es-AR")}</>
+          )}
+        </div>
+        {hasError && linked.status_message && (
+          <div style={{ fontSize: 11, color: C.red, marginTop: 4 }}>⚠ {linked.status_message}</div>
+        )}
+      </div>
+
+      {/* Status badge + acción */}
+      <div className="flex items-center" style={{ gap: 12, flexShrink: 0 }}>
+        {isConnected && (
+          <span
+            className="flex items-center"
+            style={{
+              fontSize: 10,
+              letterSpacing: "0.12em",
+              textTransform: "uppercase",
+              color: C.green,
+              gap: 6,
+            }}
+          >
+            <span style={{ width: 6, height: 6, borderRadius: "50%", background: C.green }} />
+            Conectado
+          </span>
+        )}
+        {hasError && (
+          <span
+            className="flex items-center"
+            style={{
+              fontSize: 10,
+              letterSpacing: "0.12em",
+              textTransform: "uppercase",
+              color: C.red,
+              gap: 6,
+            }}
+          >
+            <span style={{ width: 6, height: 6, borderRadius: "50%", background: C.red }} />
+            Error
+          </span>
+        )}
+        {isDetected && (
+          <span
+            style={{
+              fontSize: 10,
+              color: C.dim,
+              letterSpacing: "0.12em",
+              textTransform: "uppercase",
+            }}
+          >
+            Detectado
+          </span>
+        )}
+        {!linked && isApi && (
+          <button
+            onClick={() =>
+              alert(
+                "Vincular IOL — próximamente.\n\nVa a abrir un modal con username/password, va a pegarle a /token, guardar el refresh_token en Supabase Vault, y agregarte la row en linked_brokers para que arranque la sincronización."
+              )
+            }
+            style={{
+              fontSize: 11,
+              letterSpacing: "0.04em",
+              background: C.accent,
+              color: C.bg,
+              border: "none",
+              borderRadius: 3,
+              fontWeight: 500,
+              cursor: "pointer",
+              padding: "5px 12px",
+            }}
+          >
+            Vincular
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function UsagePlaceholder() {
+  return (
+    <div
+      style={{
+        border: `1px dashed ${C.border}`,
+        borderRadius: 4,
+        padding: "40px 20px",
+        textAlign: "center",
+        color: C.muted,
+      }}
+    >
+      <div style={{ fontSize: 13, marginBottom: 6, color: C.text }}>Sin actividad de API aún</div>
+      <div style={{ fontSize: 11, lineHeight: 1.5, maxWidth: 480, margin: "0 auto" }}>
+        El widget de uso de API muestra tu consumo mensual del cupo IOL (25.000 calls
+        gratis por mes) y el costo acumulado de las calls adicionales que vayas haciendo
+        (cada call extra cuesta $500 ARS según IOL). Se activa cuando vincules tu cuenta
+        IOL desde la pestaña Cuentas vinculadas.
+      </div>
+    </div>
+  );
+}
+
+function ActivityPlaceholder() {
+  return (
+    <div
+      style={{
+        border: `1px dashed ${C.border}`,
+        borderRadius: 4,
+        padding: "40px 20px",
+        textAlign: "center",
+        color: C.muted,
+      }}
+    >
+      <div style={{ fontSize: 13, marginBottom: 6, color: C.text }}>Sin actividad reciente</div>
+      <div style={{ fontSize: 11, lineHeight: 1.5, maxWidth: 480, margin: "0 auto" }}>
+        Cada llamada a una API de broker se registra acá con timestamp, endpoint,
+        resultado y si fue servida desde cache. Útil para auditar el consumo del cupo
+        y debugear cuando algo no funciona.
+      </div>
+    </div>
+  );
 }
 
 
