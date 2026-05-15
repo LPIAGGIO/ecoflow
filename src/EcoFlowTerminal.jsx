@@ -13575,7 +13575,13 @@ function AddPositionDrawer({ editingPosition, onClose, onSubmit }) {
     if (form.instrument_type !== "caucion" && !form.ticker.trim()) {
       errs.ticker = "Ticker requerido";
     }
-    if (form.ticker.length > 16) errs.ticker = "Máximo 16 caracteres";
+    // El tope de 16 chars es una validación anti-typo para tickers de
+    // mercado cortos (GGAL, AL30, T30J6...). Los FCI quedan exentos: su
+    // "ticker" es la clave compuesta "fondo|categoria" (40+ chars),
+    // elegida de una lista controlada — no hay typo posible que validar.
+    if (form.instrument_type !== "fci" && form.ticker.length > 16) {
+      errs.ticker = "Máximo 16 caracteres";
+    }
 
     const qty = Number(form.quantity);
     if (!form.quantity || isNaN(qty) || qty <= 0) {
