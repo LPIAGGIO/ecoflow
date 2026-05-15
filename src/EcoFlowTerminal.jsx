@@ -1938,32 +1938,6 @@ const INSTRUMENT_TYPE_KEYS = [
   "future", "option", "caucion", "fci",
 ];
 
-/* ─────────────── FCI_TICKER_MAP ───────────────
- *
- * Mapeo de los tickers de FCI que el usuario puede cargar a su par
- * (fondo, categoria) tal como aparecen en la tabla fci_quotes de
- * Supabase. El hook useFciPrices usa este mapa para saber qué fila
- * de fci_quotes corresponde a cada ticker de una posición.
- *
- * Cobertura actual: los 3 fondos de Cocos Capital (todos Clase A),
- * verificado al 2026-05-13. Para sumar un fondo nuevo, agregar acá
- * el ticker con su fondo y categoria exactos de fci_quotes.
- */
-const FCI_TICKER_MAP = {
-  COCORMA: {
-    fondo: "Cocos Rendimiento - Clase A",
-    categoria: "rentaMixta",
-  },
-  COCOAUSD: {
-    fondo: "Cocos Ahorro Dólares - Clase A",
-    categoria: "rentaFija",
-  },
-  COCOSPPA: {
-    fondo: "Cocos Pesos Plus - Clase A",
-    categoria: "retornoTotal",
-  },
-};
-
 /* ─────────────── Catálogos de tickers por tipo ───────────────
  *
  * Para evitar que el usuario tipee tickers con errores (T03J6 en lugar
@@ -3206,35 +3180,68 @@ function getTickerOptions(instrumentType, currentTicker, catalog) {
     return { mode: "select", groups };
   }
 
-  // ─── FCI: lista controlada desde FCI_TICKER_MAP ──────────────────────
-  // Los FCI no tienen ticker oficial de mercado: el usuario carga el que
-  // usa su broker. Si lo tipea mal, el (fondo, categoria) no matchea en
-  // fci_quotes y la posición queda valuada a costo SIN error visible. Por
-  // eso ofrecemos un desplegable con los fondos mapeados en FCI_TICKER_MAP.
-  // La lista es chica (los 3 de Cocos hoy); para sumar fondos se agregan
-  // entradas a FCI_TICKER_MAP — esta función no se toca.
+  // ─── FCI: catálogo controlado desde la vista fci_catalog_activos ──────
+  // El universo de FCI son cientos de fondos (cada uno con varias clases),
+  // así que devolvemos mode "search" → el form usa <SearchableSelect> en
+  // vez del <select> nativo. El catálogo llega en catalog.fci (lo carga el
+  // hook useFciCatalog). value = "fondo|categoria" (la clave), que es
+  // exactamente lo que se guarda en position.ticker.
+  //
+  // Si el usuario tipea/elige mal, el (fondo, categoria) no matchea en
+  // fci_quotes y la posición queda valuada a costo SIN error visible —
+  // por eso la lista es controlada, no texto libre.
   if (instrumentType === "fci") {
-    const opts = Object.entries(FCI_TICKER_MAP)
-      .map(([ticker, meta]) => ({
-        value: ticker,
-        label: `${ticker} — ${meta.fondo}`,
-      }))
-      .sort((a, b) => a.label.localeCompare(b.label));
+    const list = (catalog && catalog.fci) || [];
+    if (list.length === 0) {
+      // Catálogo todavía no cargó (o falló la query): input libre como
+      // fallback, igual que stock/cedear/on cuando no hay catálogo.
+      return { mode: "input", options: [] };
+    }
 
-    // Si se edita una posición vieja con un ticker FCI que no está en el
-    // mapa, lo agregamos al final para no romper la edición.
-    if (
-      currentTicker &&
-      currentTicker.trim() &&
-      !opts.some((o) => o.value === currentTicker.trim().toUpperCase())
-    ) {
-      opts.push({
-        value: currentTicker,
-        label: `${currentTicker} — (cargado manualmente)`,
+    // Prettify de la categoría para mostrarla en la etiqueta — ayuda a
+    // distinguir clases del mismo fondo (mercado de dinero vs renta fija).
+    const PRETTY_CAT = {
+      mercadoDinero: "Mercado de dinero",
+      rentaFija: "Renta fija",
+      rentaMixta: "Renta mixta",
+      rentaVariable: "Renta variable",
+      retornoTotal: "Retorno total",
+    };
+
+    // Agrupamos por administradora (campo `grupo` de la vista).
+    const byGrupo = {};
+    for (const row of list) {
+      const g = row.grupo || "Otros";
+      if (!byGrupo[g]) byGrupo[g] = [];
+      const cat = PRETTY_CAT[row.categoria] || row.categoria;
+      byGrupo[g].push({
+        value: row.clave,
+        label: `${row.fondo}  ·  ${cat}`,
       });
     }
 
-    return { mode: "select", options: opts };
+    const groups = Object.keys(byGrupo)
+      .sort((a, b) => a.localeCompare(b))
+      .map((g) => ({
+        label: g,
+        options: byGrupo[g].sort((a, b) => a.label.localeCompare(b.label)),
+      }));
+
+    // Edición de una posición cuya clave no está en el catálogo activo
+    // (fondo dado de baja, o un ticker viejo estilo "COCORMA" previo a la
+    // migración a claves). La agregamos al final para no romper la edición.
+    const allValues = new Set();
+    for (const grp of groups) for (const o of grp.options) allValues.add(o.value);
+    if (currentTicker && currentTicker.trim() && !allValues.has(currentTicker)) {
+      groups.push({
+        label: "Editando",
+        options: [
+          { value: currentTicker, label: `${currentTicker} — (cargado manualmente)` },
+        ],
+      });
+    }
+
+    return { mode: "search", groups };
   }
 
   // Resto (caucion, option): input libre por ahora.
@@ -4522,21 +4529,116 @@ function useStockPrices() {
   return { prices, loading, error, lastFetch, refresh };
 }
 
+/* ─────────────── Hook: useFciCatalog ───────────────
+ *
+ * Lee el universo de FCI activos desde la vista fci_catalog_activos de
+ * Supabase (una fila por fondo+clase con snapshot reciente). Es lo que
+ * alimenta el desplegable de alta de posición FCI.
+ *
+ * Reemplaza al viejo FCI_TICKER_MAP hardcodeado: ahora el catálogo vive
+ * en la base y el cron fci-snapshot lo mantiene al día solo. Para sumar
+ * fondos no se toca código.
+ *
+ * Mismo patrón de cache que useInstrumentCatalog: módulo + sessionStorage,
+ * stale-while-revalidate. El catálogo cambia lento (a lo sumo un fondo
+ * nuevo por día), así que el cache es agresivo.
+ */
+
+const FCI_CATALOG_CACHE_KEY = "ecoflow_fci_catalog_v1";
+
+// Cache a nivel módulo (sobrevive re-mounts del drawer de alta).
+let _moduleFciCatalogCache = null;
+
+function readFciCatalogCache() {
+  try {
+    const raw = sessionStorage.getItem(FCI_CATALOG_CACHE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeFciCatalogCache(rows) {
+  try {
+    sessionStorage.setItem(FCI_CATALOG_CACHE_KEY, JSON.stringify(rows));
+  } catch {
+    /* sessionStorage puede fallar en private mode */
+  }
+}
+
+function useFciCatalog() {
+  const initial = _moduleFciCatalogCache || readFciCatalogCache() || [];
+  const [catalog, setCatalog] = useState(initial);
+  const [loading, setLoading] = useState(_moduleFciCatalogCache == null);
+  const [error, setError] = useState(null);
+
+  useEffect(() => {
+    let mounted = true;
+    (async () => {
+      try {
+        // .range generoso: el filtro de "activos" de la vista ya recorta
+        // el universo, pero el default de Supabase es 1000 filas y los FCI
+        // activos pueden superarlo. 5000 cubre con margen.
+        const { data, error: qErr } = await supabase
+          .from("fci_catalog_activos")
+          .select("fondo, categoria, clave, grupo, ultima_fecha")
+          .order("fondo", { ascending: true })
+          .range(0, 4999);
+
+        if (qErr) throw qErr;
+        if (!mounted) return;
+
+        const rows = data || [];
+        _moduleFciCatalogCache = rows;
+        writeFciCatalogCache(rows);
+        setCatalog(rows);
+        setLoading(false);
+      } catch (e) {
+        if (!mounted) return;
+        setError(e.message || "Error cargando el catálogo de FCI");
+        setLoading(false);
+      }
+    })();
+    return () => { mounted = false; };
+  }, []);
+
+  return { catalog, loading, error };
+}
+
+/* ─────────────── Helper: fciDisplayName ───────────────
+ *
+ * El ticker de un FCI es la clave compuesta "fondo|categoria" (ver
+ * useFciPrices / getTickerOptions). Para mostrarla en tablas usamos solo
+ * el nombre del fondo. Para cualquier otro ticker (bonos, acciones, etc.)
+ * devuelve el valor tal cual — no tienen "|".
+ */
+function fciDisplayName(ticker) {
+  if (!ticker || typeof ticker !== "string") return ticker;
+  const i = ticker.indexOf("|");
+  return i === -1 ? ticker : ticker.slice(0, i);
+}
+
 /* ─────────────── Hook: useFciPrices ───────────────
  *
- * Lee los VCP (valor cuotaparte) de los FCI desde la tabla
- * fci_quotes de Supabase, poblada por el worker fci-snapshot una
- * vez por día hábil post-cierre (cron 20:30 ART).
+ * Dado el conjunto de FCI que el usuario tiene en cartera, trae el VCP
+ * actual + anterior de cada uno vía la RPC get_fci_prices de Supabase
+ * (esa función hace el agrupado y el cálculo del lado del servidor).
  *
- * Para cada ticker de FCI_TICKER_MAP busca las dos últimas filas
- * del fondo (hoy y día hábil anterior) y arma un objeto con el
- * mismo shape que useBondPrices / useStockPrices:
- *   { [ticker]: { price, previousClose, changePct } }
- * de modo que resolvePositionPrice y computeDailyPnL lo consuman
- * sin lógica especial.
+ * Devuelve, con el mismo shape que useBondPrices / useStockPrices:
+ *   { [clave]: { price, previousClose, changePct, priceDate } }
+ * donde `clave` = position.ticker del FCI ("fondo|categoria"), de modo
+ * que resolvePositionPrice y computeDailyPnL lo consuman sin lógica
+ * especial.
  *
- * Cache: sessionStorage con TTL de 30 minutos. El VCP cambia una
- * vez por día, así que no tiene sentido pegarle a Supabase seguido.
+ * OJO con el P&L diario: fci-snapshot no siempre captura datos todos los
+ * días (hay huecos de varios días en fci_quotes). previousClose y
+ * changePct se exponen SOLO si los dos snapshots están a <= 5 días uno
+ * del otro; si el hueco es mayor no es una variación "diaria" honesta y
+ * van en null (computeDailyPnL lo trata como "sin dato del día").
+ *
+ * Cache: sessionStorage con TTL de 30 minutos, igual que antes.
  */
 
 const FCI_PRICES_CACHE_KEY = "ecoflow_fci_prices_v1";
@@ -4562,76 +4664,104 @@ function writeFciPricesCache(payload) {
   }
 }
 
-function useFciPrices() {
+function useFciPrices(positions) {
   const cached = readFciPricesCache();
   const [prices, setPrices] = useState(cached?.prices || {});
   const [lastFetch, setLastFetch] = useState(cached?.lastFetch || null);
-  const [loading, setLoading] = useState(!cached);
+  const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [refreshKey, setRefreshKey] = useState(0);
+
+  // Claves (= position.ticker) de los FCI que el usuario tiene en cartera.
+  // Solo pedimos precios de ESOS fondos: fci_quotes tiene 1000+ fondos, no
+  // tiene sentido (ni escala) traerlos todos.
+  const fciClaves = useMemo(() => {
+    if (!Array.isArray(positions)) return [];
+    const set = new Set();
+    for (const p of positions) {
+      if (p?.instrument_type === "fci" && p.ticker) set.add(p.ticker);
+    }
+    return [...set].sort();
+  }, [positions]);
+
+  // String estable para la dependencia del effect: refetcheamos solo
+  // cuando cambia el CONJUNTO de FCI en cartera, no en cada update de
+  // positions (que cambia de identidad seguido).
+  const clavesKey = fciClaves.join("||");
 
   useEffect(() => {
     let mounted = true;
 
-    // Si hay cache fresco y no es refresh manual, no pegamos a Supabase.
+    // Sin FCI en cartera: nada que pedir.
+    if (fciClaves.length === 0) {
+      setPrices({});
+      setLoading(false);
+      return () => { mounted = false; };
+    }
+
+    // Cache fresco que cubre TODOS los fondos en cartera → no pegamos a
+    // Supabase. Si agregaste un FCI nuevo, alguna clave va a faltar en el
+    // cache y refetcheamos igual.
     if (cached && refreshKey === 0) {
       const age = Date.now() - new Date(cached.lastFetch).getTime();
-      if (age < FCI_PRICES_TTL_MS) {
+      const cubreTodo = fciClaves.every((c) => cached.prices?.[c] != null);
+      if (age < FCI_PRICES_TTL_MS && cubreTodo) {
         setLoading(false);
         return () => { mounted = false; };
       }
     }
 
     setError(null);
-    if (!cached || refreshKey > 0) setLoading(true);
+    setLoading(true);
 
     (async () => {
       try {
-        // Una sola query: traemos las filas de los fondos que nos
-        // interesan, ordenadas por fecha descendente. Después en
-        // memoria nos quedamos con las dos últimas de cada fondo.
-        const fondos = Object.values(FCI_TICKER_MAP).map((m) => m.fondo);
-
-        const { data, error: qErr } = await supabase
-          .from("fci_quotes")
-          .select("fondo, categoria, vcp, fecha")
-          .in("fondo", fondos)
-          .order("fecha", { ascending: false });
+        // La RPC hace el trabajo pesado del lado del servidor: agarra las
+        // dos últimas filas de cada fondo y calcula la variación.
+        const { data, error: qErr } = await supabase.rpc("get_fci_prices", {
+          p_claves: fciClaves,
+        });
 
         if (qErr) throw qErr;
 
-        // Agrupamos las filas por fondo, preservando el orden (ya viene
-        // ordenado por fecha desc, así que la primera de cada fondo es
-        // la más reciente y la segunda es el día hábil anterior).
-        const byFondo = {};
-        for (const row of data || []) {
-          if (!byFondo[row.fondo]) byFondo[row.fondo] = [];
-          byFondo[row.fondo].push(row);
-        }
+        // Distancia en días entre dos snapshots: la usamos para decidir si
+        // la variación es "diaria" de verdad o atraviesa un hueco de datos.
+        const diasEntre = (a, b) => {
+          if (!a || !b) return Infinity;
+          const ms = new Date(a).getTime() - new Date(b).getTime();
+          return Math.abs(ms) / 86400000;
+        };
+        const MAX_GAP_DIARIO = 5; // un fin de semana largo entra; más es hueco
 
-        // Para cada ticker del mapa, armamos su entry de precio.
         const map = {};
-        for (const [ticker, meta] of Object.entries(FCI_TICKER_MAP)) {
-          const rows = byFondo[meta.fondo];
-          if (!rows || rows.length === 0) continue;
-
-          const today = rows[0];
-          const prev = rows[1] || null;
-
-          const price = Number(today.vcp);
+        for (const row of data || []) {
+          const price = Number(row.vcp_actual);
           if (!Number.isFinite(price) || price <= 0) continue;
 
           let previousClose = null;
           let changePct = null;
-          if (prev) {
-            const prevVcp = Number(prev.vcp);
-            if (Number.isFinite(prevVcp) && prevVcp > 0) {
-              previousClose = prevVcp;
-              changePct = ((price - prevVcp) / prevVcp) * 100;
-            }
+          // Solo tratamos esto como variación del día si los dos snapshots
+          // están pegados. fci-snapshot tiene huecos: un "anterior" de hace
+          // dos semanas NO es el cierre de ayer, y mostrarlo como P&L del
+          // día sería mentir.
+          const prevVcp = Number(row.vcp_anterior);
+          if (
+            Number.isFinite(prevVcp) && prevVcp > 0 &&
+            diasEntre(row.fecha_actual, row.fecha_anterior) <= MAX_GAP_DIARIO
+          ) {
+            previousClose = prevVcp;
+            changePct =
+              row.change_pct != null
+                ? Number(row.change_pct)
+                : ((price - prevVcp) / prevVcp) * 100;
           }
 
-          map[ticker] = { price, previousClose, changePct };
+          map[row.clave] = {
+            price,
+            previousClose,
+            changePct,
+            priceDate: row.fecha_actual || null,
+          };
         }
 
         if (!mounted) return;
@@ -4641,9 +4771,7 @@ function useFciPrices() {
         setLoading(false);
         writeFciPricesCache({ prices: map, lastFetch: nowIso });
 
-        console.info(
-          `[useFciPrices] ${Object.keys(map).length} FCI cargados`
-        );
+        console.info(`[useFciPrices] ${Object.keys(map).length} FCI cargados`);
       } catch (e) {
         if (!mounted) return;
         setError(e.message || "Error cargando precios de FCI");
@@ -4652,7 +4780,7 @@ function useFciPrices() {
     })();
 
     return () => { mounted = false; };
-  }, [refreshKey]);
+  }, [clavesKey, refreshKey]);
 
   const refresh = useCallback(() => setRefreshKey((k) => k + 1), []);
 
@@ -7713,16 +7841,13 @@ function computeDailyPnL(p, bondPrices, futurePrices, stockPrices, futureAdjLook
         const pct = (diffPerUnit / prev) * 100;
         return { pnl, pct };
       }
-      // Sin previousClose: fallback a P&L total contra PPP, igual que
-      // bonos y acciones cuando el ticker no tiene cierre histórico.
-      const ppp = Number(p.entry_price);
-      if (ppp > 0) {
-        const diffPerUnit = fp.price - ppp;
-        const sign = (p.operation_type === "sell") ? -1 : 1;
-        const pnl = sign * diffPerUnit * qty;
-        const pct = (diffPerUnit / ppp) * 100;
-        return { pnl, pct };
-      }
+      // Sin previousClose utilizable. NO caemos a un fallback contra PPP:
+      // eso devolvería el P&L TOTAL desde la compra disfrazado de P&L del
+      // día. useFciPrices pone previousClose en null a propósito cuando los
+      // snapshots de fci_quotes tienen un hueco grande (fci-snapshot no
+      // captura todos los días) — en ese caso no sabemos la variación del
+      // día, y es más honesto no mostrar nada ("—") que un número mal.
+      return null;
     }
     return null;
   }
@@ -9676,11 +9801,10 @@ function PortfolioDashboard({ onNavigate }) {
   // para calcular P&L diario sin snapshots históricos.
   const stockPricesState = useStockPrices();
 
-  // Precios de FCI (VCP) desde la tabla fci_quotes de Supabase. Mismo
-  // patrón/shape que useBondPrices y useStockPrices: lo levantamos acá
-  // para compartir una sola instancia entre DashboardOverview y
-  // ConsolidatedSection.
-  const fciPricesState = useFciPrices();
+  // Precios de FCI (VCP) desde la tabla fci_quotes de Supabase, vía la RPC
+  // get_fci_prices. Parametrizado por la cartera: solo pide los fondos que
+  // el usuario realmente tiene (fci_quotes tiene 1000+, no se traen todos).
+  const fciPricesState = useFciPrices(positions);
 
   // Tickers de futuros únicos en cartera para suscribirse a Primary API.
   // Los calculamos a este nivel (PortfolioDashboard) en vez de DashboardOverview
@@ -11494,7 +11618,7 @@ function ConsolidatedRow({ group, bondPrices, futurePrices, stockPrices, fciPric
         <PTd dense>
           <div className="flex items-center gap-2">
             <span className="eco-mono" style={{ fontWeight: 600, fontSize: 12.5 }}>
-              {group.ticker}
+              {fciDisplayName(group.ticker)}
             </span>
             {group.isShort && (
               <span
@@ -12182,7 +12306,7 @@ function PositionRow({ position, bondPrices, onEdit, onDelete, onUpdatePrice }) 
       </PTd>
       <PTd dense>
         <span className="eco-mono" style={{ fontWeight: 600, fontSize: 12 }}>
-          {position.ticker}
+          {fciDisplayName(position.ticker)}
         </span>
       </PTd>
       <PTd dense align="right">
@@ -13101,7 +13225,7 @@ function DeleteConfirmModal({ position, onCancel, onConfirm }) {
         </div>
         <p style={{ fontSize: 12.5, color: C.muted, lineHeight: 1.6, marginBottom: 20 }}>
           ¿Seguro querés borrar la operación de{" "}
-          <strong style={{ color: C.text }}>{position.ticker}</strong>?
+          <strong style={{ color: C.text }}>{fciDisplayName(position.ticker)}</strong>?
           Esta acción no se puede deshacer.
         </p>
         <div className="flex items-center justify-end gap-2">
@@ -13276,6 +13400,11 @@ function AddPositionDrawer({ editingPosition, onClose, onSubmit }) {
   // y dlrContracts.js. El hook trae sessionStorage cache instantáneo si
   // existe, así que el dropdown raramente queda en estado "loading".
   const { catalog: instrumentCatalog } = useInstrumentCatalog();
+
+  // Catálogo de FCI activos (vista fci_catalog_activos). Se mergea con el
+  // de instruments más abajo para que getTickerOptions lo lea como
+  // catalog.fci, igual que catalog.stock / catalog.cedear / catalog.on.
+  const { catalog: fciCatalog } = useFciCatalog();
 
   // Precios actualizados de bonos (BYMA + data912) — los usamos para
   // mejorar la sugerencia de moneda al cambiar de ticker. Si BYMA tiene
@@ -13766,8 +13895,23 @@ function AddPositionDrawer({ editingPosition, onClose, onSubmit }) {
             const result = getTickerOptions(
               form.instrument_type,
               form.ticker,
-              instrumentCatalog,
+              { ...instrumentCatalog, fci: fciCatalog },
             );
+            // FCI: combobox con búsqueda (el universo son cientos de fondos).
+            if (result.mode === "search") {
+              return (
+                <FormSection label="Ticker" error={errors.ticker}>
+                  <SearchableSelect
+                    value={form.ticker}
+                    onChange={handleTickerChange}
+                    placeholder="Buscá un fondo..."
+                    groups={result.groups}
+                    options={result.options}
+                    hasError={Boolean(errors.ticker)}
+                  />
+                </FormSection>
+              );
+            }
             if (result.mode === "select") {
               return (
                 <FormSection label="Ticker" error={errors.ticker}>
@@ -14481,6 +14625,259 @@ function Select({ value, onChange, options, groups, placeholder, hasError, disab
         <option key={opt.value} value={opt.value}>{opt.label}</option>
       ))}
     </select>
+  );
+}
+
+/* ─────────────── SearchableSelect ───────────────
+ *
+ * Combobox con búsqueda. Mismo contrato de props que <Select> (value,
+ * onChange, options, groups, placeholder, hasError, disabled) para que sea
+ * un reemplazo directo — pero pensado para listas grandes: el <select>
+ * nativo es inusable con cientos de ítems (no se puede buscar por
+ * substring, solo scrollear).
+ *
+ * Lo usa el alta de posición para el TICKER de FCI, donde el universo de
+ * fondos (vista fci_catalog_activos) son cientos de filas. La búsqueda
+ * ignora mayúsculas y acentos ("dolares" matchea "Dólares").
+ *
+ * Teclado: ↑/↓ mueven el resaltado, Enter elige, Esc cierra. Click afuera
+ * también cierra.
+ */
+function SearchableSelect({ value, onChange, options, groups, placeholder, hasError, disabled }) {
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const [highlight, setHighlight] = useState(0);
+  const wrapRef = useRef(null);
+  const inputRef = useRef(null);
+  const listRef = useRef(null);
+
+  // Aplanamos groups + options a una sola lista, guardando de qué grupo
+  // viene cada ítem para poder dibujar los headers de administradora.
+  const flatItems = useMemo(() => {
+    const out = [];
+    if (groups && groups.length) {
+      for (const g of groups) {
+        for (const o of g.options || []) {
+          out.push({ value: o.value, label: o.label, group: g.label });
+        }
+      }
+    } else if (options && options.length) {
+      for (const o of options) {
+        out.push({ value: o.value, label: o.label, group: null });
+      }
+    }
+    return out;
+  }, [groups, options]);
+
+  // Normalizador para la búsqueda: minúsculas + sin acentos.
+  const norm = (s) =>
+    (s == null ? "" : String(s))
+      .toLowerCase()
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "");
+
+  const filtered = useMemo(() => {
+    const q = norm(query).trim();
+    if (!q) return flatItems;
+    return flatItems.filter((it) => norm(it.label).includes(q));
+  }, [flatItems, query]);
+
+  // Tope de ítems renderizados: una lista de cientos de <div> se banca,
+  // pero no tiene sentido pintar 600 si nadie los va a scrollear. Con el
+  // buscador la lista se achica rápido igual.
+  const CAP = 150;
+  const visible = filtered.slice(0, CAP);
+  const overflow = filtered.length - visible.length;
+
+  const selectedLabel = useMemo(() => {
+    const found = flatItems.find((it) => it.value === value);
+    return found ? found.label : "";
+  }, [flatItems, value]);
+
+  // Cerrar al hacer click afuera del componente.
+  useEffect(() => {
+    if (!open) return;
+    const onDoc = (e) => {
+      if (wrapRef.current && !wrapRef.current.contains(e.target)) setOpen(false);
+    };
+    document.addEventListener("mousedown", onDoc);
+    return () => document.removeEventListener("mousedown", onDoc);
+  }, [open]);
+
+  // Al abrir: reset de búsqueda + foco en el input (diferido para que el
+  // input ya esté montado).
+  useEffect(() => {
+    if (!open) return;
+    setQuery("");
+    setHighlight(0);
+    const t = setTimeout(() => inputRef.current && inputRef.current.focus(), 0);
+    return () => clearTimeout(t);
+  }, [open]);
+
+  // Mantener el ítem resaltado dentro del viewport de la lista al navegar
+  // con el teclado.
+  useEffect(() => {
+    if (!open || !listRef.current) return;
+    const el = listRef.current.querySelector(`[data-idx="${highlight}"]`);
+    if (el && el.scrollIntoView) el.scrollIntoView({ block: "nearest" });
+  }, [highlight, open]);
+
+  const choose = (val) => {
+    onChange(val);
+    setOpen(false);
+  };
+
+  const onKeyDown = (e) => {
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      setHighlight((h) => Math.min(h + 1, Math.max(visible.length - 1, 0)));
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      setHighlight((h) => Math.max(h - 1, 0));
+    } else if (e.key === "Enter") {
+      e.preventDefault();
+      const it = visible[highlight];
+      if (it) choose(it.value);
+    } else if (e.key === "Escape") {
+      e.preventDefault();
+      setOpen(false);
+    }
+  };
+
+  return (
+    <div ref={wrapRef} style={{ position: "relative", width: "100%" }}>
+      {/* Trigger — imita visualmente al <select> nativo cerrado */}
+      <button
+        type="button"
+        disabled={disabled}
+        onClick={() => { if (!disabled) setOpen((o) => !o); }}
+        style={{
+          width: "100%",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          gap: 8,
+          backgroundColor: disabled ? "rgba(13,26,41,0.5)" : C.deep,
+          border: `1px solid ${hasError ? C.red : C.border}`,
+          color: disabled ? C.muted : selectedLabel ? C.text : C.muted,
+          padding: "9px 12px",
+          fontSize: 12.5,
+          fontFamily: "'Roboto', sans-serif",
+          textAlign: "left",
+          outline: "none",
+          cursor: disabled ? "not-allowed" : "pointer",
+          opacity: disabled ? 0.7 : 1,
+        }}
+      >
+        <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+          {selectedLabel || placeholder || "Elegí una opción..."}
+        </span>
+        <ChevronDown size={14} style={{ flexShrink: 0, color: C.muted }} />
+      </button>
+
+      {/* Panel desplegable */}
+      {open && (
+        <div
+          style={{
+            position: "absolute",
+            top: "calc(100% + 2px)",
+            left: 0,
+            right: 0,
+            zIndex: 60,
+            backgroundColor: C.panel,
+            border: `1px solid ${C.border}`,
+            boxShadow: "0 8px 24px rgba(0,0,0,0.45)",
+          }}
+        >
+          {/* Buscador */}
+          <div style={{ padding: 6, borderBottom: `1px solid ${C.border}` }}>
+            <input
+              ref={inputRef}
+              value={query}
+              onChange={(e) => { setQuery(e.target.value); setHighlight(0); }}
+              onKeyDown={onKeyDown}
+              placeholder="Buscar..."
+              style={{
+                width: "100%",
+                backgroundColor: C.deep,
+                border: `1px solid ${C.border}`,
+                color: C.text,
+                padding: "7px 10px",
+                fontSize: 12.5,
+                fontFamily: "'Roboto', sans-serif",
+                outline: "none",
+              }}
+            />
+          </div>
+
+          {/* Lista de resultados */}
+          <div ref={listRef} style={{ maxHeight: 240, overflowY: "auto" }}>
+            {visible.length === 0 && (
+              <div style={{ padding: "10px 12px", fontSize: 12, color: C.muted, fontFamily: "'Roboto', sans-serif" }}>
+                Sin resultados
+              </div>
+            )}
+
+            {visible.map((it, idx) => {
+              const prev = visible[idx - 1];
+              const showHeader = it.group && (!prev || prev.group !== it.group);
+              const isHighlighted = idx === highlight;
+              const isSelected = it.value === value;
+              return (
+                <div key={`${it.value}_${idx}`}>
+                  {showHeader && (
+                    <div
+                      style={{
+                        padding: "6px 12px 2px",
+                        fontSize: 10,
+                        letterSpacing: 0.4,
+                        textTransform: "uppercase",
+                        color: C.dim,
+                        fontFamily: "'Roboto', sans-serif",
+                      }}
+                    >
+                      {it.group}
+                    </div>
+                  )}
+                  <div
+                    data-idx={idx}
+                    onMouseEnter={() => setHighlight(idx)}
+                    onClick={() => choose(it.value)}
+                    style={{
+                      padding: "7px 12px",
+                      fontSize: 12.5,
+                      fontFamily: "'Roboto', sans-serif",
+                      cursor: "pointer",
+                      color: isSelected ? C.accent : C.text,
+                      backgroundColor: isHighlighted ? "rgba(91,141,214,0.18)" : "transparent",
+                      whiteSpace: "nowrap",
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                    }}
+                  >
+                    {it.label}
+                  </div>
+                </div>
+              );
+            })}
+
+            {overflow > 0 && (
+              <div
+                style={{
+                  padding: "8px 12px",
+                  fontSize: 11,
+                  color: C.dim,
+                  fontFamily: "'Roboto', sans-serif",
+                  borderTop: `1px solid ${C.border}`,
+                }}
+              >
+                … y {overflow} más — seguí escribiendo para filtrar
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
   );
 }
 
