@@ -233,7 +233,7 @@ export default function EcoFlowTerminal() {
   // Estado de brokers vinculados — alimenta el badge del engranaje y el
   // banner global que invita a vincular IOL.
   const { user: authUser } = useAuth();
-  const { data: linkedBrokers, loading: brokersLoading } = useLinkedBrokers(authUser?.id);
+  const { data: linkedBrokers, loading: brokersLoading, refetch: refetchBrokers } = useLinkedBrokers(authUser?.id);
   const hasIolLinked = linkedBrokers.some(
     (b) => b.broker === "iol" && b.status === "active"
   );
@@ -776,7 +776,12 @@ export default function EcoFlowTerminal() {
             ) : active === "libro-operaciones" ? (
               <LibroOperacionesModule />
             ) : active === "settings" ? (
-              <SettingsModule onNavigate={setActive} />
+              <SettingsModule
+                onNavigate={setActive}
+                linkedBrokers={linkedBrokers}
+                brokersLoading={brokersLoading}
+                refetchBrokers={refetchBrokers}
+              />
             ) : (
               <EmptyWorkspace key={active} active={active} />
             )}
@@ -1289,6 +1294,9 @@ function useLinkedBrokers(userId) {
   const [data, setData] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  const [refreshKey, setRefreshKey] = useState(0);
+
+  const refetch = useCallback(() => setRefreshKey((k) => k + 1), []);
 
   useEffect(() => {
     if (!userId) {
@@ -1317,9 +1325,9 @@ function useLinkedBrokers(userId) {
     return () => {
       cancelled = true;
     };
-  }, [userId]);
+  }, [userId, refreshKey]);
 
-  return { data, loading, error };
+  return { data, loading, error, refetch };
 }
 
 function usePositionsBrokerStats(userId) {
@@ -1356,7 +1364,302 @@ function usePositionsBrokerStats(userId) {
   return { data, loading };
 }
 
-function SettingsModule({ onNavigate }) {
+/* ─────────────── VincularIOLModal ───────────────
+ *
+ * Modal con form usuario/password para vincular una cuenta IOL.
+ * Llama al Edge Function `iol-auth` con action "login" — que hace el
+ * login contra IOL, guarda los tokens server-side y crea el row en
+ * linked_brokers.
+ *
+ * La contraseña NUNCA se guarda: viaja al Edge Function, que la usa una
+ * sola vez contra IOL y descarta. Solo se persiste el refresh_token.
+ *
+ * onSuccess() se llama cuando el login funcionó — el caller refetchea
+ * la lista de brokers para reflejar el nuevo estado.
+ */
+function VincularIOLModal({ onClose, onSuccess }) {
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState(null);
+
+  const canSubmit = username.trim().length > 0 && password.length > 0 && !submitting;
+
+  const inputStyle = {
+    width: "100%",
+    marginTop: 5,
+    padding: "8px 10px",
+    background: C.bg,
+    border: `1px solid ${C.border}`,
+    borderRadius: 4,
+    color: C.text,
+    fontSize: 13,
+    outline: "none",
+    boxSizing: "border-box",
+  };
+
+  const handleSubmit = async () => {
+    if (!canSubmit) return;
+    setSubmitting(true);
+    setError(null);
+    try {
+      const { data, error: invokeErr } = await supabase.functions.invoke("iol-auth", {
+        body: { action: "login", username: username.trim(), password },
+      });
+
+      if (invokeErr || !data || !data.ok) {
+        // Intentar extraer un mensaje específico de la respuesta del Edge Function;
+        // si no se puede, caer a un mensaje genérico (el caso más común es
+        // credenciales incorrectas).
+        let msg = "No se pudo vincular. Verificá tu usuario y contraseña de IOL.";
+        try {
+          if (invokeErr && invokeErr.context && typeof invokeErr.context.json === "function") {
+            const body = await invokeErr.context.json();
+            if (body && body.iol_response && body.iol_response.error_description) {
+              msg = body.iol_response.error_description;
+            } else if (body && body.error && body.error !== "iol_auth_failed") {
+              msg = `Error: ${body.error}`;
+            }
+          } else if (data && data.error && data.error !== "iol_auth_failed") {
+            msg = `Error: ${data.error}`;
+          }
+        } catch {
+          // mantener mensaje genérico
+        }
+        setError(msg);
+        setSubmitting(false);
+        return;
+      }
+
+      // Login OK
+      onSuccess();
+    } catch (e) {
+      setError("Error de red. Revisá tu conexión e intentá de nuevo.");
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <div
+      onClick={onClose}
+      style={{
+        position: "fixed",
+        inset: 0,
+        background: "rgba(0,0,0,0.6)",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        zIndex: 1000,
+      }}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          background: C.panel,
+          border: `1px solid ${C.borderStrong}`,
+          borderRadius: 6,
+          width: 420,
+          maxWidth: "90vw",
+          boxShadow: "0 20px 60px rgba(0,0,0,0.5)",
+        }}
+      >
+        {/* Header */}
+        <div
+          className="flex items-center justify-between"
+          style={{ padding: "16px 20px", borderBottom: `1px solid ${C.border}` }}
+        >
+          <div className="flex items-center" style={{ gap: 10 }}>
+            <div
+              style={{
+                width: 28,
+                height: 28,
+                borderRadius: 4,
+                background: "#FFD40022",
+                border: "1px solid #FFD40044",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+              }}
+            >
+              <span style={{ color: "#FFD400", fontWeight: 700, fontSize: 10 }}>IOL</span>
+            </div>
+            <div style={{ fontSize: 14, fontWeight: 600, color: C.text }}>
+              Vincular cuenta IOL
+            </div>
+          </div>
+          <button
+            onClick={onClose}
+            aria-label="Cerrar"
+            style={{
+              background: "transparent",
+              border: "none",
+              color: C.muted,
+              cursor: "pointer",
+              padding: 2,
+              display: "flex",
+            }}
+          >
+            <X size={16} strokeWidth={1.6} />
+          </button>
+        </div>
+
+        {/* Body */}
+        <div style={{ padding: 20 }}>
+          <p
+            style={{
+              fontSize: 12,
+              color: C.muted,
+              lineHeight: 1.55,
+              margin: "0 0 16px 0",
+            }}
+          >
+            Ingresá las credenciales de tu cuenta de InvertirOnline. Midas las usa una
+            sola vez para autenticarse y obtener un token de acceso —{" "}
+            <strong style={{ color: C.text }}>tu contraseña no se guarda</strong>.
+          </p>
+
+          {/* Usuario */}
+          <label
+            style={{
+              fontSize: 11,
+              color: C.muted,
+              letterSpacing: "0.08em",
+              textTransform: "uppercase",
+              display: "block",
+            }}
+          >
+            Usuario IOL
+          </label>
+          <input
+            type="text"
+            value={username}
+            onChange={(e) => setUsername(e.target.value)}
+            autoComplete="username"
+            disabled={submitting}
+            style={inputStyle}
+          />
+
+          {/* Contraseña */}
+          <label
+            style={{
+              fontSize: 11,
+              color: C.muted,
+              letterSpacing: "0.08em",
+              textTransform: "uppercase",
+              marginTop: 12,
+              display: "block",
+            }}
+          >
+            Contraseña IOL
+          </label>
+          <input
+            type="password"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") handleSubmit();
+            }}
+            autoComplete="current-password"
+            disabled={submitting}
+            style={inputStyle}
+          />
+
+          {/* Nota de seguridad */}
+          <div
+            className="flex items-start"
+            style={{
+              gap: 8,
+              marginTop: 14,
+              padding: "8px 10px",
+              background: C.bg,
+              borderRadius: 4,
+              border: `1px solid ${C.border}`,
+            }}
+          >
+            <ShieldCheck
+              size={13}
+              color={C.green}
+              strokeWidth={1.6}
+              style={{ flexShrink: 0, marginTop: 1 }}
+            />
+            <span style={{ fontSize: 10.5, color: C.muted, lineHeight: 1.5 }}>
+              Las credenciales se procesan en el servidor de forma segura. Midas guarda
+              únicamente un token de actualización encriptado, nunca tu contraseña.
+            </span>
+          </div>
+
+          {/* Error */}
+          {error && (
+            <div
+              className="flex items-start"
+              style={{
+                gap: 8,
+                marginTop: 12,
+                padding: "8px 10px",
+                background: "rgba(239,68,68,0.1)",
+                borderRadius: 4,
+                border: "1px solid rgba(239,68,68,0.3)",
+              }}
+            >
+              <AlertCircle
+                size={13}
+                color={C.red}
+                strokeWidth={1.6}
+                style={{ flexShrink: 0, marginTop: 1 }}
+              />
+              <span style={{ fontSize: 11, color: C.red, lineHeight: 1.5 }}>{error}</span>
+            </div>
+          )}
+        </div>
+
+        {/* Footer */}
+        <div
+          className="flex items-center justify-end"
+          style={{ gap: 8, padding: "12px 20px", borderTop: `1px solid ${C.border}` }}
+        >
+          <button
+            onClick={onClose}
+            disabled={submitting}
+            style={{
+              fontSize: 12,
+              padding: "7px 14px",
+              borderRadius: 3,
+              background: "transparent",
+              border: `1px solid ${C.border}`,
+              color: C.muted,
+              cursor: submitting ? "default" : "pointer",
+            }}
+          >
+            Cancelar
+          </button>
+          <button
+            onClick={handleSubmit}
+            disabled={!canSubmit}
+            style={{
+              fontSize: 12,
+              padding: "7px 16px",
+              borderRadius: 3,
+              background: canSubmit ? C.accent : C.border,
+              color: canSubmit ? C.bg : C.muted,
+              border: "none",
+              fontWeight: 500,
+              cursor: canSubmit ? "pointer" : "default",
+              display: "flex",
+              alignItems: "center",
+              gap: 6,
+            }}
+          >
+            {submitting && <Loader2 size={12} className="eco-spin" strokeWidth={2} />}
+            {submitting ? "Vinculando…" : "Vincular"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+
+function SettingsModule({ onNavigate, linkedBrokers, brokersLoading, refetchBrokers }) {
   const { user, loading } = useAuth();
 
   if (loading) {
@@ -1371,12 +1674,18 @@ function SettingsModule({ onNavigate }) {
     return <PortfolioAuthWall />;
   }
 
-  return <SettingsDashboard userId={user.id} />;
+  return (
+    <SettingsDashboard
+      userId={user.id}
+      brokers={linkedBrokers}
+      brokersLoading={brokersLoading}
+      refetchBrokers={refetchBrokers}
+    />
+  );
 }
 
-function SettingsDashboard({ userId }) {
+function SettingsDashboard({ userId, brokers, brokersLoading, refetchBrokers }) {
   const [tab, setTab] = useState("brokers");
-  const { data: brokers, loading: brokersLoading } = useLinkedBrokers(userId);
   const { data: stats } = usePositionsBrokerStats(userId);
 
   return (
@@ -1435,7 +1744,13 @@ function SettingsDashboard({ userId }) {
 
       {/* Tab content */}
       {tab === "brokers" && (
-        <BrokersTab brokers={brokers} loading={brokersLoading} stats={stats} userId={userId} />
+        <BrokersTab
+          brokers={brokers}
+          loading={brokersLoading}
+          stats={stats}
+          userId={userId}
+          refetchBrokers={refetchBrokers}
+        />
       )}
       {tab === "usage" && <UsagePlaceholder />}
       {tab === "activity" && <ActivityPlaceholder />}
@@ -1443,7 +1758,7 @@ function SettingsDashboard({ userId }) {
   );
 }
 
-function BrokersTab({ brokers, loading, stats, userId }) {
+function BrokersTab({ brokers, loading, stats, userId, refetchBrokers }) {
   // Merge: si hay positions con un broker pero todavía no hay row en
   // linked_brokers, lo mostramos igual como "detectado" para que el user
   // entienda que la app ya conoce ese broker (los manuales pueden no tener
@@ -1507,7 +1822,7 @@ function BrokersTab({ brokers, loading, stats, userId }) {
       {/* Lista de brokers */}
       <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
         {items.map((item) => (
-          <BrokerCard key={item.id} {...item} userId={userId} />
+          <BrokerCard key={item.id} {...item} userId={userId} refetchBrokers={refetchBrokers} />
         ))}
       </div>
 
@@ -1549,143 +1864,233 @@ function BrokersTab({ brokers, loading, stats, userId }) {
   );
 }
 
-function BrokerCard({ id, meta, linked, positionCount, userId }) {
+function BrokerCard({ id, meta, linked, positionCount, userId, refetchBrokers }) {
   const isApi = meta.type === "api";
   const isConnected = !!linked && linked.status === "active";
-  const hasError = linked && linked.status === "error";
+  const hasError = linked && (linked.status === "error" || linked.status === "expired");
   const isDetected = !linked && positionCount > 0;
 
+  const [showVincular, setShowVincular] = useState(false);
+  const [unlinking, setUnlinking] = useState(false);
+
+  const handleUnlink = async () => {
+    if (
+      !window.confirm(
+        "¿Desvincular tu cuenta IOL?\n\nVas a tener que ingresar tus credenciales de nuevo para reconectarla. Tus operaciones cargadas no se borran."
+      )
+    ) {
+      return;
+    }
+    setUnlinking(true);
+    try {
+      const { error } = await supabase.functions.invoke("iol-auth", {
+        body: { action: "unlink" },
+      });
+      if (error) {
+        alert("No se pudo desvincular. Intentá de nuevo.");
+      } else {
+        refetchBrokers && refetchBrokers();
+      }
+    } catch {
+      alert("Error de red al desvincular.");
+    } finally {
+      setUnlinking(false);
+    }
+  };
+
   return (
-    <div
-      className="flex items-center"
-      style={{
-        background: C.panel,
-        border: `1px solid ${C.border}`,
-        borderRadius: 4,
-        padding: "12px 16px",
-        gap: 16,
-      }}
-    >
-      {/* Logo placeholder con la inicial del broker */}
+    <>
       <div
+        className="flex items-center"
         style={{
-          width: 36,
-          height: 36,
+          background: C.panel,
+          border: `1px solid ${C.border}`,
           borderRadius: 4,
-          background: `${meta.color}22`,
-          border: `1px solid ${meta.color}44`,
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
-          flexShrink: 0,
+          padding: "12px 16px",
+          gap: 16,
         }}
       >
-        <span style={{ color: meta.color, fontWeight: 700, fontSize: 11, letterSpacing: "0.06em" }}>
-          {meta.short}
-        </span>
-      </div>
-
-      {/* Info principal */}
-      <div style={{ flex: 1, minWidth: 0 }}>
-        <div className="flex items-center" style={{ gap: 8 }}>
-          <div style={{ fontSize: 13, fontWeight: 500, color: C.text }}>{meta.label}</div>
-          <span
-            style={{
-              fontSize: 9,
-              letterSpacing: "0.14em",
-              textTransform: "uppercase",
-              color: isApi ? C.accent : C.dim,
-              border: `1px solid ${isApi ? C.accentBorder : C.border}`,
-              borderRadius: 2,
-              padding: "1px 6px",
-            }}
-          >
-            {isApi ? "API" : "Manual"}
+        {/* Logo placeholder con la inicial del broker */}
+        <div
+          style={{
+            width: 36,
+            height: 36,
+            borderRadius: 4,
+            background: `${meta.color}22`,
+            border: `1px solid ${meta.color}44`,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            flexShrink: 0,
+          }}
+        >
+          <span style={{ color: meta.color, fontWeight: 700, fontSize: 11, letterSpacing: "0.06em" }}>
+            {meta.short}
           </span>
         </div>
-        <div style={{ fontSize: 11, color: C.muted, marginTop: 3 }}>
-          {positionCount > 0
-            ? `${positionCount} ${positionCount === 1 ? "operación" : "operaciones"} cargada${
-                positionCount === 1 ? "" : "s"
-              }`
-            : "Sin operaciones cargadas"}
-          {linked && linked.last_sync_at && (
-            <> · Último sync: {new Date(linked.last_sync_at).toLocaleString("es-AR")}</>
+
+        {/* Info principal */}
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div className="flex items-center" style={{ gap: 8 }}>
+            <div style={{ fontSize: 13, fontWeight: 500, color: C.text }}>
+              {linked && linked.label ? linked.label : meta.label}
+            </div>
+            <span
+              style={{
+                fontSize: 9,
+                letterSpacing: "0.14em",
+                textTransform: "uppercase",
+                color: isApi ? C.accent : C.dim,
+                border: `1px solid ${isApi ? C.accentBorder : C.border}`,
+                borderRadius: 2,
+                padding: "1px 6px",
+              }}
+            >
+              {isApi ? "API" : "Manual"}
+            </span>
+          </div>
+          <div style={{ fontSize: 11, color: C.muted, marginTop: 3 }}>
+            {positionCount > 0
+              ? `${positionCount} ${positionCount === 1 ? "operación" : "operaciones"} cargada${
+                  positionCount === 1 ? "" : "s"
+                }`
+              : "Sin operaciones cargadas"}
+            {linked && linked.last_sync_at && (
+              <> · Último sync: {new Date(linked.last_sync_at).toLocaleString("es-AR")}</>
+            )}
+          </div>
+          {hasError && linked.status_message && (
+            <div style={{ fontSize: 11, color: C.red, marginTop: 4 }}>⚠ {linked.status_message}</div>
           )}
         </div>
-        {hasError && linked.status_message && (
-          <div style={{ fontSize: 11, color: C.red, marginTop: 4 }}>⚠ {linked.status_message}</div>
-        )}
+
+        {/* Status badge + acción */}
+        <div className="flex items-center" style={{ gap: 12, flexShrink: 0 }}>
+          {isConnected && (
+            <span
+              className="flex items-center"
+              style={{
+                fontSize: 10,
+                letterSpacing: "0.12em",
+                textTransform: "uppercase",
+                color: C.green,
+                gap: 6,
+              }}
+            >
+              <span style={{ width: 6, height: 6, borderRadius: "50%", background: C.green }} />
+              Conectado
+            </span>
+          )}
+          {hasError && (
+            <span
+              className="flex items-center"
+              style={{
+                fontSize: 10,
+                letterSpacing: "0.12em",
+                textTransform: "uppercase",
+                color: C.red,
+                gap: 6,
+              }}
+            >
+              <span style={{ width: 6, height: 6, borderRadius: "50%", background: C.red }} />
+              {linked && linked.status === "expired" ? "Expirado" : "Error"}
+            </span>
+          )}
+          {isDetected && (
+            <span
+              style={{
+                fontSize: 10,
+                color: C.dim,
+                letterSpacing: "0.12em",
+                textTransform: "uppercase",
+              }}
+            >
+              Detectado
+            </span>
+          )}
+
+          {/* Acción: Vincular (IOL no conectado) */}
+          {!linked && isApi && (
+            <button
+              onClick={() => setShowVincular(true)}
+              style={{
+                fontSize: 11,
+                letterSpacing: "0.04em",
+                background: C.accent,
+                color: C.bg,
+                border: "none",
+                borderRadius: 3,
+                fontWeight: 500,
+                cursor: "pointer",
+                padding: "5px 12px",
+              }}
+            >
+              Vincular
+            </button>
+          )}
+
+          {/* Acción: Reconectar (IOL en error/expirado) */}
+          {linked && isApi && hasError && (
+            <button
+              onClick={() => setShowVincular(true)}
+              style={{
+                fontSize: 11,
+                letterSpacing: "0.04em",
+                background: C.accent,
+                color: C.bg,
+                border: "none",
+                borderRadius: 3,
+                fontWeight: 500,
+                cursor: "pointer",
+                padding: "5px 12px",
+              }}
+            >
+              Reconectar
+            </button>
+          )}
+
+          {/* Acción: Desvincular (IOL conectado) */}
+          {linked && isApi && (
+            <button
+              onClick={handleUnlink}
+              disabled={unlinking}
+              style={{
+                fontSize: 11,
+                letterSpacing: "0.04em",
+                background: "transparent",
+                color: unlinking ? C.dim : C.muted,
+                border: `1px solid ${C.border}`,
+                borderRadius: 3,
+                cursor: unlinking ? "default" : "pointer",
+                padding: "5px 12px",
+                display: "flex",
+                alignItems: "center",
+                gap: 6,
+              }}
+              onMouseEnter={(e) => {
+                if (!unlinking) e.currentTarget.style.color = C.red;
+              }}
+              onMouseLeave={(e) => {
+                if (!unlinking) e.currentTarget.style.color = C.muted;
+              }}
+            >
+              {unlinking && <Loader2 size={11} className="eco-spin" strokeWidth={2} />}
+              {unlinking ? "Desvinculando…" : "Desvincular"}
+            </button>
+          )}
+        </div>
       </div>
 
-      {/* Status badge + acción */}
-      <div className="flex items-center" style={{ gap: 12, flexShrink: 0 }}>
-        {isConnected && (
-          <span
-            className="flex items-center"
-            style={{
-              fontSize: 10,
-              letterSpacing: "0.12em",
-              textTransform: "uppercase",
-              color: C.green,
-              gap: 6,
-            }}
-          >
-            <span style={{ width: 6, height: 6, borderRadius: "50%", background: C.green }} />
-            Conectado
-          </span>
-        )}
-        {hasError && (
-          <span
-            className="flex items-center"
-            style={{
-              fontSize: 10,
-              letterSpacing: "0.12em",
-              textTransform: "uppercase",
-              color: C.red,
-              gap: 6,
-            }}
-          >
-            <span style={{ width: 6, height: 6, borderRadius: "50%", background: C.red }} />
-            Error
-          </span>
-        )}
-        {isDetected && (
-          <span
-            style={{
-              fontSize: 10,
-              color: C.dim,
-              letterSpacing: "0.12em",
-              textTransform: "uppercase",
-            }}
-          >
-            Detectado
-          </span>
-        )}
-        {!linked && isApi && (
-          <button
-            onClick={() =>
-              alert(
-                "Vincular IOL — próximamente.\n\nVa a abrir un modal con username/password, va a pegarle a /token, guardar el refresh_token en Supabase Vault, y agregarte la row en linked_brokers para que arranque la sincronización."
-              )
-            }
-            style={{
-              fontSize: 11,
-              letterSpacing: "0.04em",
-              background: C.accent,
-              color: C.bg,
-              border: "none",
-              borderRadius: 3,
-              fontWeight: 500,
-              cursor: "pointer",
-              padding: "5px 12px",
-            }}
-          >
-            Vincular
-          </button>
-        )}
-      </div>
-    </div>
+      {showVincular && (
+        <VincularIOLModal
+          onClose={() => setShowVincular(false)}
+          onSuccess={() => {
+            setShowVincular(false);
+            refetchBrokers && refetchBrokers();
+          }}
+        />
+      )}
+    </>
   );
 }
 
@@ -20348,6 +20753,3 @@ function formatDate(iso) {
   const d = new Date(iso + "T00:00:00");
   return d.toLocaleDateString("es-AR", { day: "2-digit", month: "short", year: "2-digit" }).replace(/\./g, "");
 }
-
-
-
