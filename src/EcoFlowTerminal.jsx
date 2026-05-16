@@ -12449,6 +12449,26 @@ function ConsolidatedTable({ consolidated, bondPrices, futurePrices, stockPrices
   const [expanded, setExpanded] = useState(new Set());
   const isClosed = variant === "closed";
 
+  // Orden por columna. sortKey null = orden por defecto (valueAtMarket desc,
+  // tal como lo deja consolidatePositions). Click en un header cicla el
+  // estado: descendente → ascendente → sin orden (vuelve al default).
+  const [sortKey, setSortKey] = useState(null);
+  const [sortDir, setSortDir] = useState("desc");
+
+  const handleSort = (key) => {
+    if (sortKey === key) {
+      if (sortDir === "desc") {
+        setSortDir("asc");
+      } else {
+        setSortKey(null);
+        setSortDir("desc");
+      }
+    } else {
+      setSortKey(key);
+      setSortDir("desc");
+    }
+  };
+
   const toggle = (key) => {
     setExpanded((prev) => {
       const next = new Set(prev);
@@ -12457,6 +12477,65 @@ function ConsolidatedTable({ consolidated, bondPrices, futurePrices, stockPrices
       return next;
     });
   };
+
+  // Filas a mostrar: si hay sortKey activo, ordenamos por esa columna;
+  // si no, respetamos el orden que ya trae `consolidated`.
+  const displayRows = useMemo(() => {
+    if (!sortKey) return consolidated;
+    const getVal = (g) => {
+      switch (sortKey) {
+        case "tipo":
+          return g.instrument_type || "";
+        case "ticker":
+          return (g.ticker || "").toUpperCase();
+        case "moneda":
+          return g.currency || "";
+        case "cantidad": {
+          const n = Math.abs(Number(g.netQty));
+          return Number.isFinite(n) ? n : -Infinity;
+        }
+        case "ppp": {
+          const n = Number(g.ppp);
+          return Number.isFinite(n) ? n : -Infinity;
+        }
+        case "precio": {
+          const n = Number(g.currentPrice);
+          return Number.isFinite(n) ? n : -Infinity;
+        }
+        case "pnl": {
+          const n = Number(g.pnl);
+          return Number.isFinite(n) ? n : -Infinity;
+        }
+        case "total": {
+          const n = Math.abs(Number(g.valueAtMarket));
+          return Number.isFinite(n) ? n : -Infinity;
+        }
+        case "ops": {
+          const n = Number(g.operationsCount);
+          return Number.isFinite(n) ? n : 0;
+        }
+        default:
+          return 0;
+      }
+    };
+    const rows = [...consolidated];
+    rows.sort((a, b) => {
+      const va = getVal(a);
+      const vb = getVal(b);
+      let cmp;
+      if (typeof va === "string") cmp = va.localeCompare(vb);
+      else cmp = va - vb;
+      return sortDir === "asc" ? cmp : -cmp;
+    });
+    return rows;
+  }, [consolidated, sortKey, sortDir]);
+
+  const sortProps = (key) => ({
+    sortKey: key,
+    activeSortKey: sortKey,
+    sortDir,
+    onSort: handleSort,
+  });
 
   return (
     <div
@@ -12471,20 +12550,20 @@ function ConsolidatedTable({ consolidated, bondPrices, futurePrices, stockPrices
           <thead>
             <tr style={{ borderBottom: `1px solid ${C.border}` }}>
               <PTh dense style={{ width: 28 }}>{""}</PTh>
-              <PTh dense>Tipo</PTh>
-              <PTh dense>Ticker</PTh>
-              <PTh dense align="right">Cantidad / VN</PTh>
-              <PTh dense align="right">PPP</PTh>
-              <PTh dense align="right">{isClosed ? "Último precio" : "Precio actual"}</PTh>
+              <PTh dense {...sortProps("tipo")}>Tipo</PTh>
+              <PTh dense {...sortProps("ticker")}>Ticker</PTh>
+              <PTh dense align="right" {...sortProps("cantidad")}>Cantidad / VN</PTh>
+              <PTh dense align="right" {...sortProps("ppp")}>PPP</PTh>
+              <PTh dense align="right" {...sortProps("precio")}>{isClosed ? "Último precio" : "Precio actual"}</PTh>
               {!isClosed && <PTh dense align="right">P&amp;L Hoy</PTh>}
-              <PTh dense align="right">{isClosed ? "P&L" : "P&L Total"}</PTh>
-              <PTh dense align="right">Total</PTh>
-              <PTh dense>Moneda</PTh>
-              <PTh dense align="right">Ops</PTh>
+              <PTh dense align="right" {...sortProps("pnl")}>{isClosed ? "P&L" : "P&L Total"}</PTh>
+              <PTh dense align="right" {...sortProps("total")}>Total</PTh>
+              <PTh dense {...sortProps("moneda")}>Moneda</PTh>
+              <PTh dense align="right" {...sortProps("ops")}>Ops</PTh>
             </tr>
           </thead>
           <tbody>
-            {consolidated.map((g) => (
+            {displayRows.map((g) => (
               <ConsolidatedRow
                 key={g.groupKey}
                 group={g}
@@ -13255,21 +13334,43 @@ function PositionsTable({
   );
 }
 
-function PTh({ children, align = "left", style = {}, dense = false }) {
+function PTh({ children, align = "left", style = {}, dense = false, sortKey, activeSortKey, sortDir, onSort }) {
+  const sortable = !!sortKey && typeof onSort === "function";
+  const isActive = sortable && activeSortKey === sortKey;
   return (
     <th
+      onClick={sortable ? () => onSort(sortKey) : undefined}
       style={{
         textAlign: align,
         padding: dense ? "5px 14px" : "11px 14px",
         fontSize: 9,
         fontWeight: 600,
-        color: C.dim,
+        color: isActive ? C.text : C.dim,
         letterSpacing: "0.14em",
         textTransform: "uppercase",
+        cursor: sortable ? "pointer" : "default",
+        userSelect: "none",
+        whiteSpace: "nowrap",
         ...style,
       }}
     >
-      {children}
+      {sortable ? (
+        <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+          {children}
+          <span
+            style={{
+              fontSize: 8,
+              lineHeight: 1,
+              color: isActive ? C.accent : C.dim,
+              opacity: isActive ? 1 : 0.3,
+            }}
+          >
+            {isActive && sortDir === "asc" ? "▲" : "▼"}
+          </span>
+        </span>
+      ) : (
+        children
+      )}
     </th>
   );
 }
