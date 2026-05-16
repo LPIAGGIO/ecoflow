@@ -12455,6 +12455,19 @@ function ConsolidatedTable({ consolidated, bondPrices, futurePrices, stockPrices
   const [sortKey, setSortKey] = useState(null);
   const [sortDir, setSortDir] = useState("desc");
 
+  // Orden manual del usuario (flechitas), persistido en localStorage.
+  // Solo aplica cuando NO hay orden por columna activo (sortKey === null).
+  const orderStorageKey = "midas:posorder:" + variant;
+  const [customOrder, setCustomOrder] = useState(() => {
+    try {
+      const raw = localStorage.getItem(orderStorageKey);
+      const parsed = raw ? JSON.parse(raw) : [];
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  });
+
   const handleSort = (key) => {
     if (sortKey === key) {
       if (sortDir === "desc") {
@@ -12481,7 +12494,19 @@ function ConsolidatedTable({ consolidated, bondPrices, futurePrices, stockPrices
   // Filas a mostrar: si hay sortKey activo, ordenamos por esa columna;
   // si no, respetamos el orden que ya trae `consolidated`.
   const displayRows = useMemo(() => {
-    if (!sortKey) return consolidated;
+    if (!sortKey) {
+      // Modo manual: aplicar el orden custom del usuario si existe.
+      if (!customOrder.length) return consolidated;
+      const idxOf = (gk) => {
+        const i = customOrder.indexOf(gk);
+        return i < 0 ? Infinity : i;
+      };
+      const rows = [...consolidated];
+      // Sort estable: los groupKeys no presentes en customOrder (posiciones
+      // nuevas) quedan al final conservando su orden por defecto.
+      rows.sort((a, b) => idxOf(a.groupKey) - idxOf(b.groupKey));
+      return rows;
+    }
     const getVal = (g) => {
       switch (sortKey) {
         case "tipo":
@@ -12528,7 +12553,28 @@ function ConsolidatedTable({ consolidated, bondPrices, futurePrices, stockPrices
       return sortDir === "asc" ? cmp : -cmp;
     });
     return rows;
-  }, [consolidated, sortKey, sortDir]);
+  }, [consolidated, sortKey, sortDir, customOrder]);
+
+  const manualMode = !sortKey;
+
+  // Mueve una fila arriba/abajo en el orden manual. Reconstruye el orden
+  // a partir de lo que se está mostrando (displayRows), así los groupKeys
+  // viejos/stale se limpian solos.
+  const moveRow = (groupKey, direction) => {
+    const order = displayRows.map((g) => g.groupKey);
+    const i = order.indexOf(groupKey);
+    if (i < 0) return;
+    const j = direction === "up" ? i - 1 : i + 1;
+    if (j < 0 || j >= order.length) return;
+    const next = [...order];
+    [next[i], next[j]] = [next[j], next[i]];
+    setCustomOrder(next);
+    try {
+      localStorage.setItem(orderStorageKey, JSON.stringify(next));
+    } catch {
+      // ignore quota / privacy errors
+    }
+  };
 
   const sortProps = (key) => ({
     sortKey: key,
@@ -12549,6 +12595,7 @@ function ConsolidatedTable({ consolidated, bondPrices, futurePrices, stockPrices
         <table style={{ width: "100%", borderCollapse: "collapse", fontFamily: "'Roboto', sans-serif" }}>
           <thead>
             <tr style={{ borderBottom: `1px solid ${C.border}` }}>
+              {manualMode && <PTh dense style={{ width: 26 }}>{""}</PTh>}
               <PTh dense style={{ width: 28 }}>{""}</PTh>
               <PTh dense {...sortProps("tipo")}>Tipo</PTh>
               <PTh dense {...sortProps("ticker")}>Ticker</PTh>
@@ -12563,7 +12610,7 @@ function ConsolidatedTable({ consolidated, bondPrices, futurePrices, stockPrices
             </tr>
           </thead>
           <tbody>
-            {displayRows.map((g) => (
+            {displayRows.map((g, idx) => (
               <ConsolidatedRow
                 key={g.groupKey}
                 group={g}
@@ -12578,6 +12625,11 @@ function ConsolidatedTable({ consolidated, bondPrices, futurePrices, stockPrices
                 onDelete={onDelete}
                 onUpdatePrice={onUpdatePrice}
                 readOnlyPrice={isClosed}
+                reorderable={manualMode}
+                canMoveUp={idx > 0}
+                canMoveDown={idx < displayRows.length - 1}
+                onMoveUp={() => moveRow(g.groupKey, "up")}
+                onMoveDown={() => moveRow(g.groupKey, "down")}
               />
             ))}
           </tbody>
@@ -12588,7 +12640,7 @@ function ConsolidatedTable({ consolidated, bondPrices, futurePrices, stockPrices
 }
 
 
-function ConsolidatedRow({ group, bondPrices, futurePrices, stockPrices, fciPrices, futureAdjLookup, expanded, onToggle, onEdit, onDelete, onUpdatePrice, readOnlyPrice = false }) {
+function ConsolidatedRow({ group, bondPrices, futurePrices, stockPrices, fciPrices, futureAdjLookup, expanded, onToggle, onEdit, onDelete, onUpdatePrice, readOnlyPrice = false, reorderable = false, canMoveUp = false, canMoveDown = false, onMoveUp, onMoveDown }) {
   const meta = INSTRUMENT_TYPES[group.instrument_type] || {};
   const TypeIcon = meta.icon || Activity;
   const typeColor = meta.color ? C.cat[meta.color] : C.muted;
@@ -12752,6 +12804,62 @@ function ConsolidatedRow({ group, bondPrices, futurePrices, stockPrices, fciPric
           if (!expanded) e.currentTarget.style.backgroundColor = "transparent";
         }}
       >
+        {reorderable && (
+          <PTd dense style={{ width: 26, padding: "4px 0 4px 8px" }}>
+            <div
+              style={{ display: "flex", flexDirection: "column", lineHeight: 0 }}
+            >
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  if (canMoveUp && onMoveUp) onMoveUp();
+                }}
+                disabled={!canMoveUp}
+                aria-label="Mover arriba"
+                style={{
+                  background: "transparent",
+                  border: "none",
+                  padding: 0,
+                  cursor: canMoveUp ? "pointer" : "default",
+                  color: canMoveUp ? C.muted : C.border,
+                  display: "flex",
+                }}
+                onMouseEnter={(e) => {
+                  if (canMoveUp) e.currentTarget.style.color = C.accent;
+                }}
+                onMouseLeave={(e) => {
+                  if (canMoveUp) e.currentTarget.style.color = C.muted;
+                }}
+              >
+                <ArrowUp size={11} strokeWidth={2.2} />
+              </button>
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  if (canMoveDown && onMoveDown) onMoveDown();
+                }}
+                disabled={!canMoveDown}
+                aria-label="Mover abajo"
+                style={{
+                  background: "transparent",
+                  border: "none",
+                  padding: 0,
+                  cursor: canMoveDown ? "pointer" : "default",
+                  color: canMoveDown ? C.muted : C.border,
+                  display: "flex",
+                }}
+                onMouseEnter={(e) => {
+                  if (canMoveDown) e.currentTarget.style.color = C.accent;
+                }}
+                onMouseLeave={(e) => {
+                  if (canMoveDown) e.currentTarget.style.color = C.muted;
+                }}
+              >
+                <ArrowDown size={11} strokeWidth={2.2} />
+              </button>
+            </div>
+          </PTd>
+        )}
         <PTd dense>
           <span style={{ color: C.dim, display: "inline-flex" }}>
             {expanded ? <ChevronDown size={13} strokeWidth={1.8} /> : <ChevronRight size={13} strokeWidth={1.8} />}
@@ -12979,7 +13087,7 @@ function ConsolidatedRow({ group, bondPrices, futurePrices, stockPrices, fciPric
       {/* Fila expandida: muestra cada operación individual del grupo */}
       {expanded && (
         <tr style={{ borderBottom: `1px solid ${C.border}` }}>
-          <td colSpan={readOnlyPrice ? 10 : 11} style={{ padding: 0, backgroundColor: C.deep }}>
+          <td colSpan={(readOnlyPrice ? 10 : 11) + (reorderable ? 1 : 0)} style={{ padding: 0, backgroundColor: C.deep }}>
             {/* Padding compacto: lo justo para no pegarse a los bordes pero
                 sin desperdiciar espacio vertical. Padding-left grande para
                 que la columna OP del sub-table arranque alineada con TICKER
