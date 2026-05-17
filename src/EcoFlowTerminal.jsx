@@ -1295,6 +1295,9 @@ function useLinkedBrokers(userId) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [refreshKey, setRefreshKey] = useState(0);
+  // Solo la primera carga muestra el spinner; los refetch/poll posteriores
+  // son refrescos silenciosos en segundo plano.
+  const hasLoadedRef = useRef(false);
 
   const refetch = useCallback(() => setRefreshKey((k) => k + 1), []);
 
@@ -1304,7 +1307,7 @@ function useLinkedBrokers(userId) {
       return;
     }
     let cancelled = false;
-    setLoading(true);
+    if (!hasLoadedRef.current) setLoading(true);
     setError(null);
     supabase
       .from("linked_brokers")
@@ -1321,11 +1324,36 @@ function useLinkedBrokers(userId) {
           setData(rows || []);
         }
         setLoading(false);
+        hasLoadedRef.current = true;
       });
     return () => {
       cancelled = true;
     };
   }, [userId, refreshKey]);
+
+  // Refresco automático: el estado del broker cambia del lado del servidor
+  // (el cron de keep-alive actualiza last_sync_at cada 10 min, o marca el
+  // vínculo como expired/error si algo falla). Sin esto, la UI mostraría un
+  // estado stale hasta que el usuario recargue la página a mano.
+  //   - Poll cada 60s mientras la pestaña está abierta.
+  //   - Refetch inmediato cuando la pestaña vuelve a estar visible (el caso
+  //     típico: el usuario estuvo en otra pestaña y vuelve).
+  useEffect(() => {
+    if (!userId) return;
+    const interval = setInterval(() => {
+      setRefreshKey((k) => k + 1);
+    }, 60000);
+    const onVisible = () => {
+      if (document.visibilityState === "visible") {
+        setRefreshKey((k) => k + 1);
+      }
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      clearInterval(interval);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
+  }, [userId]);
 
   return { data, loading, error, refetch };
 }
