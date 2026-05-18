@@ -1445,6 +1445,19 @@ function iolCashRank(accountType) {
   return 1;
 }
 
+/* Mapea una subcuenta IOL a la clave de moneda que el resto de la app
+ * usa para el efectivo (balanceByCurrency / liquidez):
+ *   Pesos                -> "ARS"
+ *   Dolar MEP (Argentina)-> "USD-MEP"
+ *   Dolar Cable (EE.UU.) -> "USD-CCL"
+ */
+function iolBalanceCurrency(accountType) {
+  const t = String(accountType || "").toLowerCase();
+  if (t.includes("peso")) return "ARS";
+  if (t.includes("estados_unidos")) return "USD-CCL";
+  return "USD-MEP";
+}
+
 function usePositionsBrokerStats(userId) {
   const [data, setData] = useState({});
   const [loading, setLoading] = useState(true);
@@ -7399,6 +7412,32 @@ function DashboardOverview({ positions, fxState, bondPricesState, futurePricesSt
   const balanceByCurrency = cashState?.balanceByCurrency || { "ARS": 0, "USD-MEP": 0, "USD-CCL": 0 };
   const movements = cashState?.movements || [];
 
+  // ── Efectivo de IOL (broker_cash_snapshots) ─────────────────────────
+  // El worker iol-cash-sync deja una foto del cash de cada subcuenta IOL.
+  // Lo sumamos al patrimonio usando SIEMPRE `available` (disponible), NO
+  // `total` (saldo): el saldo incluye la plata "comprometida" por compras
+  // que todavía no liquidaron (T+1), y esos títulos YA están contados en
+  // `positions`. Sumar el saldo completo duplicaría esa plata. IOL mismo
+  // calcula su totalEnPesos con disponible + títulos, no con saldo.
+  const { user: dashUser } = useAuth();
+  const { data: brokerCashSnapshots } = useBrokerCashSnapshots(dashUser?.id);
+  const iolCashByCurrency = useMemo(() => {
+    const acc = { "ARS": 0, "USD-MEP": 0, "USD-CCL": 0 };
+    for (const s of brokerCashSnapshots || []) {
+      if (s.broker !== "iol") continue;
+      acc[iolBalanceCurrency(s.account_type)] += Number(s.available) || 0;
+    }
+    return acc;
+  }, [brokerCashSnapshots]);
+
+  // Efectivo total = manual (cash_movements) + IOL (disponible). Es lo que
+  // consumen TotalCard y DistributionCard para el patrimonio y su reparto.
+  const balanceWithIol = useMemo(() => ({
+    "ARS": (balanceByCurrency["ARS"] || 0) + iolCashByCurrency["ARS"],
+    "USD-MEP": (balanceByCurrency["USD-MEP"] || 0) + iolCashByCurrency["USD-MEP"],
+    "USD-CCL": (balanceByCurrency["USD-CCL"] || 0) + iolCashByCurrency["USD-CCL"],
+  }), [balanceByCurrency, iolCashByCurrency]);
+
   // Lookup de adjustments de futuros — usado por TotalCard y DistributionCard
   // para descontar el P&L ya acreditado del valor de los futuros (ese P&L
   // ya está en cash y sumarlo de nuevo es double-counting). Si el hook
@@ -7451,7 +7490,7 @@ function DashboardOverview({ positions, fxState, bondPricesState, futurePricesSt
           stockPrices={stockPrices}
           fciPrices={fciPrices}
           valuationCurrency={valuationCurrency}
-          balanceByCurrency={balanceByCurrency}
+          balanceByCurrency={balanceWithIol}
           futureAdjLookup={futureAdjLookup}
           onIngresar={onIngresar}
           onRetirar={onRetirar}
@@ -7464,7 +7503,7 @@ function DashboardOverview({ positions, fxState, bondPricesState, futurePricesSt
           stockPrices={stockPrices}
           fciPrices={fciPrices}
           valuationCurrency={valuationCurrency}
-          balanceByCurrency={balanceByCurrency}
+          balanceByCurrency={balanceWithIol}
           futureAdjLookup={futureAdjLookup}
           view={distView}
           onViewChange={setDistView}
@@ -7476,6 +7515,7 @@ function DashboardOverview({ positions, fxState, bondPricesState, futurePricesSt
           futurePrices={futurePrices}
           valuationCurrency={valuationCurrency}
           movements={movements}
+          iolCashByCurrency={iolCashByCurrency}
           futureAdjLookup={futureAdjLookup}
           window={liquidityWindow}
           onWindowChange={setLiquidityWindow}
@@ -8388,10 +8428,10 @@ function DonutChart({ slices, size = 100 }) {
 
 /* ─────────────── Card 3: Liquidez Proyectada ─────────────── */
 
-function LiquidityCard({ positions, fx, bondPrices, futurePrices, valuationCurrency, movements, futureAdjLookup, window: windowKey, onWindowChange }) {
+function LiquidityCard({ positions, fx, bondPrices, futurePrices, valuationCurrency, movements, iolCashByCurrency, futureAdjLookup, window: windowKey, onWindowChange }) {
   const breakdown = useMemo(
-    () => computeLiquidityBreakdown(positions, fx, valuationCurrency, windowKey, bondPrices, movements, futurePrices, futureAdjLookup),
-    [positions, fx, valuationCurrency, windowKey, bondPrices, movements, futurePrices, futureAdjLookup]
+    () => computeLiquidityBreakdown(positions, fx, valuationCurrency, windowKey, bondPrices, movements, futurePrices, futureAdjLookup, iolCashByCurrency),
+    [positions, fx, valuationCurrency, windowKey, bondPrices, movements, futurePrices, futureAdjLookup, iolCashByCurrency]
   );
 
   // Mensaje de footer dinámico según el window seleccionado.
@@ -9786,8 +9826,18 @@ function prettifyGroupKey(key, view) {
  * El cash actual (CI) SIEMPRE se incluye como base. Las otras ventanas lo
  * acumulan sumándole los flujos esperados.
  */
-function computeLiquidityBreakdown(positions, fx, valuationCurrency, windowKey, bondPrices, movements, futurePrices, futureAdjLookup) {
+function computeLiquidityBreakdown(positions, fx, valuationCurrency, windowKey, bondPrices, movements, futurePrices, futureAdjLookup, iolCashByCurrency) {
   const result = { ARS: 0, "USD-MEP": 0, "USD-CCL": 0 };
+
+  // 0) Efectivo disponible de IOL (broker_cash_snapshots, campo `available`).
+  // Es liquidez real de hoy, asi que entra a la base — fluye a CI y a
+  // todas las ventanas. Usamos `available` (disponible), nunca `total`:
+  // el saldo total incluye plata "comprometida" por compras sin liquidar.
+  if (iolCashByCurrency) {
+    for (const k of ["ARS", "USD-MEP", "USD-CCL"]) {
+      result[k] += Number(iolCashByCurrency[k]) || 0;
+    }
+  }
 
   const todayIso = new Date().toLocaleDateString("en-CA", {
     timeZone: "America/Argentina/Buenos_Aires",
