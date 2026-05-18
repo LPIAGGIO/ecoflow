@@ -7504,6 +7504,7 @@ function DashboardOverview({ positions, fxState, bondPricesState, futurePricesSt
           fciPrices={fciPrices}
           valuationCurrency={valuationCurrency}
           balanceByCurrency={balanceWithIol}
+          iolCashByCurrency={iolCashByCurrency}
           futureAdjLookup={futureAdjLookup}
           view={distView}
           onViewChange={setDistView}
@@ -8180,7 +8181,7 @@ function TotalCard({ positions, fx, bondPrices, futurePrices, stockPrices, fciPr
  *     denominación.
  */
 
-function DistributionCard({ positions, fx, bondPrices, futurePrices, stockPrices, fciPrices, valuationCurrency, balanceByCurrency, futureAdjLookup, view, onViewChange }) {
+function DistributionCard({ positions, fx, bondPrices, futurePrices, stockPrices, fciPrices, valuationCurrency, balanceByCurrency, iolCashByCurrency, futureAdjLookup, view, onViewChange }) {
   // Vista "Instrumentos": donut con categorías + cash como una porción más.
   const instrumentSlices = useMemo(() => {
     const groups = groupByCategory(positions, fx, valuationCurrency, bondPrices, fciPrices);
@@ -8246,6 +8247,62 @@ function DistributionCard({ positions, fx, bondPrices, futurePrices, stockPrices
     // cuánto del P&L del futuro es no acreditado (afecta el "value").
   }, [positions, fx, valuationCurrency, bondPrices, futurePrices, futureAdjLookup, stockPrices, fciPrices, balanceByCurrency]);
 
+  // Vista "Brokers": donut con el patrimonio repartido por broker. Las
+  // posiciones se reparten por su columna `broker`; el cash disponible de
+  // IOL suma al bucket de IOL (sabemos que es suyo); el cash manual de
+  // cash_movements no está atribuido a ningún broker, así que va a una
+  // porción aparte "Efectivo". Los colores son los del catálogo de
+  // brokers, para que el donut matchee los badges de la tabla.
+  const brokerSlices = useMemo(() => {
+    const byBroker = groupByBroker(positions, fx, valuationCurrency, bondPrices, fciPrices);
+
+    // Cash disponible de IOL → suma al bucket de IOL.
+    let iolCash = 0;
+    if (iolCashByCurrency) {
+      for (const [cur, amt] of Object.entries(iolCashByCurrency)) {
+        if (!amt) continue;
+        const c = convertValue(amt, cur, valuationCurrency, fx);
+        if (c != null) iolCash += c;
+      }
+    }
+    if (iolCash > 0) byBroker["iol"] = (byBroker["iol"] || 0) + iolCash;
+
+    // Cash total (balanceByCurrency ya viene mergeado: manual + IOL).
+    let totalCash = 0;
+    if (balanceByCurrency) {
+      for (const [cur, amt] of Object.entries(balanceByCurrency)) {
+        if (!amt || amt <= 0) continue;
+        const c = convertValue(amt, cur, valuationCurrency, fx);
+        if (c != null) totalCash += c;
+      }
+    }
+    const manualCash = Math.max(0, totalCash - iolCash);
+
+    const entries = [];
+    for (const [brokerId, value] of Object.entries(byBroker)) {
+      if (value <= 0) continue;
+      const meta = BROKER_CATALOG[brokerId];
+      entries.push({
+        key: brokerId,
+        label: meta ? meta.label : brokerId,
+        value,
+        color: meta ? meta.color : C.muted,
+      });
+    }
+    if (manualCash > 0) {
+      entries.push({ key: "_cash", label: "Efectivo", value: manualCash, color: C.green });
+    }
+
+    const total = entries.reduce((acc, e) => acc + e.value, 0);
+    if (total <= 0) return [];
+    return entries
+      .map((e) => ({ ...e, pct: (e.value / total) * 100 }))
+      .sort((a, b) => b.value - a.value);
+  }, [positions, fx, valuationCurrency, bondPrices, fciPrices, balanceByCurrency, iolCashByCurrency]);
+
+  // Slices activos según la vista: instrumentos y brokers usan el donut.
+  const activeSlices = view === "brokers" ? brokerSlices : instrumentSlices;
+
   return (
     <div style={cardBaseStyle()}>
       <div className="flex items-center justify-between" style={{ marginBottom: 12 }}>
@@ -8254,6 +8311,7 @@ function DistributionCard({ positions, fx, bondPrices, futurePrices, stockPrices
           {[
             { key: "instruments", label: "Instrumentos" },
             { key: "monedas",     label: "Monedas" },
+            { key: "brokers",     label: "Brokers" },
           ].map((opt) => {
             const active = view === opt.key;
             return (
@@ -8318,17 +8376,17 @@ function DistributionCard({ positions, fx, bondPrices, futurePrices, stockPrices
             );
           })}
         </div>
-      ) : instrumentSlices.length === 0 ? (
-        /* Vista Instrumentos sin datos */
+      ) : activeSlices.length === 0 ? (
+        /* Vista donut (instrumentos / brokers) sin datos */
         <div style={{ fontSize: 12, color: C.dim, padding: "20px 0", textAlign: "center" }}>
           Sin datos para distribuir
         </div>
       ) : (
-        /* Vista Instrumentos: donut + lista */
+        /* Vista donut (instrumentos / brokers): donut + lista */
         <div className="flex items-center gap-3">
-          <DonutChart slices={instrumentSlices} size={106} />
+          <DonutChart slices={activeSlices} size={106} />
           <div className="flex flex-col" style={{ flex: 1, gap: 6, minWidth: 0 }}>
-            {instrumentSlices.slice(0, 5).map((s) => (
+            {activeSlices.slice(0, 5).map((s) => (
               <div key={s.key} className="flex items-center gap-2" style={{ minWidth: 0 }}>
                 <span style={{ width: 8, height: 8, backgroundColor: s.color, flexShrink: 0 }} />
                 <span style={{ fontSize: 11, color: C.muted, fontFamily: "'Roboto', sans-serif", flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
@@ -8339,9 +8397,9 @@ function DistributionCard({ positions, fx, bondPrices, futurePrices, stockPrices
                 </span>
               </div>
             ))}
-            {instrumentSlices.length > 5 && (
+            {activeSlices.length > 5 && (
               <div style={{ fontSize: 10, color: C.dim, fontFamily: "'Roboto', sans-serif" }}>
-                +{instrumentSlices.length - 5} más
+                +{activeSlices.length - 5} más
               </div>
             )}
           </div>
@@ -9761,6 +9819,41 @@ function groupByCurrency(positions, fx, valuationCurrency, bondPrices) {
     if (v == null) continue;
     const cur = g.currency || "ARS";
     result[cur] = (result[cur] || 0) + v;
+  }
+  return result;
+}
+
+/**
+ * Reparte el valor de mercado de las posiciones por broker de origen.
+ * Devuelve { brokerId: valorEnValuationCurrency }.
+ *
+ * A diferencia de groupByCategory/groupByCurrency, acá NO podemos
+ * consolidar primero y agrupar después: consolidatePositions agrupa por
+ * ticker (no por broker), así que un grupo que mezcla brokers — el mismo
+ * ticker comprado en IOL y en Cocos — no tendría un broker único. Por
+ * eso partimos las operaciones por broker PRIMERO y consolidamos cada
+ * broker por separado. Futuros excluidos, igual criterio que las otras
+ * vistas del donut.
+ */
+function groupByBroker(positions, fx, valuationCurrency, bondPrices, fciPrices) {
+  const result = {};
+  const nonFuture = positions.filter((p) => p.instrument_type !== "future");
+
+  const byBroker = {};
+  for (const p of nonFuture) {
+    const b = p.broker || "manual";
+    (byBroker[b] = byBroker[b] || []).push(p);
+  }
+
+  for (const [broker, ps] of Object.entries(byBroker)) {
+    const groups = consolidatePositions(ps, bondPrices, undefined, fciPrices);
+    let sum = 0;
+    for (const g of groups) {
+      if (g.valueAtMarket == null) continue;
+      const v = convertValue(g.valueAtMarket, g.currency || "ARS", valuationCurrency, fx);
+      if (v != null) sum += v;
+    }
+    if (sum !== 0) result[broker] = sum;
   }
   return result;
 }
@@ -12867,6 +12960,10 @@ function ConsolidatedRow({ group, bondPrices, futurePrices, stockPrices, fciPric
       ? "Bono"
       : (meta.label || group.instrument_type);
 
+  // Broker(s) del grupo: "iol"/"cocos"/"manual" si es uno solo, "mixed"
+  // si la fila consolida operaciones de distintos brokers.
+  const rowBroker = groupBroker(group);
+
   const pnlColor = group.pnl == null ? C.dim : group.pnl >= 0 ? C.green : C.red;
   const pnlSign = group.pnl == null ? "" : group.pnl >= 0 ? "+" : "";
 
@@ -13013,6 +13110,7 @@ function ConsolidatedRow({ group, bondPrices, futurePrices, stockPrices, fciPric
             <span className="eco-mono" style={{ fontWeight: 600, fontSize: 12.5 }}>
               {fciDisplayName(group.ticker)}
             </span>
+            {rowBroker && <BrokerBadge broker={rowBroker} />}
             {group.isShort && (
               <span
                 style={{
@@ -13653,31 +13751,61 @@ function PTd({ children, align = "left", style = {}, dense = false }) {
 /* ─────────────── Fila de posición ─────────────── */
 /* ─────────────── BrokerBadge ───────────────
  * Pill chico con el código del broker (color del catálogo). Marca las
- * posiciones que vienen sincronizadas por API (IOL): esas son
- * read-only en la UI porque las reescribe el worker.
+ * posiciones por su broker de origen. broker="mixed" → grupo consolidado
+ * que mezcla operaciones de más de un broker (ej. el mismo ticker en
+ * IOL y en Cocos a la vez).
  */
 function BrokerBadge({ broker }) {
+  const base = {
+    fontSize: 8,
+    fontWeight: 700,
+    letterSpacing: "0.12em",
+    padding: "1px 5px",
+    borderRadius: 3,
+    marginLeft: 6,
+    verticalAlign: "middle",
+    whiteSpace: "nowrap",
+  };
+  if (broker === "mixed") {
+    return (
+      <span
+        style={{
+          ...base,
+          color: C.muted,
+          backgroundColor: "rgba(255,255,255,0.05)",
+          border: "1px solid rgba(255,255,255,0.15)",
+        }}
+      >
+        MIXTO
+      </span>
+    );
+  }
   const meta = BROKER_CATALOG[broker];
   if (!meta) return null;
   return (
     <span
       style={{
-        fontSize: 8,
-        fontWeight: 700,
-        letterSpacing: "0.12em",
-        padding: "1px 5px",
-        borderRadius: 3,
+        ...base,
         color: meta.color,
         backgroundColor: `${meta.color}1A`,
         border: `1px solid ${meta.color}44`,
-        marginLeft: 6,
-        verticalAlign: "middle",
-        whiteSpace: "nowrap",
       }}
     >
       {meta.short}
     </span>
   );
+}
+
+/* Deriva el/los broker(s) de un grupo consolidado mirando sus
+ * operaciones: si todas son del mismo broker devuelve ese; si hay
+ * mezcla devuelve "mixed"; si no hay operaciones, null. */
+function groupBroker(group) {
+  const ops = (group && group.operations) || [];
+  const set = new Set();
+  for (const o of ops) set.add(o.broker || "manual");
+  if (set.size === 0) return null;
+  if (set.size === 1) return [...set][0];
+  return "mixed";
 }
 
 function PositionRow({ position, bondPrices, onEdit, onDelete, onUpdatePrice }) {
