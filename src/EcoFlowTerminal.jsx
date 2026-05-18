@@ -12696,68 +12696,44 @@ function ConsolidatedRow({ group, bondPrices, futurePrices, stockPrices, fciPric
       return { dailyPnl: d.pnl, dailyPct: d.pct, marketClosed: false };
     }
 
-    // Futuros: cada operación tiene sign distinto (long/short).
-    // Para el P&L diario del grupo agregado: tomamos el último settle
-    // KNOWN del lookup (curr_settle del último adjustment pending o
-    // confirmed para alguna position del grupo). Si no hay lookup o no
-    // hay adjustments, caemos al fallback fp.settlement del feed Primary.
+    // Futuros: el P&L del día se calcula POR OPERACIÓN y se suma. Cada
+    // lote tiene su propia base — el "settle" de su último ajuste diario
+    // si ya tiene historial, o su propio entry_price si se abrió hoy.
+    // Un lote viejo y un lote comprado hoy NO comparten referencia, así
+    // que NO se puede usar un settle único para todo el grupo: eso
+    // subvalúa los lotes abiertos en el día (que deberían medirse desde
+    // su precio de compra, no desde un settle anterior a la compra).
     //
-    // La diferencia: lookup.lastSettle siempre apunta al settle del
-    // último día con ajuste registrado en BD, así que el P&L del día
-    // queda estrictamente intraday (variación desde ese settle hasta
-    // current_price). fp.settlement, en cambio, es el settle "más
-    // reciente" del feed Primary, que puede ser del día anterior incluso
-    // si hay 3 días de ajustes pendientes acumulados — eso inflaría
-    // mal el P&L del día.
-    const ticker = (group.ticker || "").toUpperCase();
-    const fp = futurePrices?.[ticker];
-    if (!fp || fp.price == null || fp.error) {
-      return { dailyPnl: null, dailyPct: null };
-    }
-    const last = Number(fp.price);
-
-    let settle = null;
-    if (futureAdjLookup && Array.isArray(group.operations)) {
-      // Tomamos el lastSettle más reciente entre las position_ids del
-      // grupo (en consolidados de futuros suele haber 1 sola anchor op).
-      let bestDate = null;
-      for (const op of group.operations) {
-        const entry = futureAdjLookup.get(op.id);
-        if (entry?.lastSettle == null) continue;
-        if (bestDate == null || entry.lastAdjDate > bestDate) {
-          bestDate = entry.lastAdjDate;
-          settle = entry.lastSettle;
-        }
-      }
-    }
-    // Sin adjustments en BD para ninguna op del grupo:
-    //   - Si TODAS las ops se abrieron HOY (primera vez que opera el
-    //     ticker), el P&L del día debe medirse desde el PPP del grupo:
-    //     el "día" del usuario arrancó en el momento de comprar, no
-    //     contra el settle de ayer del feed.
-    //   - Caso contrario, caemos al settle del feed Primary.
-    if (settle == null) {
-      const todayIso = new Date().toISOString().slice(0, 10);
-      const allOpsToday = group.operations.every(
-        (op) => op.entry_date === todayIso
-      );
-      if (allOpsToday && Number(group.ppp) > 0) {
-        settle = Number(group.ppp);
-      } else if (fp.settlement != null) {
-        settle = Number(fp.settlement);
-      }
-    }
-    if (settle == null || !Number.isFinite(last) || !Number.isFinite(settle) || settle <= 0) {
-      return { dailyPnl: null, dailyPct: null };
-    }
-    // Multiplier: tomamos del primer op (asumimos consistente en el grupo)
-    const multiplier = Number(group.operations[0]?.extra?.contract_size) || 1000;
+    // Esto es exactamente lo que hace computeDailyPnL op por op — y lo
+    // que hace el modal de "P&L Diario" al sumar posición por posición.
+    // Calcularlo igual acá garantiza que la tarjeta y el modal cuadren.
     const netQty = Number(group.netQty) || 0;
     if (netQty === 0) return { dailyPnl: null, dailyPct: null };
-    const diffPerUnit = last - settle;
+
+    let dayTotal = 0;
+    let anyData = false;
+    for (const op of group.operations) {
+      const d = computeDailyPnL(
+        op, bondPrices, futurePrices, stockPrices, futureAdjLookup, fciPrices
+      );
+      if (!d || d.pnl == null || !Number.isFinite(d.pnl)) continue;
+      anyData = true;
+      dayTotal += d.pnl;
+    }
+    if (!anyData) return { dailyPnl: null, dailyPct: null };
+
+    // % del día: P&L del día sobre el notional actual del grupo
+    // (cantidad neta × multiplicador × precio actual).
+    const ticker = (group.ticker || "").toUpperCase();
+    const fp = futurePrices?.[ticker];
+    const last = fp && fp.price != null && !fp.error ? Number(fp.price) : null;
+    const multiplier = Number(group.operations[0]?.extra?.contract_size) || 1000;
+    const notionalNow = last != null
+      ? Math.abs(netQty) * multiplier * last
+      : 0;
     return {
-      dailyPnl: diffPerUnit * netQty * multiplier,
-      dailyPct: (diffPerUnit / settle) * 100,
+      dailyPnl: dayTotal,
+      dailyPct: notionalNow > 0 ? (dayTotal / notionalNow) * 100 : null,
     };
   }, [group, bondPrices, futurePrices, stockPrices, fciPrices, futureAdjLookup]);
 
