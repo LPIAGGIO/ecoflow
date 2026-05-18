@@ -1436,6 +1436,15 @@ function iolAccountLabel(accountType, currency) {
   return currency || accountType || "Cuenta";
 }
 
+/* Orden de las subcuentas en la tarjeta: Pesos primero, después Dólar
+ * MEP, y al final Dólar Cable (EE.UU.). */
+function iolCashRank(accountType) {
+  const t = String(accountType || "").toLowerCase();
+  if (t.includes("peso")) return 0;
+  if (t.includes("estados_unidos")) return 2;
+  return 1;
+}
+
 function usePositionsBrokerStats(userId) {
   const [data, setData] = useState({});
   const [loading, setLoading] = useState(true);
@@ -1983,12 +1992,14 @@ function BrokerCard({ id, meta, linked, positionCount, userId, refetchBrokers, c
   // subcuentas en cero para no ensuciar la tarjeta con saldos vacíos.
   const iolCashRows =
     id === "iol"
-      ? (cashSnapshots || []).filter(
-          (s) =>
-            s.broker === "iol" &&
-            (Number(s.total) !== 0 ||
-              (s.available != null && Number(s.available) !== 0))
-        )
+      ? (cashSnapshots || [])
+          .filter(
+            (s) =>
+              s.broker === "iol" &&
+              (Number(s.total) !== 0 ||
+                (s.available != null && Number(s.available) !== 0))
+          )
+          .sort((a, b) => iolCashRank(a.account_type) - iolCashRank(b.account_type))
       : [];
   const showCash = isConnected && iolCashRows.length > 0;
   const cashSnapshotAt = iolCashRows.reduce(
@@ -13343,6 +13354,18 @@ function ConsolidatedRow({ group, bondPrices, futurePrices, stockPrices, fciPric
                             // editar ni borrar desde acá. Para tocar la venta
                             // original, ir a Libro de operaciones.
                             <span style={{ color: C.dim, fontSize: 9 }}>—</span>
+                          ) : p.broker === "iol" ? (
+                            // Posiciones sincronizadas desde IOL: read-only.
+                            // El worker iol-positions-sync las reescribe en
+                            // cada corrida; editarlas a mano no tiene sentido.
+                            <span
+                              className="flex items-center justify-end"
+                              style={{ color: C.dim, fontSize: 9, letterSpacing: "0.08em", gap: 3 }}
+                              title="Sincronizada desde IOL — no se edita a mano"
+                            >
+                              <RefreshCw size={9} strokeWidth={1.8} />
+                              AUTO
+                            </span>
                           ) : (
                             <div className="flex items-center justify-end gap-1">
                               <button
@@ -13578,11 +13601,42 @@ function PTd({ children, align = "left", style = {}, dense = false }) {
 
 
 /* ─────────────── Fila de posición ─────────────── */
+/* ─────────────── BrokerBadge ───────────────
+ * Pill chico con el código del broker (color del catálogo). Marca las
+ * posiciones que vienen sincronizadas por API (IOL): esas son
+ * read-only en la UI porque las reescribe el worker.
+ */
+function BrokerBadge({ broker }) {
+  const meta = BROKER_CATALOG[broker];
+  if (!meta) return null;
+  return (
+    <span
+      style={{
+        fontSize: 8,
+        fontWeight: 700,
+        letterSpacing: "0.12em",
+        padding: "1px 5px",
+        borderRadius: 3,
+        color: meta.color,
+        backgroundColor: `${meta.color}1A`,
+        border: `1px solid ${meta.color}44`,
+        marginLeft: 6,
+        verticalAlign: "middle",
+        whiteSpace: "nowrap",
+      }}
+    >
+      {meta.short}
+    </span>
+  );
+}
+
 function PositionRow({ position, bondPrices, onEdit, onDelete, onUpdatePrice }) {
   const meta = INSTRUMENT_TYPES[position.instrument_type] || {};
   const TypeIcon = meta.icon || Activity;
   const typeColor = meta.color ? C.cat[meta.color] : C.muted;
   const isSell = position.operation_type === "sell";
+  // Posición sincronizada desde IOL: read-only (la reescribe el worker).
+  const isIol = position.broker === "iol";
 
   // Para bond_ars y bond_usd mostramos "Bono" unificado: la moneda real
   // ya aparece en su propia columna, así que distinguir ARS/USD acá
@@ -13662,6 +13716,7 @@ function PositionRow({ position, bondPrices, onEdit, onDelete, onUpdatePrice }) 
         <span className="eco-mono" style={{ fontWeight: 600, fontSize: 12 }}>
           {fciDisplayName(position.ticker)}
         </span>
+        {isIol && <BrokerBadge broker="iol" />}
       </PTd>
       <PTd dense align="right">
         <span
@@ -13723,52 +13778,63 @@ function PositionRow({ position, bondPrices, onEdit, onDelete, onUpdatePrice }) 
         </span>
       </PTd>
       <PTd dense align="right">
-        <div className="flex items-center justify-end gap-1">
-          <button
-            onClick={onEdit}
-            aria-label="Editar"
-            style={{
-              backgroundColor: "transparent",
-              border: `1px solid transparent`,
-              color: C.dim,
-              padding: 5,
-              cursor: "pointer",
-              transition: "all 100ms ease",
-            }}
-            onMouseEnter={(e) => {
-              e.currentTarget.style.color = C.accent;
-              e.currentTarget.style.borderColor = C.accentBorder;
-            }}
-            onMouseLeave={(e) => {
-              e.currentTarget.style.color = C.dim;
-              e.currentTarget.style.borderColor = "transparent";
-            }}
+        {isIol ? (
+          <span
+            className="flex items-center justify-end"
+            style={{ color: C.dim, fontSize: 9, letterSpacing: "0.08em", gap: 4 }}
+            title="Posición sincronizada automáticamente desde IOL — no se edita ni se borra a mano"
           >
-            <Pencil size={12} strokeWidth={1.8} />
-          </button>
-          <button
-            onClick={onDelete}
-            aria-label="Borrar"
-            style={{
-              backgroundColor: "transparent",
-              border: `1px solid transparent`,
-              color: C.dim,
-              padding: 5,
-              cursor: "pointer",
-              transition: "all 100ms ease",
-            }}
-            onMouseEnter={(e) => {
-              e.currentTarget.style.color = C.red;
-              e.currentTarget.style.borderColor = "rgba(248,113,113,0.40)";
-            }}
-            onMouseLeave={(e) => {
-              e.currentTarget.style.color = C.dim;
-              e.currentTarget.style.borderColor = "transparent";
-            }}
-          >
-            <Trash2 size={12} strokeWidth={1.8} />
-          </button>
-        </div>
+            <RefreshCw size={10} strokeWidth={1.8} />
+            AUTO
+          </span>
+        ) : (
+          <div className="flex items-center justify-end gap-1">
+            <button
+              onClick={onEdit}
+              aria-label="Editar"
+              style={{
+                backgroundColor: "transparent",
+                border: `1px solid transparent`,
+                color: C.dim,
+                padding: 5,
+                cursor: "pointer",
+                transition: "all 100ms ease",
+              }}
+              onMouseEnter={(e) => {
+                e.currentTarget.style.color = C.accent;
+                e.currentTarget.style.borderColor = C.accentBorder;
+              }}
+              onMouseLeave={(e) => {
+                e.currentTarget.style.color = C.dim;
+                e.currentTarget.style.borderColor = "transparent";
+              }}
+            >
+              <Pencil size={12} strokeWidth={1.8} />
+            </button>
+            <button
+              onClick={onDelete}
+              aria-label="Borrar"
+              style={{
+                backgroundColor: "transparent",
+                border: `1px solid transparent`,
+                color: C.dim,
+                padding: 5,
+                cursor: "pointer",
+                transition: "all 100ms ease",
+              }}
+              onMouseEnter={(e) => {
+                e.currentTarget.style.color = C.red;
+                e.currentTarget.style.borderColor = "rgba(248,113,113,0.40)";
+              }}
+              onMouseLeave={(e) => {
+                e.currentTarget.style.color = C.dim;
+                e.currentTarget.style.borderColor = "transparent";
+              }}
+            >
+              <Trash2 size={12} strokeWidth={1.8} />
+            </button>
+          </div>
+        )}
       </PTd>
     </tr>
   );
