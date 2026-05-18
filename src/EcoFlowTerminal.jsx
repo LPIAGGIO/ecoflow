@@ -7523,10 +7523,7 @@ function DashboardOverview({ positions, fxState, bondPricesState, futurePricesSt
         />
       </div>
 
-      {/* 3. Línea de cotizaciones */}
-      <FxLine fx={fx} error={fxError} />
-
-      {/* 4. Flujos proyectados (V1: lista simple) */}
+      {/* Flujos proyectados — colapsable, abrir para ver */}
       <FlowsSection positions={positions} bondPrices={bondPrices} fx={fx} futurePrices={futurePrices} />
     </div>
   );
@@ -7924,14 +7921,6 @@ function TotalCard({ positions, fx, bondPrices, futurePrices, stockPrices, fciPr
   const positionsValue = totals.value ?? 0;
   const totalWithCash = positionsValue + cashInValuation;
 
-  const tcLine = useMemo(() => {
-    if (!fx) return null;
-    const parts = [];
-    if (fx.mep?.sell) parts.push(`MEP ${fmtCurrencyValue(fx.mep.sell, "ARS")}`);
-    if (fx.ccl?.sell) parts.push(`CCL ${fmtCurrencyValue(fx.ccl.sell, "ARS")}`);
-    return parts.join(" · ");
-  }, [fx]);
-
   // Si todas las posiciones cayeron al fallback "a costo" (sin precio de
   // mercado), mostramos el badge "A costo" porque el total no refleja
   // mercado real. Si al menos UNA tiene precio, mostramos "A mercado".
@@ -8048,12 +8037,6 @@ function TotalCard({ positions, fx, bondPrices, futurePrices, stockPrices, fciPr
       )}
       {!showDaily && showPnl && (
         <div style={{ marginBottom: 12 }} />
-      )}
-
-      {tcLine && (
-        <div style={{ fontSize: 11, color: C.muted, fontFamily: "'JetBrains Mono', monospace" }}>
-          {tcLine}
-        </div>
       )}
 
       {totals.pricesFromCost > 0 && totals.pricesFromMarket > 0 && (
@@ -8405,6 +8388,58 @@ function DistributionCard({ positions, fx, bondPrices, futurePrices, stockPrices
           </div>
         </div>
       )}
+
+      {/* Cotizaciones del dólar — sólo en la vista Instrumentos, debajo
+          del donut. Reemplaza la tira larga de FX que vivía suelta en el
+          dashboard. Mostramos el valor de venta (la cotización de
+          referencia). */}
+      {view === "instruments" && (
+        <div style={{ marginTop: 14, paddingTop: 12, borderTop: `1px solid ${C.border}` }}>
+          <div
+            style={{
+              fontSize: 9,
+              letterSpacing: "0.18em",
+              color: C.dim,
+              textTransform: "uppercase",
+              fontWeight: 600,
+              fontFamily: "'Roboto', sans-serif",
+              marginBottom: 8,
+            }}
+          >
+            Dólar hoy
+          </div>
+          <div
+            className="grid"
+            style={{ gridTemplateColumns: "1fr 1fr", gap: "7px 18px" }}
+          >
+            {[
+              { key: "mayorista", label: "Spot" },
+              { key: "mep", label: "MEP" },
+              { key: "ccl", label: "CCL" },
+              { key: "blue", label: "Blue" },
+            ].map((it) => {
+              const sell = fx?.[it.key]?.sell;
+              return (
+                <div key={it.key} className="flex items-center justify-between">
+                  <span style={{ fontSize: 10.5, color: C.muted, fontFamily: "'Roboto', sans-serif" }}>
+                    {it.label}
+                  </span>
+                  <span
+                    style={{
+                      fontSize: 11.5,
+                      color: sell == null ? C.dim : C.text,
+                      fontFamily: "'JetBrains Mono', monospace",
+                      fontWeight: 500,
+                    }}
+                  >
+                    {sell == null ? "—" : fmtCurrencyValue(sell, "ARS")}
+                  </span>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -8579,6 +8614,9 @@ function LiquidityCard({ positions, fx, bondPrices, futurePrices, valuationCurre
 /* ─────────────── Sección Flujos Proyectados (V1: placeholder) ─────────────── */
 
 function FlowsSection({ positions, bondPrices, fx, futurePrices }) {
+  // Colapsado por defecto — se abre con click, igual que "Posiciones
+  // cerradas hoy". Despeja la pantalla; los vencimientos están a un clic.
+  const [open, setOpen] = useState(false);
   const upcomingMaturities = useMemo(() => {
     const now = new Date();
     const events = [];
@@ -8658,20 +8696,60 @@ function FlowsSection({ positions, bondPrices, fx, futurePrices }) {
   }, [positions, bondPrices]);
 
   return (
-    <div style={{ ...cardBaseStyle(), padding: "12px 14px", minHeight: 0 }}>
-      <div className="flex items-center justify-between" style={{ marginBottom: 8 }}>
-        <span style={cardTitleStyle()}>Flujos proyectados</span>
-        <span style={{ fontSize: 10, color: C.dim, fontFamily: "'Roboto', sans-serif" }}>
-          Próximos 5 vencimientos
-        </span>
-      </div>
-
-      {upcomingMaturities.length === 0 ? (
-        <div style={{ fontSize: 12, color: C.dim, padding: "12px 0", textAlign: "center" }}>
-          No hay vencimientos próximos en tu cartera
+    <div style={{ marginBottom: 14 }}>
+      <button
+        onClick={() => setOpen((o) => !o)}
+        style={{
+          width: "100%",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          backgroundColor: C.panel,
+          border: `1px solid ${C.border}`,
+          padding: "10px 14px",
+          cursor: "pointer",
+          textAlign: "left",
+          fontFamily: "'Roboto', sans-serif",
+        }}
+      >
+        <div className="flex items-center gap-2">
+          {open
+            ? <ChevronDown size={13} strokeWidth={1.8} color={C.dim} />
+            : <ChevronRight size={13} strokeWidth={1.8} color={C.dim} />}
+          <span style={{
+            fontSize: 9,
+            letterSpacing: "0.22em",
+            color: C.dim,
+            textTransform: "uppercase",
+            fontWeight: 600,
+          }}>
+            Flujos proyectados ({upcomingMaturities.length})
+          </span>
+          <span style={{ fontSize: 9, color: C.dim, letterSpacing: "0.05em", textTransform: "uppercase", marginLeft: 6 }}>
+            Próximos 5 vencimientos
+          </span>
         </div>
-      ) : (
-        <table style={{ width: "100%", borderCollapse: "collapse" }}>
+        <span style={{ fontSize: 10, color: C.dim }}>
+          {open ? "Click para ocultar" : "Click para ver"}
+        </span>
+      </button>
+
+      {open && (
+        <div
+          style={{
+            backgroundColor: C.panel,
+            borderLeft: `1px solid ${C.border}`,
+            borderRight: `1px solid ${C.border}`,
+            borderBottom: `1px solid ${C.border}`,
+            padding: "4px 14px 10px",
+          }}
+        >
+          {upcomingMaturities.length === 0 ? (
+            <div style={{ fontSize: 12, color: C.dim, padding: "12px 0", textAlign: "center" }}>
+              No hay vencimientos próximos en tu cartera
+            </div>
+          ) : (
+            <table style={{ width: "100%", borderCollapse: "collapse" }}>
           <thead>
             <tr>
               <th style={flowsThStyle("left")}>Ticker</th>
@@ -8745,6 +8823,8 @@ function FlowsSection({ positions, bondPrices, fx, futurePrices }) {
             })}
           </tbody>
         </table>
+          )}
+        </div>
       )}
     </div>
   );
@@ -10319,6 +10399,7 @@ function consolidatePositions(positions, bondPrices, futurePrices, fciPrices) {
         operation_type: "closed_pair",
         ticker: closingOp.ticker,
         instrument_type: closingOp.instrument_type,
+        broker: closingOp.broker || "manual",
         quantity: matchedQty,
         entry_price: buyPrice,
         sell_price: sellPrice,
