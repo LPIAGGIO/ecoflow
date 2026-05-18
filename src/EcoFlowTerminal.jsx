@@ -9975,69 +9975,85 @@ function consolidatePositions(positions, bondPrices, futurePrices, fciPrices) {
       return ca.localeCompare(cb);
     });
 
-    // Recorremos en orden. Mantenemos PPP y qty acumulada de compras.
-    // En cada VENTA emitimos UNA fila sintética "closed_pair" que
-    // representa el par neteado: incluye qty, PPP del momento (entry_price)
-    // y precio de venta (sell_price), todo en una sola fila visual con
-    // badge CERRADA.
-    let cumulativeBuyQty = 0;
-    let cumulativeBuyValue = 0; // suma(qty × price) de compras
+    // Recorremos las operaciones en orden cronológico, calzando lotes.
+    // En cada momento la posición está long (compras sin calzar) o
+    // short (ventas sin calzar), nunca las dos cosas a la vez. Un SELL
+    // calza contra compras abiertas (cierra un long); un BUY calza
+    // contra ventas abiertas (cierra un short). El sobrante de
+    // cualquiera de los dos abre/extiende el lado opuesto. Cada lote
+    // calzado emite UNA fila sintética "closed_pair" con su precio de
+    // compra y de venta reales — funcione el cierre por el lado long
+    // o short. Esto hace que un short cerrado (vender y después
+    // recomprar) calcule el P&L igual de bien que un long.
+    let openBuyQty = 0;
+    let openBuyValue = 0;   // suma(qty × price) de compras sin calzar
+    let openSellQty = 0;
+    let openSellValue = 0;  // suma(qty × price) de ventas sin calzar
     const synthetic = [];
     let realizedPnlRaw = 0;
     let synthIdx = 0;
 
+    // Emite una fila "closed_pair" para un lote calzado y le suma el
+    // P&L raw. El P&L de un par siempre es (precioVenta − precioCompra)
+    // × qty, sin importar si el par se cerró por el lado long o short.
+    // - entry_price guarda el precio de la pata compradora.
+    // - sell_price guarda el precio de la pata vendedora.
+    // - entry_date es la fecha de la operación que CIERRA el par.
+    const pushPair = (closingOp, matchedQty, buyPrice, sellPrice) => {
+      synthetic.push({
+        id: `${closingOp.id}__synth_pair_${synthIdx}`,
+        isSynthetic: true,
+        operation_type: "closed_pair",
+        ticker: closingOp.ticker,
+        instrument_type: closingOp.instrument_type,
+        quantity: matchedQty,
+        entry_price: buyPrice,
+        sell_price: sellPrice,
+        entry_currency: closingOp.entry_currency,
+        entry_date: closingOp.entry_date,
+        notes: closingOp.notes || null,
+      });
+      synthIdx++;
+      realizedPnlRaw += matchedQty * (sellPrice - buyPrice);
+    };
+
     for (const op of sorted) {
       const qty = Number(op.quantity) || 0;
       const price = Number(op.entry_price) || 0;
+      if (qty <= 0) continue;
+
       if (op.operation_type === "sell") {
-        // PPP en este momento = valor acumulado / qty acumulada
-        const pppNow = cumulativeBuyQty > 0
-          ? cumulativeBuyValue / cumulativeBuyQty
-          : null;
-
-        // P&L "raw" del par (sin aplicar convención del instrumento)
-        if (pppNow != null) {
-          realizedPnlRaw += qty * (price - pppNow);
+        // Un SELL primero cierra compras abiertas (cierre de long).
+        let remaining = qty;
+        if (openBuyQty > 0) {
+          const buyPPP = openBuyValue / openBuyQty;
+          const matched = Math.min(remaining, openBuyQty);
+          pushPair(op, matched, buyPPP, price);
+          openBuyQty -= matched;
+          openBuyValue -= matched * buyPPP;
+          remaining -= matched;
         }
-
-        // Fila ÚNICA "closed_pair": representa el par neteado completo.
-        // - operation_type = "closed_pair" (marcador para que la UI
-        //   renderice un badge CERRADA y muestre ambos precios).
-        // - entry_price guarda el PPP del momento (precio compra).
-        // - sell_price guarda el precio real de la venta.
-        // - quantity es la qty de la venta (lo que se cerró).
-        // - entry_date es la fecha de la venta.
-        // - notes hereda las de la venta original (si tenía).
-        synthetic.push({
-          id: `${op.id}__synth_pair_${synthIdx}`,
-          isSynthetic: true,
-          operation_type: "closed_pair",
-          ticker: op.ticker,
-          instrument_type: op.instrument_type,
-          quantity: qty,
-          entry_price: pppNow, // PPP al momento de la venta — null si short
-          sell_price: price,
-          entry_currency: op.entry_currency,
-          entry_date: op.entry_date, // fecha de la venta
-          notes: op.notes || null,
-        });
-
-        synthIdx++;
-
-        // En la convención PPP "Cocos/Balanz", la venta NO toca el PPP
-        // de las compras pendientes. Mantenemos PPP — pero descontamos
-        // qty proporcional para que el "PPP futuro" se calcule sobre
-        // el remanente correcto (qtyVendida × PPP sale del valor).
-        if (cumulativeBuyQty > 0 && pppNow != null) {
-          const qtyToConsume = Math.min(qty, cumulativeBuyQty);
-          cumulativeBuyQty -= qtyToConsume;
-          cumulativeBuyValue -= qtyToConsume * pppNow;
+        // El sobrante abre/extiende un short.
+        if (remaining > 0) {
+          openSellQty += remaining;
+          openSellValue += remaining * price;
         }
       } else {
-        // COMPRA: suma al acumulado. (No emite fila al sintético porque
-        // las compras puras viven en la fila ABIERTA, no acá).
-        cumulativeBuyQty += qty;
-        cumulativeBuyValue += qty * price;
+        // Un BUY primero cierra ventas abiertas (cierre de short).
+        let remaining = qty;
+        if (openSellQty > 0) {
+          const sellPPV = openSellValue / openSellQty;
+          const matched = Math.min(remaining, openSellQty);
+          pushPair(op, matched, price, sellPPV);
+          openSellQty -= matched;
+          openSellValue -= matched * sellPPV;
+          remaining -= matched;
+        }
+        // El sobrante abre/extiende un long.
+        if (remaining > 0) {
+          openBuyQty += remaining;
+          openBuyValue += remaining * price;
+        }
       }
     }
 
