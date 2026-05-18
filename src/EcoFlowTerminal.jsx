@@ -6058,6 +6058,10 @@ function useFutureAdjustments(positions, futurePrices) {
   //     anterior antes de que el usuario abra la app y vea el banner.
   //   - Nunca genera pending del día corriente — solo de días pasados
   //     (controlado por el flag includeToday=false abajo).
+  // ⚠️ DEPRECADO (mayo 2026): la generación de ajustes la hace ahora el
+  // worker `futures-settlement` en el VPS (cron 01:00 ART). Esta función
+  // quedó sin uso — el frontend es solo-lectura. Se conserva como
+  // referencia; se puede borrar en una limpieza futura.
   const generateMissingAdjustments = useCallback(async () => {
     if (!user) return;
     if (!isBusinessDayAR()) return;
@@ -6368,10 +6372,11 @@ function useFutureAdjustments(positions, futurePrices) {
     (async () => {
       try {
         setLoading(true);
-        // Primero generamos los que falten (no rompe si falla)
-        await generateMissingAdjustments();
+        // La generación de ajustes la hace ahora el worker `futures-settlement`
+        // en el VPS (cron 01:00 ART). El frontend quedó solo-lectura: lee los
+        // ajustes ya generados y maneja la confirmación manual del usuario.
 
-        // Después leemos todo lo que hay en DB
+        // Leemos lo que hay en DB
         const { data, error: rErr } = await supabase
           .from("futures_daily_adjustments")
           .select("*")
@@ -6401,7 +6406,7 @@ function useFutureAdjustments(positions, futurePrices) {
     return () => {
       cancelled = true;
     };
-  }, [user, refreshKey, generateMissingAdjustments]);
+  }, [user, refreshKey]);
 
   // --- Confirmar un ajuste: edita la fila + crea cash_movement ----
   const confirm = useCallback(
