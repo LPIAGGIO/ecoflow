@@ -1358,6 +1358,84 @@ function useLinkedBrokers(userId) {
   return { data, loading, error, refetch };
 }
 
+/* ─────────────── useBrokerCashSnapshots ───────────────
+ *
+ * Lee la FOTO del efectivo por broker desde broker_cash_snapshots.
+ * Esa tabla la escribe el worker iol-cash-sync en el VPS (cada 15
+ * min): una fila por subcuenta (Pesos, Dólar MEP, Dólar Cable).
+ *
+ * El frontend solo LEE — no toca tokens ni nada. Mismo patrón de
+ * poll/refetch que useLinkedBrokers.
+ */
+function useBrokerCashSnapshots(userId) {
+  const [data, setData] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+  const [refreshKey, setRefreshKey] = useState(0);
+  const hasLoadedRef = useRef(false);
+
+  useEffect(() => {
+    if (!userId) {
+      setLoading(false);
+      return;
+    }
+    let cancelled = false;
+    if (!hasLoadedRef.current) setLoading(true);
+    setError(null);
+    supabase
+      .from("broker_cash_snapshots")
+      .select("id, broker, account_id, account_type, currency, total, available, snapshot_at")
+      .eq("user_id", userId)
+      .then(({ data: rows, error: err }) => {
+        if (cancelled) return;
+        if (err) {
+          setError(err.message);
+        } else {
+          setData(rows || []);
+        }
+        setLoading(false);
+        hasLoadedRef.current = true;
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [userId, refreshKey]);
+
+  // El worker actualiza la foto cada 15 min; polleamos cada 60s para
+  // que la pantalla no quede stale, y refetcheamos al volver a la tab.
+  useEffect(() => {
+    if (!userId) return;
+    const interval = setInterval(() => {
+      setRefreshKey((k) => k + 1);
+    }, 60000);
+    const onVisible = () => {
+      if (document.visibilityState === "visible") {
+        setRefreshKey((k) => k + 1);
+      }
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      clearInterval(interval);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
+  }, [userId]);
+
+  return { data, loading, error };
+}
+
+/* Mapea el account_type crudo de IOL a una etiqueta legible:
+ *   inversion_Argentina_Pesos         -> Pesos
+ *   inversion_Argentina_Dolares       -> Dólar MEP
+ *   inversion_Estados_Unidos_Dolares  -> Dólar Cable (EE.UU.)
+ */
+function iolAccountLabel(accountType, currency) {
+  const t = String(accountType || "").toLowerCase();
+  if (t.includes("estados_unidos")) return "Dólar Cable (EE.UU.)";
+  if (t.includes("dolar")) return "Dólar MEP";
+  if (t.includes("peso")) return "Pesos";
+  return currency || accountType || "Cuenta";
+}
+
 function usePositionsBrokerStats(userId) {
   const [data, setData] = useState({});
   const [loading, setLoading] = useState(true);
@@ -1715,6 +1793,7 @@ function SettingsModule({ onNavigate, linkedBrokers, brokersLoading, refetchBrok
 function SettingsDashboard({ userId, brokers, brokersLoading, refetchBrokers }) {
   const [tab, setTab] = useState("brokers");
   const { data: stats } = usePositionsBrokerStats(userId);
+  const { data: cashSnapshots } = useBrokerCashSnapshots(userId);
 
   return (
     <div style={{ padding: "24px 32px", maxWidth: 1200, margin: "0 auto" }}>
@@ -1778,6 +1857,7 @@ function SettingsDashboard({ userId, brokers, brokersLoading, refetchBrokers }) 
           stats={stats}
           userId={userId}
           refetchBrokers={refetchBrokers}
+          cashSnapshots={cashSnapshots}
         />
       )}
       {tab === "usage" && <UsagePlaceholder />}
@@ -1786,7 +1866,7 @@ function SettingsDashboard({ userId, brokers, brokersLoading, refetchBrokers }) 
   );
 }
 
-function BrokersTab({ brokers, loading, stats, userId, refetchBrokers }) {
+function BrokersTab({ brokers, loading, stats, userId, refetchBrokers, cashSnapshots }) {
   // Merge: si hay positions con un broker pero todavía no hay row en
   // linked_brokers, lo mostramos igual como "detectado" para que el user
   // entienda que la app ya conoce ese broker (los manuales pueden no tener
@@ -1850,7 +1930,7 @@ function BrokersTab({ brokers, loading, stats, userId, refetchBrokers }) {
       {/* Lista de brokers */}
       <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
         {items.map((item) => (
-          <BrokerCard key={item.id} {...item} userId={userId} refetchBrokers={refetchBrokers} />
+          <BrokerCard key={item.id} {...item} userId={userId} refetchBrokers={refetchBrokers} cashSnapshots={cashSnapshots} />
         ))}
       </div>
 
@@ -1892,11 +1972,30 @@ function BrokersTab({ brokers, loading, stats, userId, refetchBrokers }) {
   );
 }
 
-function BrokerCard({ id, meta, linked, positionCount, userId, refetchBrokers }) {
+function BrokerCard({ id, meta, linked, positionCount, userId, refetchBrokers, cashSnapshots }) {
   const isApi = meta.type === "api";
   const isConnected = !!linked && linked.status === "active";
   const hasError = linked && (linked.status === "error" || linked.status === "expired");
   const isDetected = !linked && positionCount > 0;
+
+  // Efectivo de IOL — solo aplica a la tarjeta de IOL conectada. Lo
+  // escribe el worker iol-cash-sync (foto cada 15 min). Filtramos las
+  // subcuentas en cero para no ensuciar la tarjeta con saldos vacíos.
+  const iolCashRows =
+    id === "iol"
+      ? (cashSnapshots || []).filter(
+          (s) =>
+            s.broker === "iol" &&
+            (Number(s.total) !== 0 ||
+              (s.available != null && Number(s.available) !== 0))
+        )
+      : [];
+  const showCash = isConnected && iolCashRows.length > 0;
+  const cashSnapshotAt = iolCashRows.reduce(
+    (latest, s) =>
+      s.snapshot_at && (!latest || s.snapshot_at > latest) ? s.snapshot_at : latest,
+    null
+  );
 
   const [showVincular, setShowVincular] = useState(false);
   const [unlinking, setUnlinking] = useState(false);
@@ -1929,15 +2028,13 @@ function BrokerCard({ id, meta, linked, positionCount, userId, refetchBrokers })
   return (
     <>
       <div
-        className="flex items-center"
         style={{
           background: C.panel,
           border: `1px solid ${C.border}`,
           borderRadius: 4,
-          padding: "12px 16px",
-          gap: 16,
         }}
       >
+        <div className="flex items-center" style={{ padding: "12px 16px", gap: 16 }}>
         {/* Logo placeholder con la inicial del broker */}
         <div
           style={{
@@ -2107,6 +2204,68 @@ function BrokerCard({ id, meta, linked, positionCount, userId, refetchBrokers })
             </button>
           )}
         </div>
+        </div>
+
+        {/* Efectivo de IOL — foto que escribe el worker iol-cash-sync */}
+        {showCash && (
+          <div style={{ borderTop: `1px solid ${C.border}`, padding: "10px 16px 12px" }}>
+            <div
+              style={{
+                fontSize: 10,
+                letterSpacing: "0.12em",
+                textTransform: "uppercase",
+                color: C.dim,
+                marginBottom: 8,
+              }}
+            >
+              Efectivo en IOL
+            </div>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 24 }}>
+              {iolCashRows.map((s) => {
+                const cur = String(s.currency || "").toUpperCase().includes("USD")
+                  ? "USD"
+                  : "ARS";
+                const total = Number(s.total) || 0;
+                const avail = s.available != null ? Number(s.available) : null;
+                const comprometido = avail != null ? total - avail : null;
+                return (
+                  <div key={s.account_type} style={{ minWidth: 150 }}>
+                    <div style={{ fontSize: 10, color: C.muted, letterSpacing: "0.04em" }}>
+                      {iolAccountLabel(s.account_type, s.currency)}
+                    </div>
+                    <div
+                      style={{
+                        fontSize: 15,
+                        fontWeight: 600,
+                        color: C.text,
+                        marginTop: 2,
+                        fontVariantNumeric: "tabular-nums",
+                      }}
+                    >
+                      {fmtCurrencyValue(total, cur)}
+                    </div>
+                    {avail != null && (
+                      <div style={{ fontSize: 10, color: C.muted, marginTop: 3 }}>
+                        Disponible {fmtCurrencyValue(avail, cur)}
+                        {comprometido != null && comprometido > 0.005 && (
+                          <>
+                            {" · "}
+                            Comprometido {fmtCurrencyValue(comprometido, cur)}
+                          </>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+            {cashSnapshotAt && (
+              <div style={{ fontSize: 9, color: C.dim, marginTop: 8 }}>
+                Actualizado: {new Date(cashSnapshotAt).toLocaleString("es-AR")}
+              </div>
+            )}
+          </div>
+        )}
       </div>
 
       {showVincular && (
