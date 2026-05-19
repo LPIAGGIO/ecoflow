@@ -5977,6 +5977,16 @@ function useFciPrices(positions) {
         (c) => cached.prices?.[String(c).trim().toUpperCase()] != null
       );
       if (age < FCI_PRICES_TTL_MS && cubreTodo) {
+        // Caché válido: re-aplicamos los precios EXPLÍCITAMENTE. No alcanza
+        // con el initializer de useState — en un remontaje (volver al
+        // dashboard) el primer render corre con `positions` todavía vacío,
+        // el effect entra por la rama "sin FCI" y hace setPrices({}); cuando
+        // `positions` carga y el effect vuelve a correr, esta rama tiene que
+        // RESTAURAR los precios desde el caché, no asumir que siguen puestos.
+        // Sin este setPrices los FCI quedaban en blanco al volver a la
+        // pantalla (solo el botón "Actualizar" los traía, vía refreshKey).
+        setPrices(cached.prices);
+        setLastFetch(cached.lastFetch);
         setLoading(false);
         return () => { mounted = false; };
       }
