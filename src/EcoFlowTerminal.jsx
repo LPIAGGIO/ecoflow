@@ -5971,7 +5971,11 @@ function useFciPrices(positions) {
     // cache y refetcheamos igual.
     if (cached && refreshKey === 0) {
       const age = Date.now() - new Date(cached.lastFetch).getTime();
-      const cubreTodo = fciClaves.every((c) => cached.prices?.[c] != null);
+      // cached.prices está indexado por ticker normalizado (UPPER) — ver
+      // armado del map más abajo. Normalizamos la clave para chequear.
+      const cubreTodo = fciClaves.every(
+        (c) => cached.prices?.[String(c).trim().toUpperCase()] != null
+      );
       if (age < FCI_PRICES_TTL_MS && cubreTodo) {
         setLoading(false);
         return () => { mounted = false; };
@@ -6023,7 +6027,13 @@ function useFciPrices(positions) {
                 : ((price - prevVcp) / prevVcp) * 100;
           }
 
-          map[row.clave] = {
+          // Indexamos por ticker NORMALIZADO (trim + UPPER). Los
+          // consumidores (resolvePositionPrice, computeDailyPnL,
+          // consolidatePositions) normalizan el ticker a mayúsculas, y el
+          // ticker de un FCI es un string "fondo|categoria" con minúsculas.
+          // Sin esta normalización la clave nunca matcheaba y el FCI
+          // quedaba sin valuar, mostrándose como "—".
+          map[String(row.clave).trim().toUpperCase()] = {
             price,
             previousClose,
             changePct,
