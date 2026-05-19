@@ -7365,7 +7365,15 @@ function fmtCurrencyValue(value, currency) {
 
 function fmtDateShort(iso) {
   if (!iso) return "—";
-  const d = new Date(iso);
+  // Las columnas `date` de Postgres llegan como "YYYY-MM-DD". new Date()
+  // las interpreta como medianoche UTC; al convertirlas a hora local en
+  // zonas al oeste de UTC (Argentina, UTC-3) retroceden un día —
+  // "2026-05-18" se mostraba como 17 de mayo. Por eso las fechas
+  // date-only las parseamos por componentes: así quedan en hora local.
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(iso).trim());
+  const d = m
+    ? new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]))
+    : new Date(iso);
   if (isNaN(d.getTime())) return "—";
   return d.toLocaleDateString("es-AR", { day: "2-digit", month: "short", year: "2-digit" });
 }
