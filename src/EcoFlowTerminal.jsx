@@ -7415,7 +7415,7 @@ function fmtDateShort(iso) {
  * useBondPrices se encarga de fetchear y cachear esos precios.
  */
 
-function DashboardOverview({ positions, fxState, bondPricesState, futurePricesState, stockPricesState, fciPricesState, cashState, futureAdjustmentsState, onIngresar, onRetirar }) {
+function DashboardOverview({ positions, excludedBrokers, fxState, bondPricesState, futurePricesState, stockPricesState, fciPricesState, cashState, futureAdjustmentsState, onIngresar, onRetirar }) {
   const { fx, loading: fxLoading, error: fxError, lastUpdated: fxLastUpdated, refresh: refreshFx } = fxState;
   const { prices: bondPrices, loading: pricesLoading, error: pricesError, lastFetch: pricesLastFetch, refresh: refreshBondPrices } = bondPricesState;
   // futurePricesState viene de PortfolioDashboard (un solo hook compartido
@@ -7448,13 +7448,34 @@ function DashboardOverview({ positions, fxState, bondPricesState, futurePricesSt
     return acc;
   }, [brokerCashSnapshots]);
 
-  // Efectivo total = manual (cash_movements) + IOL (disponible). Es lo que
-  // consumen TotalCard y DistributionCard para el patrimonio y su reparto.
+  // ── Filtro global de brokers ────────────────────────────────────────
+  // Las posiciones ya llegan filtradas desde PortfolioDashboard. El cash se
+  // gatea acá: el de IOL sigue al chip "iol" (está taggeado), y el manual
+  // de cash_movements sigue al chip "efectivo".
+  const showIolCash = !(excludedBrokers && excludedBrokers.has("iol"));
+  const showEfectivo = !(excludedBrokers && excludedBrokers.has("efectivo"));
+
+  const effectiveIolCash = useMemo(
+    () => (showIolCash ? iolCashByCurrency : { "ARS": 0, "USD-MEP": 0, "USD-CCL": 0 }),
+    [showIolCash, iolCashByCurrency]
+  );
+  const effectiveManualBalance = useMemo(
+    () => (showEfectivo ? balanceByCurrency : { "ARS": 0, "USD-MEP": 0, "USD-CCL": 0 }),
+    [showEfectivo, balanceByCurrency]
+  );
+  const effectiveMovements = useMemo(
+    () => (showEfectivo ? movements : []),
+    [showEfectivo, movements]
+  );
+
+  // Efectivo total = manual (cash_movements) + IOL (disponible), ambos ya
+  // gateados por el filtro. Es lo que consumen TotalCard y DistributionCard
+  // para el patrimonio y su reparto.
   const balanceWithIol = useMemo(() => ({
-    "ARS": (balanceByCurrency["ARS"] || 0) + iolCashByCurrency["ARS"],
-    "USD-MEP": (balanceByCurrency["USD-MEP"] || 0) + iolCashByCurrency["USD-MEP"],
-    "USD-CCL": (balanceByCurrency["USD-CCL"] || 0) + iolCashByCurrency["USD-CCL"],
-  }), [balanceByCurrency, iolCashByCurrency]);
+    "ARS": (effectiveManualBalance["ARS"] || 0) + effectiveIolCash["ARS"],
+    "USD-MEP": (effectiveManualBalance["USD-MEP"] || 0) + effectiveIolCash["USD-MEP"],
+    "USD-CCL": (effectiveManualBalance["USD-CCL"] || 0) + effectiveIolCash["USD-CCL"],
+  }), [effectiveManualBalance, effectiveIolCash]);
 
   // Lookup de adjustments de futuros — usado por TotalCard y DistributionCard
   // para descontar el P&L ya acreditado del valor de los futuros (ese P&L
@@ -7522,7 +7543,7 @@ function DashboardOverview({ positions, fxState, bondPricesState, futurePricesSt
           fciPrices={fciPrices}
           valuationCurrency={valuationCurrency}
           balanceByCurrency={balanceWithIol}
-          iolCashByCurrency={iolCashByCurrency}
+          iolCashByCurrency={effectiveIolCash}
           futureAdjLookup={futureAdjLookup}
           view={distView}
           onViewChange={setDistView}
@@ -7533,8 +7554,8 @@ function DashboardOverview({ positions, fxState, bondPricesState, futurePricesSt
           bondPrices={bondPrices}
           futurePrices={futurePrices}
           valuationCurrency={valuationCurrency}
-          movements={movements}
-          iolCashByCurrency={iolCashByCurrency}
+          movements={effectiveMovements}
+          iolCashByCurrency={effectiveIolCash}
           futureAdjLookup={futureAdjLookup}
           window={liquidityWindow}
           onWindowChange={setLiquidityWindow}
@@ -11435,6 +11456,18 @@ function PortfolioDashboard({ onNavigate }) {
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [editingPosition, setEditingPosition] = useState(null);
   const [filter, setFilter] = useState("all");
+  // Filtro global por broker. Trackeamos el Set de claves EXCLUIDAS (vacío
+  // = todo visible); así el default "todo on" no depende de saber qué
+  // brokers hay antes de que carguen las posiciones.
+  const [excludedBrokers, setExcludedBrokers] = useState(() => new Set());
+  const toggleBroker = useCallback((key) => {
+    setExcludedBrokers((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  }, []);
   const [confirmingDelete, setConfirmingDelete] = useState(null);
   // Modal de movimiento manual de cash (Ingresar / Retirar). null = cerrado.
   // Cuando está abierto, contiene el `type` ("deposit" o "withdrawal") para
@@ -11461,17 +11494,39 @@ function PortfolioDashboard({ onNavigate }) {
     }
   }, [updatePosition]);
 
-  // Filtrado de posiciones
+  // Brokers presentes en cartera (para mostrar solo los chips relevantes).
+  // El bucket "efectivo" representa el cash manual de cash_movements, que
+  // no está taggeado por broker — aparece solo si hay saldo.
+  const presentBrokers = useMemo(() => {
+    const set = new Set();
+    for (const p of positions) set.add(p.broker || "manual");
+    const ordered = ["iol", "cocos", "eco", "manual"].filter((b) => set.has(b));
+    const manualCash = cashState?.balanceByCurrency || {};
+    if (Object.values(manualCash).some((v) => Number(v) !== 0)) {
+      ordered.push("efectivo");
+    }
+    return ordered;
+  }, [positions, cashState]);
+
+  // Posiciones tras aplicar el filtro de broker. Es la base GLOBAL: la
+  // consume el dashboard (cards) y, encima, se le aplica el filtro de tipo.
+  const brokerFilteredPositions = useMemo(() => {
+    if (excludedBrokers.size === 0) return positions;
+    return positions.filter((p) => !excludedBrokers.has(p.broker || "manual"));
+  }, [positions, excludedBrokers]);
+
+  // Filtrado por tipo — se aplica SOBRE las ya filtradas por broker, así la
+  // tabla refleja la intersección de ambos filtros.
   const filteredPositions = useMemo(() => {
-    if (filter === "all") return positions;
+    if (filter === "all") return brokerFilteredPositions;
     // El filtro virtual "bond" matchea tanto bond_ars como bond_usd
     if (filter === "bond") {
-      return positions.filter(
+      return brokerFilteredPositions.filter(
         (p) => p.instrument_type === "bond_ars" || p.instrument_type === "bond_usd"
       );
     }
-    return positions.filter((p) => p.instrument_type === filter);
-  }, [positions, filter]);
+    return brokerFilteredPositions.filter((p) => p.instrument_type === filter);
+  }, [brokerFilteredPositions, filter]);
 
   // Tipos presentes en cartera (para mostrar solo chips relevantes).
   // Colapsamos bond_ars/bond_usd en un único "bond" para alinear con
@@ -11596,9 +11651,37 @@ function PortfolioDashboard({ onNavigate }) {
         <PortfolioEmptyState onAdd={openCreate} />
       ) : (
         <>
+          {/* Filtro global por broker — afecta dashboard y tabla */}
+          {presentBrokers.length > 1 && (
+            <div className="flex items-center gap-2 flex-wrap" style={{ marginBottom: 14 }}>
+              <span
+                style={{
+                  fontSize: 9,
+                  letterSpacing: "0.18em",
+                  color: C.dim,
+                  textTransform: "uppercase",
+                  fontWeight: 600,
+                  marginRight: 2,
+                }}
+              >
+                Brokers
+              </span>
+              {presentBrokers.map((key) => (
+                <FilterChip
+                  key={key}
+                  active={!excludedBrokers.has(key)}
+                  onClick={() => toggleBroker(key)}
+                  label={key === "efectivo" ? "Efectivo" : (BROKER_CATALOG[key]?.short || key)}
+                  color={key === "efectivo" ? "#22D3EE" : BROKER_CATALOG[key]?.color}
+                />
+              ))}
+            </div>
+          )}
+
           {/* Sub-paso 3: Dashboard tipo Balanz */}
           <DashboardOverview
-            positions={positions}
+            positions={brokerFilteredPositions}
+            excludedBrokers={excludedBrokers}
             fxState={fxState}
             bondPricesState={bondPricesState}
             futurePricesState={futurePricesState}
@@ -11612,7 +11695,7 @@ function PortfolioDashboard({ onNavigate }) {
 
           {/* Vista consolidada (Modelo B): agrupa por ticker × moneda × tipo */}
           <ConsolidatedSection
-            positions={positions}
+            positions={brokerFilteredPositions}
             filteredPositions={filteredPositions}
             bondPrices={bondPricesState.prices}
             futurePrices={futurePricesState.prices}
@@ -11785,7 +11868,11 @@ function PortfolioEmptyState({ onAdd }) {
 
 /* ─────────────── Filter chip (botón pill) ─────────────── */
 function FilterChip({ active, onClick, label, color }) {
-  const tint = color ? C.cat[color] : C.accent;
+  // `color` puede ser una clave de C.cat (uso original, tabs de tipo) o un
+  // color hex directo (uso nuevo, chips de broker con BROKER_CATALOG).
+  const tint = color
+    ? (typeof color === "string" && color.startsWith("#") ? color : C.cat[color])
+    : C.accent;
   return (
     <button
       onClick={onClick}
