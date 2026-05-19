@@ -8432,7 +8432,9 @@ function DistributionCard({ positions, fx, bondPrices, futurePrices, stockPrices
                       fontWeight: 500,
                     }}
                   >
-                    {sell == null ? "—" : fmtCurrencyValue(sell, "ARS")}
+                    {sell == null
+                      ? "—"
+                      : `$ ${fmtNumber(sell, { minDecimals: 2, maxDecimals: 2 })}`}
                   </span>
                 </div>
               );
