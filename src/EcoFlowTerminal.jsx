@@ -11666,15 +11666,24 @@ function PortfolioDashboard({ onNavigate }) {
               >
                 Brokers
               </span>
-              {presentBrokers.map((key) => (
-                <FilterChip
-                  key={key}
-                  active={!excludedBrokers.has(key)}
-                  onClick={() => toggleBroker(key)}
-                  label={key === "efectivo" ? "Efectivo" : (BROKER_CATALOG[key]?.short || key)}
-                  color={key === "efectivo" ? "#22D3EE" : BROKER_CATALOG[key]?.color}
-                />
-              ))}
+              {presentBrokers.map((key) => {
+                const count =
+                  key === "efectivo"
+                    ? null
+                    : positions.filter((p) => (p.broker || "manual") === key).length;
+                return (
+                  <FilterChip
+                    key={key}
+                    active={!excludedBrokers.has(key)}
+                    onClick={() => toggleBroker(key)}
+                    label={
+                      key === "efectivo"
+                        ? "Efectivo"
+                        : `${BROKER_CATALOG[key]?.short || key} (${count})`
+                    }
+                  />
+                );
+              })}
             </div>
           )}
 
@@ -11868,11 +11877,7 @@ function PortfolioEmptyState({ onAdd }) {
 
 /* ─────────────── Filter chip (botón pill) ─────────────── */
 function FilterChip({ active, onClick, label, color }) {
-  // `color` puede ser una clave de C.cat (uso original, tabs de tipo) o un
-  // color hex directo (uso nuevo, chips de broker con BROKER_CATALOG).
-  const tint = color
-    ? (typeof color === "string" && color.startsWith("#") ? color : C.cat[color])
-    : C.accent;
+  const tint = color ? C.cat[color] : C.accent;
   return (
     <button
       onClick={onClick}
