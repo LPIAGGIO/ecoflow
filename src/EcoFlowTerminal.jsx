@@ -69,6 +69,7 @@ import {
   TrendingDown,
   Wallet,
   Bitcoin,
+  Layers,
 } from "lucide-react";
 import {
   ScatterChart,
@@ -160,9 +161,11 @@ const NAV = [
     requiresAuth: true,  // Si no hay sesión, muestra wall de login
   },
   {
-    // Trading automatizado / estrategias bot. Por ahora es solo un slot
-    // visible en el menú; al clickear cae al EmptyWorkspace con
-    // "Módulo en construcción". Cuando el módulo exista, se cablea acá.
+    // Trading automatizado / estrategias bot. Reservado para futuros
+    // agentes que efectivamente ejecuten órdenes (vía API IOL, único
+    // broker con API de trade disponible). Hoy es un placeholder con
+    // mensaje "Próximamente"; las herramientas observacionales (como
+    // el Sintético DLR) viven bajo "Analizadores", no acá.
     id: "bot-trading",
     label: "Bot Trading",
     icon: Sparkles,
@@ -207,6 +210,7 @@ const NAV = [
       { id: "compara-dolar", label: "Cotizaciones Dólar", icon: DollarSign },
       { id: "carry-trade", label: "Carry Trade", icon: ArrowRightLeft },
       { id: "futuros-caucion", label: "Futuros vs Caución", icon: Scale },
+      { id: "sintetico-dlr", label: "Sintético DLR", icon: Layers },
       { id: "curva-tasas", label: "Curva de Tasas", icon: Spline },
       { id: "spread-cer-fija", label: "Spread CER / Fija", icon: Diff },
     ],
@@ -781,10 +785,10 @@ export default function EcoFlowTerminal() {
               <CarryTradeModule />
             ) : active === "futuros-caucion" ? (
               <FuturosVsCaucionModule />
+            ) : active === "sintetico-dlr" ? (
+              <SinteticoDolarModule />
             ) : active === "portfolio-ia" ? (
               <PortfolioIAModule onNavigate={setActive} />
-            ) : active === "bot-trading" ? (
-              <SinteticoDolarModule />
             ) : active === "libro-operaciones" ? (
               <LibroOperacionesModule />
             ) : active === "settings" ? (
@@ -16918,6 +16922,19 @@ function EmptyWorkspace({ active }) {
   const item = flattenNav(NAV).find((i) => i.id === active);
   const Icon = item?.icon || Activity;
   const isDashboard = active === "dashboard";
+  // Bot Trading tiene un placeholder específico: marca claramente que el
+  // espacio está RESERVADO para agentes automatizados que operen vía API
+  // IOL (único broker con trade API). Las herramientas observacionales
+  // (Sintético DLR, Carry Trade, etc.) viven bajo Analizadores.
+  const isBotTrading = active === "bot-trading";
+
+  // Subtítulo según la pantalla. Default: el genérico "Módulo en
+  // construcción". Casos especiales: Dashboard (layout placeholder) y
+  // Bot Trading (mensaje claro de roadmap).
+  let subtitle;
+  if (isDashboard) subtitle = "Layout v1.0 — Esperando módulo";
+  else if (isBotTrading) subtitle = "Próximamente — Agentes vía API IOL";
+  else subtitle = "Módulo en construcción";
 
   return (
     <div className="absolute inset-0 flex items-center justify-center px-6">
@@ -16962,9 +16979,25 @@ function EmptyWorkspace({ active }) {
               fontWeight: 500,
             }}
           >
-            {isDashboard ? "Layout v1.0 — Esperando módulo" : "Módulo en construcción"}
+            {subtitle}
           </span>
         </div>
+
+        {isBotTrading && (
+          <div
+            style={{
+              maxWidth: 380,
+              textAlign: "center",
+              fontSize: 11.5,
+              color: C.dim,
+              lineHeight: 1.6,
+              letterSpacing: "0.005em",
+              marginTop: 4,
+            }}
+          >
+            Este espacio queda reservado para bots que efectivamente ejecuten órdenes. Las herramientas observacionales (Sintético DLR, Carry Trade, Futuros vs Caución) viven bajo <span style={{ color: C.text, fontWeight: 500 }}>Analizadores</span>.
+          </div>
+        )}
 
         {isDashboard && (
           <div
@@ -20116,7 +20149,11 @@ function ManualLeadBond({ bond, customExitFx }) {
   );
 }
 
-/* ─────────── Bot Trading · Sintético Dólar Module ───────────
+/* ─────────── Sintético Dólar Module (bajo Analizadores) ───────────
+ *
+ * Herramienta observacional — no ejecuta órdenes. Vive bajo el grupo
+ * "Analizadores" en el menú, al lado de Carry Trade y Futuros vs Caución.
+ * El espacio "Bot Trading" queda reservado para agentes que sí operen.
  *
  * Estrategia: comprar un bono peso (Lecap/Boncap) y cubrirse con DLR
  * futuro (long) para fijar el tipo de cambio de salida. Combinás la
@@ -20448,7 +20485,7 @@ function SinteticoDolarModule() {
       <div className="flex items-start justify-between gap-6 mb-5 flex-wrap">
         <div className="flex flex-col gap-1.5">
           <span style={{ fontSize: 9, color: C.dim, letterSpacing: "0.22em", textTransform: "uppercase", fontWeight: 500 }}>
-            Bot Trading · BETA
+            Analizadores · BETA
           </span>
           <h1 className="eco-display" style={{ fontSize: 24, fontWeight: 700, letterSpacing: "-0.01em", color: C.text, lineHeight: 1.1, margin: 0 }}>
             Sintético Dólar
