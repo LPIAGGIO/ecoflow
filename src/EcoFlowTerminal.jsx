@@ -20253,6 +20253,67 @@ function computeSyntheticUsdReturn(arsFactor, days, spot, future) {
   return Math.pow(usdFactor, 365 / days) - 1;
 }
 
+/**
+ * Hook que lee el catalogo de emisiones del Tesoro desde la tabla
+ * bond_emissions de Supabase. Esa tabla la popula el worker
+ * bond-emissions-sync (corre Mi/Ju, scrapea argentina.gob.ar) y trae
+ * por cada Lecap/Boncap activo:
+ *   - fecha_vencimiento (parseada del titulo de la fila)
+ *   - pago_vencimiento (computado: PC × (1+TIREA)^años / 10)
+ *   - tem_capitalizacion (sale del prospecto del Tesoro)
+ *
+ * Devuelve un Map<ticker, {ticker, type, maturityDate, pagoVencimiento,
+ * temCapitalizacion, lastAuctionDate, lastSourceUrl}>.
+ *
+ * Si Supabase falla, devuelve emissions=null y error con el mensaje. El
+ * componente que lo consume debe tener un fallback (en el caso del
+ * Sintetico DLR: BOND_REGISTRY hardcoded + input manual del usuario).
+ */
+function useBondEmissions() {
+  const [emissions, setEmissions] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+
+  const fetchEmissions = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const { data, error: qErr } = await supabase
+        .from("bond_emissions")
+        .select("ticker, type, fecha_vencimiento, pago_vencimiento, tem_capitalizacion, last_auction_date, last_source_url");
+      if (qErr) throw qErr;
+      const map = new Map();
+      for (const row of data || []) {
+        if (!row?.ticker) continue;
+        map.set(row.ticker, {
+          ticker: row.ticker,
+          type: row.type,
+          maturityDate: row.fecha_vencimiento, // ISO yyyy-mm-dd
+          pagoVencimiento: Number(row.pago_vencimiento),
+          temCapitalizacion: Number(row.tem_capitalizacion),
+          lastAuctionDate: row.last_auction_date,
+          lastSourceUrl: row.last_source_url,
+        });
+      }
+      setEmissions(map);
+    } catch (e) {
+      console.warn("useBondEmissions: fetch fallo:", e);
+      setError(e?.message || String(e));
+      // No limpiamos emissions si ya teniamos data — preferimos data
+      // stale a data nula. Solo seteamos null si nunca tuvimos nada.
+      setEmissions((prev) => prev || null);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchEmissions();
+  }, [fetchEmissions]);
+
+  return { emissions, loading, error, refetch: fetchEmissions };
+}
+
 function SinteticoDolarModule() {
   // ─── State ──────────────────────────────────────────────
   const [spotMayorista, setSpotMayorista] = useState(null);
@@ -20276,27 +20337,55 @@ function SinteticoDolarModule() {
   // - useBondPrices: precio actual de cada Lecap/Boncap (BYMA/data912/MAE)
   // - useFuturePrices: precios DLR live + settle fallback (un único hook
   //   por todo el módulo; ya tiene su propio poller adentro)
+  // - useBondEmissions: pagos al vencimiento desde el worker
+  //   bond-emissions-sync (Supabase, bond_emissions). El frontend ya no
+  //   depende del usuario cargando el pago a mano — eso queda como
+  //   override opcional en localStorage para overrides puntuales o
+  //   bonos que el worker todavia no descubrio.
   const { positions } = useUserPositions();
   const bondPricesState = useBondPrices();
   const bondPrices = bondPricesState?.prices || {};
+  const emissionsState = useBondEmissions();
+  const bondEmissions = emissionsState?.emissions || null;
 
   // ─── Universo: Lecaps + Boncaps con vto futuro ─────────
-  // El base es BOND_REGISTRY (hardcoded). Después, según el tab activo,
-  // filtramos: "Universo" muestra todo, "Cartera" filtra a los tickers
-  // que el usuario tiene en sus positions (bond_ars de Lecap/Boncap).
+  // Fuente combinada:
+  //   1. BOND_REGISTRY hardcoded (cubre bonos historicos validados y
+  //      sirve de fallback si Supabase falla)
+  //   2. bond_emissions del worker (Supabase) — capta automaticamente
+  //      bonos nuevos sin que tengamos que tocar codigo
+  // Si un ticker aparece en ambos, prevalece la maturityDate del
+  // registry (estable, validada); el worker solo suma cobertura.
   const universeFull = useMemo(() => {
     const today = new Date().toLocaleDateString("en-CA", {
       timeZone: "America/Argentina/Buenos_Aires",
     });
-    const bonds = [];
+    const byTicker = new Map();
+    // Step 1: registry
     for (const [ticker, info] of Object.entries(BOND_REGISTRY)) {
       if (!info?.maturityDate || info.maturityDate <= today) continue;
       if (info.type !== "lecap" && info.type !== "boncap") continue;
-      bonds.push({ ticker, ...info });
+      byTicker.set(ticker, { ticker, ...info });
     }
-    return bonds.sort((a, b) => a.maturityDate.localeCompare(b.maturityDate));
+    // Step 2: bond_emissions (agrega los que no estan en registry)
+    if (bondEmissions) {
+      for (const [ticker, row] of bondEmissions) {
+        if (!row?.maturityDate || row.maturityDate <= today) continue;
+        if (row.type !== "lecap" && row.type !== "boncap") continue;
+        if (!byTicker.has(ticker)) {
+          byTicker.set(ticker, {
+            ticker,
+            type: row.type,
+            maturityDate: row.maturityDate,
+          });
+        }
+      }
+    }
+    return [...byTicker.values()].sort((a, b) =>
+      a.maturityDate.localeCompare(b.maturityDate)
+    );
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [now]);
+  }, [now, bondEmissions]);
 
   // Tickers del usuario (bond_ars) — filtro del tab "Cartera".
   const carteraTickers = useMemo(() => {
@@ -20361,10 +20450,27 @@ function SinteticoDolarModule() {
       const days = daysToMaturity(bond.maturityDate);
       if (days == null || days <= 0) return null;
 
-      // M: pago al vencimiento por 100 VN. Dato fijo del prospecto del
-      // bono que el usuario carga una vez por ticker.
-      const matRaw = maturityPayments[bond.ticker];
-      const maturityPayment = (matRaw === "" || matRaw == null) ? null : Number(matRaw);
+      // M: pago al vencimiento por 100 VN. Tres fuentes en orden de
+      // prioridad: (1) override manual del usuario en el input local,
+      // (2) bond_emissions del worker (Supabase), (3) nada → bond
+      // queda sin TIR computada y aparece al final de la tabla.
+      const overrideRaw = maturityPayments[bond.ticker];
+      const overrideNum = (overrideRaw === "" || overrideRaw == null)
+        ? null
+        : Number(overrideRaw);
+      const workerPago = bondEmissions?.get(bond.ticker)?.pagoVencimiento;
+      let maturityPayment;
+      let maturityPaymentSource; // "override" | "worker" | null
+      if (Number.isFinite(overrideNum) && overrideNum > 0) {
+        maturityPayment = overrideNum;
+        maturityPaymentSource = "override";
+      } else if (Number.isFinite(workerPago) && workerPago > 0) {
+        maturityPayment = workerPago;
+        maturityPaymentSource = "worker";
+      } else {
+        maturityPayment = null;
+        maturityPaymentSource = null;
+      }
 
       // P: precio actual del feed (BYMA / data912 / MAE consolidados).
       const bondPriceEntry = bondPrices[bond.ticker];
@@ -20413,6 +20519,7 @@ function SinteticoDolarModule() {
         bondMaturity: bond.maturityDate,
         days,
         maturityPayment,
+        maturityPaymentSource,
         bondPrice,
         bondPriceSource,
         tirArs,
@@ -20436,11 +20543,20 @@ function SinteticoDolarModule() {
       if (b.tirUsd == null) return -1;
       return b.tirUsd - a.tirUsd;
     });
-  }, [universe, maturityPayments, bondPrices, spotMayorista, futurePrices]);
+  }, [universe, maturityPayments, bondEmissions, bondPrices, spotMayorista, futurePrices]);
 
   // ─── Handlers ──────────────────────────────────────────
+  // Override del pago al vencimiento por ticker. Si el usuario borra
+  // el input (value = ""), removemos el override completamente — asi
+  // el bono vuelve a usar el valor del worker. No persistimos "" como
+  // override valido (eso lo distinguimos de null para mostrar el feed).
   const setMaturity = (ticker, value) => {
-    const next = { ...maturityPayments, [ticker]: value };
+    const next = { ...maturityPayments };
+    if (value === "" || value == null) {
+      delete next[ticker];
+    } else {
+      next[ticker] = value;
+    }
     setMaturityPayments(next);
     writeStoredMaturityPayments(next);
   };
@@ -20451,6 +20567,7 @@ function SinteticoDolarModule() {
       await fetchSpot();
       if (typeof futuresState.refresh === "function") futuresState.refresh();
       if (typeof bondPricesState?.refresh === "function") bondPricesState.refresh();
+      if (typeof emissionsState?.refetch === "function") emissionsState.refetch();
     } finally {
       setRefreshing(false);
     }
@@ -20646,7 +20763,20 @@ TIR_USD    = USD_factor^(365/T) − 1`}
               </tr>
             )}
             {rows.map((row) => {
-              const matRaw = maturityPayments[row.bondTicker] ?? "";
+              // matRaw: valor a mostrar en el input. Override > worker > "".
+              // workerPago se muestra prefilled pero NO se persiste en
+              // localStorage hasta que el usuario edita (=> esta vacio en
+              // maturityPayments y se llena al editar).
+              const override = maturityPayments[row.bondTicker];
+              const workerPago = bondEmissions?.get(row.bondTicker)?.pagoVencimiento;
+              const matRaw =
+                (override !== "" && override != null)
+                  ? override
+                  : (Number.isFinite(workerPago) && workerPago > 0
+                      ? workerPago.toFixed(2)
+                      : "");
+              const isFromWorker = (override === "" || override == null) &&
+                                   Number.isFinite(workerPago) && workerPago > 0;
               return (
                 <tr key={row.bondTicker} style={{ borderBottom: `1px solid ${C.border}` }}>
                   <td style={tdLeft}>
@@ -20664,12 +20794,17 @@ TIR_USD    = USD_factor^(365/T) − 1`}
                       onChange={(e) => setMaturity(row.bondTicker, e.target.value)}
                       placeholder="115,5"
                       step="0.01"
+                      title={isFromWorker
+                        ? "Pre-cargado por el worker bond-emissions-sync (Tesoro). Editá para anular con un valor manual."
+                        : (row.maturityPaymentSource === "override"
+                            ? "Override manual. Borrá el valor para volver al del worker."
+                            : "Cargá el pago al vencimiento por 100 VN (sale del prospecto del bono).")}
                       style={{
                         width: 78,
                         padding: "3px 6px",
                         background: "transparent",
-                        border: `1px solid ${C.border}`,
-                        color: C.text,
+                        border: `1px solid ${isFromWorker ? C.accentBorder : C.border}`,
+                        color: isFromWorker ? C.dim : C.text,
                         fontSize: 11.5,
                         textAlign: "right",
                         fontVariantNumeric: "tabular-nums",
