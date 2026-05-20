@@ -154,11 +154,21 @@ const NAV = [
   { id: "dashboard", label: "Dashboard", icon: Home, type: "single" },
   {
     id: "portfolio-ia",
-    label: "Portfolio IA",
+    label: "Portfolio",
     icon: Briefcase,
     type: "single",
-    badge: "BETA",
     requiresAuth: true,  // Si no hay sesión, muestra wall de login
+  },
+  {
+    // Trading automatizado / estrategias bot. Por ahora es solo un slot
+    // visible en el menú; al clickear cae al EmptyWorkspace con
+    // "Módulo en construcción". Cuando el módulo exista, se cablea acá.
+    id: "bot-trading",
+    label: "Bot Trading",
+    icon: Sparkles,
+    type: "single",
+    badge: "BETA",
+    requiresAuth: true,
   },
   {
     id: "bcra",
@@ -482,8 +492,8 @@ export default function EcoFlowTerminal() {
                 cursor: "pointer",
               }}
             >
-              <span style={{ fontWeight: 700 }}>eco</span>
-              <span style={{ fontWeight: 400 }}>flow</span>
+              <span style={{ fontWeight: 700 }}>mi</span>
+              <span style={{ fontWeight: 400 }}>das</span>
             </button>
           ) : (
             <button
@@ -504,8 +514,8 @@ export default function EcoFlowTerminal() {
                 cursor: "pointer",
               }}
             >
-              <span style={{ fontWeight: 700 }}>e</span>
-              <span style={{ fontWeight: 400 }}>f</span>
+              <span style={{ fontWeight: 700 }}>m</span>
+              <span style={{ fontWeight: 400 }}>d</span>
             </button>
           )}
         </div>
@@ -812,8 +822,8 @@ export default function EcoFlowTerminal() {
                   fontSize: 11,
                 }}
               >
-                <span style={{ fontWeight: 700 }}>eco</span>
-                <span style={{ fontWeight: 400 }}>flow</span>
+                <span style={{ fontWeight: 700 }}>mi</span>
+                <span style={{ fontWeight: 400 }}>das</span>
                 <span style={{ marginLeft: 6, fontWeight: 400 }}>terminal</span>
               </span>
               <span style={{ color: C.faint }}>│</span>
@@ -2940,7 +2950,7 @@ function PortfolioAuthWall() {
             marginBottom: 8,
           }}
         >
-          Portfolio IA · Beta
+          Portfolio
         </div>
         <h2
           style={{
@@ -7094,7 +7104,7 @@ function useCashMovements() {
    * Inserta un movement manual (deposit / withdrawal). El amount debe
    * llegar SIEMPRE positivo; el signo lo da movement_type.
    */
-  const addManualMovement = useCallback(async ({ movement_type, currency, amount, movement_date, notes }) => {
+  const addManualMovement = useCallback(async ({ movement_type, currency, amount, movement_date, broker, notes }) => {
     if (!user) throw new Error("No hay sesión activa");
     if (!["deposit", "withdrawal"].includes(movement_type)) {
       throw new Error("addManualMovement solo acepta deposit o withdrawal");
@@ -7110,6 +7120,7 @@ function useCashMovements() {
         timeZone: "America/Argentina/Buenos_Aires",
       }),
       related_position_id: null,
+      broker: broker || "manual",
       notes: notes || null,
     };
 
@@ -11629,9 +11640,7 @@ function PortfolioDashboard({ onNavigate }) {
         className="flex items-center gap-3"
         style={{ marginBottom: 6, fontSize: 9, letterSpacing: "0.22em", color: C.dim, textTransform: "uppercase", fontWeight: 600 }}
       >
-        <span>Portfolio IA</span>
-        <span style={{ color: C.faint }}>·</span>
-        <span>Beta</span>
+        <span>Portfolio</span>
       </div>
 
       {/* Estado de error */}
@@ -11661,9 +11670,10 @@ function PortfolioDashboard({ onNavigate }) {
         <PortfolioEmptyState onAdd={openCreate} />
       ) : (
         <>
-          {/* Filtro global por broker — afecta dashboard y tabla */}
+          {/* Filtro global por broker — afecta dashboard y tabla.
+              Píldoras compactas con punto de color del broker. */}
           {presentBrokers.length > 1 && (
-            <div className="flex items-center gap-2 flex-wrap" style={{ marginBottom: 14 }}>
+            <div className="flex items-center gap-1.5 flex-wrap" style={{ marginBottom: 10 }}>
               <span
                 style={{
                   fontSize: 9,
@@ -11671,27 +11681,64 @@ function PortfolioDashboard({ onNavigate }) {
                   color: C.dim,
                   textTransform: "uppercase",
                   fontWeight: 600,
-                  marginRight: 2,
+                  marginRight: 4,
                 }}
               >
                 Brokers
               </span>
               {presentBrokers.map((key) => {
-                const count =
-                  key === "efectivo"
-                    ? null
-                    : positions.filter((p) => (p.broker || "manual") === key).length;
+                const isActive = !excludedBrokers.has(key);
+                const isEfectivo = key === "efectivo";
+                const count = isEfectivo
+                  ? null
+                  : positions.filter((p) => (p.broker || "manual") === key).length;
+                const meta = BROKER_CATALOG[key];
+                const dotColor = isEfectivo ? "#94A3B8" : (meta?.color || "#94A3B8");
+                const label = isEfectivo ? "Efectivo" : (meta?.short || key);
                 return (
-                  <FilterChip
+                  <button
                     key={key}
-                    active={!excludedBrokers.has(key)}
                     onClick={() => toggleBroker(key)}
-                    label={
-                      key === "efectivo"
-                        ? "Efectivo"
-                        : `${BROKER_CATALOG[key]?.short || key} (${count})`
-                    }
-                  />
+                    style={{
+                      display: "inline-flex",
+                      alignItems: "center",
+                      gap: 5,
+                      padding: "3px 9px",
+                      fontSize: 10.5,
+                      fontWeight: 500,
+                      letterSpacing: "0.04em",
+                      backgroundColor: isActive ? "rgba(255,255,255,0.04)" : "transparent",
+                      border: `1px solid ${isActive ? C.borderStrong : C.border}`,
+                      color: isActive ? C.text : C.muted,
+                      cursor: "pointer",
+                      fontFamily: "'Roboto', sans-serif",
+                      transition: "all 120ms ease",
+                    }}
+                  >
+                    <span
+                      style={{
+                        width: 6,
+                        height: 6,
+                        borderRadius: "50%",
+                        backgroundColor: dotColor,
+                        opacity: isActive ? 1 : 0.35,
+                        transition: "opacity 120ms ease",
+                      }}
+                    />
+                    <span>{label}</span>
+                    {count != null && (
+                      <span
+                        style={{
+                          color: isActive ? C.dim : C.faint,
+                          fontSize: 9.5,
+                          marginLeft: 1,
+                          fontVariantNumeric: "tabular-nums",
+                        }}
+                      >
+                        {count}
+                      </span>
+                    )}
+                  </button>
                 );
               })}
             </div>
@@ -14655,6 +14702,7 @@ function CashMovementModal({ type, editingMovement, onCancel, onSubmit }) {
         currency: editingMovement.currency || "ARS",
         amount: String(editingMovement.amount ?? ""),
         movement_date: editingMovement.movement_date || new Date().toISOString().slice(0, 10),
+        broker: editingMovement.broker || "manual",
         notes: editingMovement.notes || "",
       };
     }
@@ -14662,6 +14710,7 @@ function CashMovementModal({ type, editingMovement, onCancel, onSubmit }) {
       currency: "ARS",
       amount: "",
       movement_date: new Date().toISOString().slice(0, 10),
+      broker: "manual",
       notes: "",
     };
   });
@@ -14689,6 +14738,7 @@ function CashMovementModal({ type, editingMovement, onCancel, onSubmit }) {
         currency: form.currency,
         amount: Number(form.amount),
         movement_date: form.movement_date,
+        broker: form.broker || "manual",
         notes: form.notes.trim() || null,
       });
     } catch (err) {
@@ -14818,6 +14868,52 @@ function CashMovementModal({ type, editingMovement, onCancel, onSubmit }) {
             >
               Dólar CCL
             </ToggleButton>
+          </div>
+        </FormSection>
+
+        {/* Broker — en qué cuenta entra/sale el cash. Por defecto "manual"
+            (cash sin atribuir). El cash de IOL en realidad lo trae el sync
+            de la API, así que estos movements manuales suelen ser para los
+            otros brokers o para registrar un saldo inicial. */}
+        <FormSection label="Broker">
+          <div className="flex flex-wrap" style={{ gap: 6 }}>
+            {Object.values(BROKER_CATALOG).map((b) => {
+              const isActive = form.broker === b.id;
+              return (
+                <button
+                  key={b.id}
+                  type="button"
+                  onClick={() => setField("broker", b.id)}
+                  style={{
+                    display: "inline-flex",
+                    alignItems: "center",
+                    gap: 6,
+                    padding: "5px 11px",
+                    fontSize: 11.5,
+                    fontWeight: 500,
+                    letterSpacing: "0.02em",
+                    backgroundColor: isActive ? "rgba(255,255,255,0.05)" : "transparent",
+                    border: `1px solid ${isActive ? C.borderStrong : C.border}`,
+                    color: isActive ? C.text : C.muted,
+                    cursor: "pointer",
+                    fontFamily: "'Roboto', sans-serif",
+                    transition: "all 120ms ease",
+                  }}
+                >
+                  <span
+                    style={{
+                      width: 7,
+                      height: 7,
+                      borderRadius: "50%",
+                      backgroundColor: b.color,
+                      opacity: isActive ? 1 : 0.4,
+                      transition: "opacity 120ms ease",
+                    }}
+                  />
+                  <span>{b.label}</span>
+                </button>
+              );
+            })}
           </div>
         </FormSection>
 
@@ -15234,6 +15330,7 @@ function AddPositionDrawer({ editingPosition, onClose, onSubmit }) {
         entry_currency: normalizeLegacyCurrency(editingPosition.entry_currency),
         entry_date: editingPosition.entry_date || new Date().toISOString().slice(0, 10),
         settlement: editingPosition.settlement || "CI",
+        broker: editingPosition.broker || "manual",
         notes: editingPosition.notes || "",
         // extra fields desde el JSONB
         rate_tna: editingPosition.extra?.rate_tna ?? "",
@@ -15253,6 +15350,7 @@ function AddPositionDrawer({ editingPosition, onClose, onSubmit }) {
       entry_currency: "ARS",
       entry_date: new Date().toISOString().slice(0, 10),
       settlement: "CI",
+      broker: "manual",
       notes: "",
       rate_tna: "",
       term_days: "",
@@ -15504,6 +15602,7 @@ function AddPositionDrawer({ editingPosition, onClose, onSubmit }) {
       entry_currency: form.entry_currency,
       entry_date: form.entry_date,
       settlement: form.settlement || "CI",
+      broker: form.broker || "manual",
       notes: form.notes.trim() || null,
       extra,
     };
@@ -16092,6 +16191,52 @@ function AddPositionDrawer({ editingPosition, onClose, onSubmit }) {
               </FormSection>
             </>
           )}
+
+          {/* Broker — en qué cuenta queda la posición. Por defecto "manual"
+              (carga libre). Las posiciones que entran por API de IOL se
+              taggean "iol" desde el sync; este selector cubre las que
+              cargás a mano (Cocos, ECO, manual/otro). */}
+          <FormSection label="Broker">
+            <div className="flex flex-wrap" style={{ gap: 6 }}>
+              {Object.values(BROKER_CATALOG).map((b) => {
+                const isActive = form.broker === b.id;
+                return (
+                  <button
+                    key={b.id}
+                    type="button"
+                    onClick={() => setField("broker", b.id)}
+                    style={{
+                      display: "inline-flex",
+                      alignItems: "center",
+                      gap: 6,
+                      padding: "5px 11px",
+                      fontSize: 11.5,
+                      fontWeight: 500,
+                      letterSpacing: "0.02em",
+                      backgroundColor: isActive ? "rgba(255,255,255,0.05)" : "transparent",
+                      border: `1px solid ${isActive ? C.borderStrong : C.border}`,
+                      color: isActive ? C.text : C.muted,
+                      cursor: "pointer",
+                      fontFamily: "'Roboto', sans-serif",
+                      transition: "all 120ms ease",
+                    }}
+                  >
+                    <span
+                      style={{
+                        width: 7,
+                        height: 7,
+                        borderRadius: "50%",
+                        backgroundColor: b.color,
+                        opacity: isActive ? 1 : 0.4,
+                        transition: "opacity 120ms ease",
+                      }}
+                    />
+                    <span>{b.label}</span>
+                  </button>
+                );
+              })}
+            </div>
+          </FormSection>
 
           {/* Notas */}
           <FormSection label="Notas (opcional)">
