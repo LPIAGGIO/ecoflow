@@ -9018,6 +9018,13 @@ function resolvePositionPrice(p, bondPrices, futurePrices, stockPrices, fciPrice
     if (fp?.price != null && !fp.error) {
       return { price: Number(fp.price), source: "primary" };
     }
+    // Sin precio live (mercado cerrado o hueco temporal del feed):
+    // usamos el último settlement como fallback. Es la referencia
+    // oficial entre sesiones — sin esto la posición caía a "cost" y
+    // dejaba de pesar en los totales de cartera.
+    if (fp?.settlement != null && fp.settlement > 0 && !fp.error) {
+      return { price: Number(fp.settlement), source: "settle" };
+    }
   }
 
   // 3) Para bonos / ONs leemos del cache de precios (BYMA primero, data912
@@ -10631,13 +10638,22 @@ function consolidatePositions(positions, bondPrices, futurePrices, fciPrices) {
     const primaryPrice = (g.instrument_type === "future" && futurePrices)
       ? futurePrices[g.ticker]?.price
       : null;
+    // Settlement de Primary: cuando el feed live no tiene precio
+    // (mercado cerrado, ROFEX fuera de horario, hueco temporal), usamos
+    // el último settlement como fallback. Es la referencia que Cocos
+    // usa para valuar el futuro entre sesiones, así no terminamos
+    // mostrando "—" y la posición pesando 0 en el total de la cartera.
+    const primarySettlement = (g.instrument_type === "future" && futurePrices)
+      ? futurePrices[g.ticker]?.settlement
+      : null;
 
     // Orden de prioridad (unificado entre futuros, bonos, acciones):
     //   1. manualOverride (current_price cargado por el usuario) → gana siempre.
     //   2. Para futuros: primaryPrice (Matba-Rofex live).
-    //   3. Para futuros con ventas: lastSellPrice (cierre del lote vendido).
-    //   4. Para bonos/ONs: bondPrices del feed (BYMA/data912).
-    //   5. ppp (fallback a costo).
+    //   3. Para futuros sin live: settlement del feed (último settle conocido).
+    //   4. Para futuros con ventas: lastSellPrice (cierre del lote vendido).
+    //   5. Para bonos/ONs: bondPrices del feed (BYMA/data912).
+    //   6. ppp (fallback a costo).
     //
     // Bug reportado por LP en mayo/2026: para futuros, el override manual
     // se guardaba en BD pero el render seguía mostrando el precio de
@@ -10654,6 +10670,10 @@ function consolidatePositions(positions, bondPrices, futurePrices, fciPrices) {
       // Primary API: precio real-time de Matba-Rofex.
       currentPrice = primaryPrice;
       priceSource = "primary"; // badge "PRIMARY"
+    } else if (g.instrument_type === "future" && primarySettlement != null && primarySettlement > 0) {
+      // Sin precio live → settlement más reciente del feed.
+      currentPrice = primarySettlement;
+      priceSource = "settle"; // badge "SETTLE"
     } else if (
       g.instrument_type === "future" &&
       g.lastSellPrice != null
@@ -14610,6 +14630,7 @@ function EditablePriceCell({ position, resolved, onSave }) {
   const sourceBadge =
     source === "manual"  ? { label: "manual",  color: C.muted,  bg: "rgba(246,247,246,0.06)" } :
     source === "primary" ? { label: "primary", color: C.accent, bg: C.accentSoft } :
+    source === "settle"  ? { label: "settle",  color: C.muted,  bg: "rgba(246,247,246,0.06)" } :
     source === "byma"    ? { label: "byma",    color: C.accent, bg: C.accentSoft } :
     source === "data912" ? { label: "data912", color: C.accent, bg: C.accentSoft } :
     source === "mae"     ? { label: "mae",     color: C.green,  bg: "rgba(74,222,128,0.10)" } :
