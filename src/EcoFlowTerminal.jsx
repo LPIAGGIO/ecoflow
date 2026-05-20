@@ -9189,16 +9189,21 @@ function computeDailyPnL(p, bondPrices, futurePrices, stockPrices, futureAdjLook
   }
 
   // ─── Futuros ──────────────────────────────────────────────
-  // El "P&L del día" del futuro es la variación desde el último settle
-  // CONOCIDO (sea pending o confirmed) hasta el precio actual de Primary.
-  // Prioridad de prev_settle:
-  //   1) lookup.lastSettle (último adjustment registrado, refleja el
-  //      verdadero estado de "lo último acreditado o por acreditar").
-  //   2) fp.settlement (settle del feed Primary, fallback histórico).
-  // Antes solo se usaba (2), lo que arrastraba varios días cuando había
-  // pendings sin confirmar. Bajo el modelo nuevo (cron 7 AM día siguiente),
-  // si hay pending, lastSettle === curr_settle del pending de ayer, y el
-  // P&L del día es estrictamente intraday.
+  // "P&L HOY" por LOTE: cada operación (cada fila de positions) es su
+  // propio lote, con su propia base. La función ya recibe el position
+  // suelto, así que solo hay que sacar el settle correcto para él.
+  //
+  // Prioridad de settle base:
+  //   1) lookupEntry.lastSettle (curr_settle del adjustment más reciente
+  //      de ESTE lote — pending o confirmed). Después del rework del
+  //      worker (per-lote), esto refleja el día anterior del lote.
+  //   2) Si todavía no hay adjustment para el lote y entry_date === hoy,
+  //      usamos el entry_price (es el día de entrada del lote; mismo
+  //      criterio que el worker en su loop per-lote).
+  //   3) Si no, fp.settlement (el último settle del feed Primary).
+  //
+  // El cron de la 1 AM genera el ajuste del día anterior; entre el momento
+  // de compra y la primera corrida del cron, el caso (2) es el que aplica.
   if (p.instrument_type === "future" && futurePrices) {
     const fp = futurePrices[ticker];
     if (fp?.price != null && !fp.error) {
@@ -9208,16 +9213,16 @@ function computeDailyPnL(p, bondPrices, futurePrices, stockPrices, futureAdjLook
         ? Number(lookupEntry.lastSettle)
         : null;
 
-      // Si no hay adjustments en BD para esta posición:
-      //   - Si entry_date === HOY (la compró hoy mismo), su "base del día"
-      //     es el entry_price (el usuario percibe que su día arrancó en
-      //     el momento de comprar, no contra el settle de ayer del feed).
-      //   - Caso contrario (posición más vieja, sin ajustes históricos
-      //     porque la app aún no lleva mucho tiempo), caemos al settle
-      //     del feed Primary (mejor disponible).
       if (settle == null) {
-        const todayIso = new Date().toISOString().slice(0, 10);
-        if (p.entry_date === todayIso && Number(p.entry_price) > 0) {
+        // Fecha de hoy en ART, no UTC. Con `new Date().toISOString` entre
+        // 21:00 y 23:59 ART el slice(0,10) avanza al día UTC siguiente —
+        // eso rompía la comparación contra entry_date (que se guarda como
+        // YYYY-MM-DD en ART) y caía mal al else, mostrando un P&L HOY
+        // distinto al que generaba el worker per-lote a la 1 AM.
+        const todayAR = new Date().toLocaleDateString("en-CA", {
+          timeZone: "America/Argentina/Buenos_Aires",
+        });
+        if (p.entry_date === todayAR && Number(p.entry_price) > 0) {
           settle = Number(p.entry_price);
         } else if (fp.settlement != null) {
           settle = Number(fp.settlement);
