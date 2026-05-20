@@ -7436,7 +7436,7 @@ function fmtDateShort(iso) {
  * useBondPrices se encarga de fetchear y cachear esos precios.
  */
 
-function DashboardOverview({ positions, excludedBrokers, fxState, bondPricesState, futurePricesState, stockPricesState, fciPricesState, cashState, futureAdjustmentsState, onIngresar, onRetirar }) {
+function DashboardOverview({ positions, excludedBrokers, iolCashByCurrency, fxState, bondPricesState, futurePricesState, stockPricesState, fciPricesState, cashState, futureAdjustmentsState, onIngresar, onRetirar }) {
   const { fx, loading: fxLoading, error: fxError, lastUpdated: fxLastUpdated, refresh: refreshFx } = fxState;
   const { prices: bondPrices, loading: pricesLoading, error: pricesError, lastFetch: pricesLastFetch, refresh: refreshBondPrices } = bondPricesState;
   // futurePricesState viene de PortfolioDashboard (un solo hook compartido
@@ -7451,23 +7451,11 @@ function DashboardOverview({ positions, excludedBrokers, fxState, bondPricesStat
   const balanceByCurrency = cashState?.balanceByCurrency || { "ARS": 0, "USD-MEP": 0, "USD-CCL": 0 };
   const movements = cashState?.movements || [];
 
-  // ── Efectivo de IOL (broker_cash_snapshots) ─────────────────────────
-  // El worker iol-cash-sync deja una foto del cash de cada subcuenta IOL.
-  // Lo sumamos al patrimonio usando SIEMPRE `available` (disponible), NO
-  // `total` (saldo): el saldo incluye la plata "comprometida" por compras
-  // que todavía no liquidaron (T+1), y esos títulos YA están contados en
-  // `positions`. Sumar el saldo completo duplicaría esa plata. IOL mismo
-  // calcula su totalEnPesos con disponible + títulos, no con saldo.
-  const { user: dashUser } = useAuth();
-  const { data: brokerCashSnapshots } = useBrokerCashSnapshots(dashUser?.id);
-  const iolCashByCurrency = useMemo(() => {
-    const acc = { "ARS": 0, "USD-MEP": 0, "USD-CCL": 0 };
-    for (const s of brokerCashSnapshots || []) {
-      if (s.broker !== "iol") continue;
-      acc[iolBalanceCurrency(s.account_type)] += Number(s.available) || 0;
-    }
-    return acc;
-  }, [brokerCashSnapshots]);
+  // iolCashByCurrency llega como prop desde PortfolioDashboard (un único
+  // useBrokerCashSnapshots compartido — antes se duplicaba acá). El worker
+  // iol-cash-sync deja una foto cada 15 min con `available` (NO `total`,
+  // que incluye plata comprometida por compras T+1 cuyos títulos ya están
+  // en positions).
 
   // ── Filtro global de brokers ────────────────────────────────────────
   // Las posiciones ya llegan filtradas desde PortfolioDashboard. El cash se
@@ -11371,6 +11359,26 @@ function PortfolioDashboard({ onNavigate }) {
   // automáticamente cuando se crean/editan/borran positions.
   const cashState = useCashMovements();
 
+  // Efectivo de IOL (broker_cash_snapshots). El worker iol-cash-sync deja
+  // una foto cada 15 min. Lo levantamos a este nivel (en vez de adentro de
+  // DashboardOverview) para que el filtro `presentBrokers` sepa que hay
+  // cash en IOL aunque no haya posiciones taggeadas iol — sin esto, la
+  // chip "IOL" no aparecía si todas las posiciones se habían vendido pero
+  // el cash de la venta seguía en la cuenta.
+  //
+  // Usamos SIEMPRE `available`, no `total` (que incluye plata comprometida
+  // por compras T+1 cuyos títulos ya están contados en positions).
+  const { user: dashUser } = useAuth();
+  const { data: brokerCashSnapshots } = useBrokerCashSnapshots(dashUser?.id);
+  const iolCashByCurrency = useMemo(() => {
+    const acc = { "ARS": 0, "USD-MEP": 0, "USD-CCL": 0 };
+    for (const s of brokerCashSnapshots || []) {
+      if (s.broker !== "iol") continue;
+      acc[iolBalanceCurrency(s.account_type)] += Number(s.available) || 0;
+    }
+    return acc;
+  }, [brokerCashSnapshots]);
+
   // Levantamos los hooks de FX y precios de bonos al nivel del Dashboard,
   // así DashboardOverview Y PositionsTable comparten la misma instancia
   // (un solo fetch en lugar de duplicarlo).
@@ -11523,16 +11531,25 @@ function PortfolioDashboard({ onNavigate }) {
   // Brokers presentes en cartera (para mostrar solo los chips relevantes).
   // El bucket "efectivo" representa el cash manual de cash_movements, que
   // no está taggeado por broker — aparece solo si hay saldo.
+  //
+  // IOL también aparece si la cuenta linkeada por API tiene cash, aunque
+  // no haya ninguna posición taggeada iol. Sin este check, el chip IOL
+  // desaparecía cuando se vendían todas las posiciones pero el cash de
+  // la venta seguía en la cuenta → ese cash se "colaba" en los totales
+  // sin un chip que lo controlara.
   const presentBrokers = useMemo(() => {
     const set = new Set();
     for (const p of positions) set.add(p.broker || "manual");
+    const iolCashTotal = Object.values(iolCashByCurrency || {})
+      .reduce((s, v) => s + (Number(v) || 0), 0);
+    if (iolCashTotal !== 0) set.add("iol");
     const ordered = ["iol", "cocos", "eco", "manual"].filter((b) => set.has(b));
     const manualCash = cashState?.balanceByCurrency || {};
     if (Object.values(manualCash).some((v) => Number(v) !== 0)) {
       ordered.push("efectivo");
     }
     return ordered;
-  }, [positions, cashState]);
+  }, [positions, cashState, iolCashByCurrency]);
 
   // Posiciones tras aplicar el filtro de broker. Es la base GLOBAL: la
   // consume el dashboard (cards) y, encima, se le aplica el filtro de tipo.
@@ -11753,6 +11770,7 @@ function PortfolioDashboard({ onNavigate }) {
           <DashboardOverview
             positions={brokerFilteredPositions}
             excludedBrokers={excludedBrokers}
+            iolCashByCurrency={iolCashByCurrency}
             fxState={fxState}
             bondPricesState={bondPricesState}
             futurePricesState={futurePricesState}
