@@ -20125,72 +20125,93 @@ function ManualLeadBond({ bond, customExitFx }) {
  *
  * Matemática (asumiendo hedge perfecto K = X/(1000×F) contratos):
  *
- *   ARS_factor = 1 + TIR_ARS × T/365     (capitalización ARS por T días)
+ *   ARS_factor = M / P                   (gross return ARS sobre el holding period)
  *   USD_factor = ARS_factor × S_0 / F    (factor sintético en USD)
- *   TIR_USD    = USD_factor^(365/T) − 1  (TIR USD anualizada)
+ *   TIR_USD    = USD_factor^(365/T) − 1  (TIR USD anualizada TEA)
  *
  * donde:
- *   - TIR_ARS = tasa peso del bono (input del usuario)
+ *   - M       = pago al vencimiento del bono por 100 VN (dato fijo del prospecto)
+ *   - P       = precio actual del bono (BYMA / data912, live)
  *   - T       = días al vencimiento del bono
  *   - S_0     = spot mayorista hoy (api/dolares)
  *   - F       = precio del DLR futuro matcheado a la maturity del bono
+ *
+ * Por qué pago al vencimiento y no TIR directa:
+ *   Ni data912 ni MAE exponen TIR como campo del feed (sí precios crudos).
+ *   El pago al vencimiento (M) es un DATO FIJO del bono — sale del prospecto
+ *   del Tesoro y no cambia nunca. Con M + precio live + días → TIR live se
+ *   recalcula sola. El usuario carga M una sola vez por bono.
  *
  * V1 es OBSERVACIONAL: muestra el ranking de combinaciones bono↔futuro
  * por TIR_USD. La idea es identificar cuándo el sintético paga más que
  * un bono USD directo (típicamente GD30 o AL30). En versiones siguientes
  * sumamos alertas y eventualmente ejecución vía IOL API.
  *
- * Defaults asumidos en v1:
- *   - Universo: Lecaps + Boncaps de BOND_REGISTRY con vto futuro
- *     (Duales quedan afuera; su pago variable rompe el sintético cerrado).
- *   - Match bono↔futuro: el DLR cuyo expiry sea >= maturity del bono
- *     y lo más cercano posible. Si no hay >= , se cae al último DLR con
- *     un flag visual (match aproximado).
- *   - TIR_ARS: input manual del usuario por ticker, persistido en
- *     localStorage. Próxima iteración: enganchar feed automático.
- *   - FCI money market: queda para v2 (necesita período de tenencia
- *     explícito, no maturity natural).
+ * Tabs en v1:
+ *   - "Universo": todos los Lecaps + Boncaps activos del BOND_REGISTRY
+ *   - "Cartera": solo los bonos que tiene el usuario en sus posiciones
+ *
+ * FCI money market: queda para v2 (necesita período de tenencia explícito,
+ * no maturity natural).
  * ─────────────────────────────────────────────────────────── */
 
-const SYNTH_TIR_LS_KEY = "ecoflow:syntheticTirs";
+const BOND_MATURITY_LS_KEY = "ecoflow:bondMaturityPayments";
 
-/** Lee TIR por ticker desde localStorage. {} si no hay nada. */
-function readStoredSyntheticTirs() {
+/** Lee pagos al vencimiento por ticker desde localStorage. {} si no hay nada. */
+function readStoredMaturityPayments() {
   if (typeof window === "undefined") return {};
   try {
-    const raw = window.localStorage.getItem(SYNTH_TIR_LS_KEY);
+    const raw = window.localStorage.getItem(BOND_MATURITY_LS_KEY);
     return raw ? JSON.parse(raw) : {};
   } catch {
     return {};
   }
 }
 
-/** Persiste el map de TIRs en localStorage. */
-function writeStoredSyntheticTirs(map) {
+/** Persiste el map de pagos al vencimiento en localStorage. */
+function writeStoredMaturityPayments(map) {
   if (typeof window === "undefined") return;
   try {
-    window.localStorage.setItem(SYNTH_TIR_LS_KEY, JSON.stringify(map));
+    window.localStorage.setItem(BOND_MATURITY_LS_KEY, JSON.stringify(map));
   } catch {
-    // Storage lleno o bloqueado: lo logueamos y seguimos en memoria.
-    console.warn("No pude persistir TIR sintéticas en localStorage");
+    console.warn("No pude persistir pagos al vencimiento en localStorage");
   }
+}
+
+/**
+ * Computa la TIR del bono peso (TEA, compuesta anualmente) a partir del
+ * precio actual y el pago al vencimiento por 100 VN. Modelo de pago único:
+ * vale para Lecaps y Boncaps capitalizables (los que tiene el usuario).
+ *
+ *   tir_tea = (M / P)^(365/T) − 1
+ *
+ * donde M = pago al vencimiento, P = precio actual, T = días al vto.
+ *
+ * Devuelve null si faltan datos o si el resultado no es finito.
+ */
+function computeBondTirTea(maturityPayment, price, days) {
+  if (!Number.isFinite(maturityPayment) || maturityPayment <= 0) return null;
+  if (!Number.isFinite(price) || price <= 0) return null;
+  if (!Number.isFinite(days) || days <= 0) return null;
+  const arsFactor = maturityPayment / price;
+  if (arsFactor <= 0) return null;
+  return Math.pow(arsFactor, 365 / days) - 1;
 }
 
 /**
  * Computa TIR USD anualizada del sintético "bono peso + DLR futuro long".
  *
- * @param {number} tirArs    TIR del bono peso en % (ej. 38 = 38% TNA)
- * @param {number} days      Días al vencimiento del bono
- * @param {number} spot      Spot mayorista hoy (ARS por USD)
- * @param {number} future    Precio DLR futuro matcheado (ARS por USD)
- * @returns {number|null}    TIR USD anualizada (decimal: 0.05 = 5%)
+ * @param {number} arsFactor  Factor ARS gross sobre el holding period (M/P)
+ * @param {number} days       Días al vencimiento del bono
+ * @param {number} spot       Spot mayorista hoy (ARS por USD)
+ * @param {number} future     Precio DLR futuro matcheado (ARS por USD)
+ * @returns {number|null}     TIR USD anualizada TEA (decimal: 0.05 = 5%)
  */
-function computeSyntheticUsdReturn(tirArs, days, spot, future) {
-  if (!Number.isFinite(tirArs) || tirArs <= 0) return null;
+function computeSyntheticUsdReturn(arsFactor, days, spot, future) {
+  if (!Number.isFinite(arsFactor) || arsFactor <= 0) return null;
   if (!Number.isFinite(days) || days <= 0) return null;
   if (!Number.isFinite(spot) || spot <= 0) return null;
   if (!Number.isFinite(future) || future <= 0) return null;
-  const arsFactor = 1 + (tirArs / 100) * days / 365;
   const usdFactor = arsFactor * spot / future;
   return Math.pow(usdFactor, 365 / days) - 1;
 }
@@ -20198,7 +20219,8 @@ function computeSyntheticUsdReturn(tirArs, days, spot, future) {
 function SinteticoDolarModule() {
   // ─── State ──────────────────────────────────────────────
   const [spotMayorista, setSpotMayorista] = useState(null);
-  const [tirByTicker, setTirByTicker] = useState(() => readStoredSyntheticTirs());
+  const [maturityPayments, setMaturityPayments] = useState(() => readStoredMaturityPayments());
+  const [activeTab, setActiveTab] = useState("universo"); // "universo" | "cartera"
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [explainerOpen, setExplainerOpen] = useState(false);
@@ -20212,8 +20234,20 @@ function SinteticoDolarModule() {
     return () => clearInterval(i);
   }, []);
 
+  // ─── Hooks de data ──────────────────────────────────────
+  // - useUserPositions: para filtrar al tab "Cartera" y mostrar qty
+  // - useBondPrices: precio actual de cada Lecap/Boncap (BYMA/data912/MAE)
+  // - useFuturePrices: precios DLR live + settle fallback (un único hook
+  //   por todo el módulo; ya tiene su propio poller adentro)
+  const { positions } = useUserPositions();
+  const bondPricesState = useBondPrices();
+  const bondPrices = bondPricesState?.prices || {};
+
   // ─── Universo: Lecaps + Boncaps con vto futuro ─────────
-  const universe = useMemo(() => {
+  // El base es BOND_REGISTRY (hardcoded). Después, según el tab activo,
+  // filtramos: "Universo" muestra todo, "Cartera" filtra a los tickers
+  // que el usuario tiene en sus positions (bond_ars de Lecap/Boncap).
+  const universeFull = useMemo(() => {
     const today = new Date().toLocaleDateString("en-CA", {
       timeZone: "America/Argentina/Buenos_Aires",
     });
@@ -20226,6 +20260,24 @@ function SinteticoDolarModule() {
     return bonds.sort((a, b) => a.maturityDate.localeCompare(b.maturityDate));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [now]);
+
+  // Tickers del usuario (bond_ars) — filtro del tab "Cartera".
+  const carteraTickers = useMemo(() => {
+    const set = new Set();
+    for (const p of positions || []) {
+      if (p.instrument_type !== "bond_ars") continue;
+      const t = String(p.ticker || "").trim().toUpperCase();
+      if (t) set.add(t);
+    }
+    return set;
+  }, [positions]);
+
+  const universe = useMemo(() => {
+    if (activeTab === "cartera") {
+      return universeFull.filter((b) => carteraTickers.has(b.ticker));
+    }
+    return universeFull;
+  }, [universeFull, carteraTickers, activeTab]);
 
   // ─── DLR futures vivos: useFuturePrices con tickers del registry ─
   const dlrTickers = useMemo(() => DLR_REGISTRY.map((c) => c.ticker), []);
@@ -20271,8 +20323,25 @@ function SinteticoDolarModule() {
     return universe.map((bond) => {
       const days = daysToMaturity(bond.maturityDate);
       if (days == null || days <= 0) return null;
-      const tirRaw = tirByTicker[bond.ticker];
-      const tirArs = (tirRaw === "" || tirRaw == null) ? null : Number(tirRaw);
+
+      // M: pago al vencimiento por 100 VN. Dato fijo del prospecto del
+      // bono que el usuario carga una vez por ticker.
+      const matRaw = maturityPayments[bond.ticker];
+      const maturityPayment = (matRaw === "" || matRaw == null) ? null : Number(matRaw);
+
+      // P: precio actual del feed (BYMA / data912 / MAE consolidados).
+      const bondPriceEntry = bondPrices[bond.ticker];
+      const bondPrice = bondPriceEntry?.price != null && bondPriceEntry.price > 0
+        ? Number(bondPriceEntry.price)
+        : null;
+      const bondPriceSource = bondPriceEntry?.source || null;
+
+      // TIR_ARS (TEA, compuesta) derivada del par (M, P, T).
+      const tirArs = computeBondTirTea(maturityPayment, bondPrice, days);
+      // Factor ARS gross sobre el período (= M/P), usado para el sintético.
+      const arsFactor = (maturityPayment && bondPrice && bondPrice > 0)
+        ? maturityPayment / bondPrice
+        : null;
 
       // Match: DLR con expiry >= maturity del bono, el más cercano.
       // Si no hay ninguno >=, agarro el último disponible y flag aprox.
@@ -20299,13 +20368,16 @@ function SinteticoDolarModule() {
         }
       }
 
-      const tirUsd = computeSyntheticUsdReturn(tirArs, days, spotMayorista, futurePrice);
+      const tirUsd = computeSyntheticUsdReturn(arsFactor, days, spotMayorista, futurePrice);
 
       return {
         bondTicker: bond.ticker,
         bondType: bond.type,
         bondMaturity: bond.maturityDate,
         days,
+        maturityPayment,
+        bondPrice,
+        bondPriceSource,
         tirArs,
         matchFutureTicker: matchFuture?.ticker || null,
         matchFutureMaturity: matchFuture?.maturityDate || null,
@@ -20318,7 +20390,8 @@ function SinteticoDolarModule() {
     .filter(Boolean)
     .sort((a, b) => {
       // Filas con TIR_USD computado primero, ordenadas desc. Las que
-      // todavía no tienen TIR_ARS cargada caen al final por orden de vto.
+      // todavía no tienen pago al vencimiento cargado caen al final
+      // por orden de vto.
       if (a.tirUsd == null && b.tirUsd == null) {
         return a.bondMaturity.localeCompare(b.bondMaturity);
       }
@@ -20326,13 +20399,13 @@ function SinteticoDolarModule() {
       if (b.tirUsd == null) return -1;
       return b.tirUsd - a.tirUsd;
     });
-  }, [universe, tirByTicker, spotMayorista, futurePrices]);
+  }, [universe, maturityPayments, bondPrices, spotMayorista, futurePrices]);
 
   // ─── Handlers ──────────────────────────────────────────
-  const setTir = (ticker, value) => {
-    const next = { ...tirByTicker, [ticker]: value };
-    setTirByTicker(next);
-    writeStoredSyntheticTirs(next);
+  const setMaturity = (ticker, value) => {
+    const next = { ...maturityPayments, [ticker]: value };
+    setMaturityPayments(next);
+    writeStoredMaturityPayments(next);
   };
 
   const handleRefresh = async () => {
@@ -20340,6 +20413,7 @@ function SinteticoDolarModule() {
     try {
       await fetchSpot();
       if (typeof futuresState.refresh === "function") futuresState.refresh();
+      if (typeof bondPricesState?.refresh === "function") bondPricesState.refresh();
     } finally {
       setRefreshing(false);
     }
@@ -20406,6 +20480,41 @@ function SinteticoDolarModule() {
         </div>
       </div>
 
+      {/* Tabs: Universo / Cartera. Filtran qué bonos aparecen en la tabla.
+          La lógica del cómputo es la misma, solo cambia el filtro. */}
+      <div className="flex gap-1 mb-4" style={{ borderBottom: `1px solid ${C.border}` }}>
+        {[
+          { id: "universo", label: "Universo", count: universeFull.length },
+          { id: "cartera", label: "Cartera", count: universeFull.filter((b) => carteraTickers.has(b.ticker)).length },
+        ].map((tab) => {
+          const isActive = activeTab === tab.id;
+          return (
+            <button
+              key={tab.id}
+              onClick={() => setActiveTab(tab.id)}
+              style={{
+                padding: "8px 16px",
+                fontSize: 11.5,
+                fontWeight: isActive ? 600 : 500,
+                letterSpacing: "0.05em",
+                color: isActive ? C.text : C.muted,
+                background: "transparent",
+                border: "none",
+                borderBottom: `2px solid ${isActive ? C.accent : "transparent"}`,
+                cursor: "pointer",
+                transition: "all 120ms ease",
+                marginBottom: -1,
+              }}
+            >
+              {tab.label}
+              <span style={{ color: C.dim, marginLeft: 6, fontSize: 10.5, fontVariantNumeric: "tabular-nums" }}>
+                ({tab.count})
+              </span>
+            </button>
+          );
+        })}
+      </div>
+
       {/* Explainer (collapsable) */}
       <div
         className="mb-4"
@@ -20445,18 +20554,21 @@ function SinteticoDolarModule() {
         {explainerOpen && (
           <div style={{ padding: "0 16px 14px 38px", fontSize: 11.5, color: C.muted, lineHeight: 1.65 }}>
             <p style={{ margin: "0 0 8px 0" }}>
-              <strong style={{ color: C.text }}>Idea:</strong> con C pesos hoy comprás un bono peso que capitaliza a TIR_ARS por T días, y a la vez comprás K contratos DLR futuro long. Eligiendo K = X/(1000×F) — donde X es lo que cobrás del bono al vencimiento — el resultado en USD queda fijo: <strong style={{ color: C.text }}>USD_final = X/F</strong>, independientemente del spot al vencimiento.
+              <strong style={{ color: C.text }}>Idea:</strong> con C pesos hoy comprás un bono peso que paga M por cada 100 VN al vencimiento (en T días), y a la vez comprás K contratos DLR futuro long. Eligiendo K = X/(1000×F) — donde X es lo que cobrás del bono — el resultado en USD queda fijo: <strong style={{ color: C.text }}>USD_final = X/F</strong>, independientemente del spot al vencimiento.
             </p>
             <p style={{ margin: "0 0 8px 0" }}>
-              <strong style={{ color: C.text }}>Fórmula:</strong>
+              <strong style={{ color: C.text }}>Fórmula (TEA, compuesta):</strong>
             </p>
             <pre style={{ margin: "0 0 8px 0", fontFamily: "'Roboto Mono', monospace", fontSize: 11, color: C.text, background: "rgba(255,255,255,0.03)", padding: "8px 10px", overflowX: "auto" }}>
-{`ARS_factor = 1 + TIR_ARS × T/365
+{`ARS_factor = M / P             (gross return ARS sobre T días)
 USD_factor = ARS_factor × S_0 / F
 TIR_USD    = USD_factor^(365/T) − 1`}
             </pre>
+            <p style={{ margin: "0 0 8px 0" }}>
+              <strong style={{ color: C.text }}>Por qué pedimos "Vto $" y no TIR:</strong> ni data912 ni MAE exponen TIR como campo del feed (solo precios crudos). El pago al vencimiento es un dato fijo del bono que sale del prospecto del Tesoro y no cambia nunca. Con M + precio live + días → la TIR se recalcula sola en cada refresh, sin que tengas que tocar nada.
+            </p>
             <p style={{ margin: 0 }}>
-              <strong style={{ color: C.text }}>Limitaciones de v1:</strong> el match con DLR no es perfecto (el futuro expira fin de mes y el bono cualquier día), pero la diferencia suele ser chica. La TIR_ARS la cargás vos a mano por ahora (próxima iteración: feed automático). FCI money market queda para v2.
+              <strong style={{ color: C.text }}>Limitaciones de v1:</strong> el match con DLR no es perfecto (el futuro expira fin de mes y el bono cualquier día), pero la diferencia suele ser chica — flagueamos cuando no hay un DLR ≥ vencimiento del bono. FCI money market queda para v2.
             </p>
           </div>
         )}
@@ -20476,7 +20588,9 @@ TIR_USD    = USD_factor^(365/T) − 1`}
               <th style={thLeft}>Bono</th>
               <th style={thLeft}>Vto</th>
               <th style={th}>Días</th>
-              <th style={th}>TIR ARS (%)</th>
+              <th style={th}>Vto $ (por 100 VN)</th>
+              <th style={th}>P actual</th>
+              <th style={th}>TIR ARS</th>
               <th style={thLeft}>DLR match</th>
               <th style={th}>F (futuro)</th>
               <th style={th}>TIR USD anual</th>
@@ -20485,13 +20599,17 @@ TIR_USD    = USD_factor^(365/T) − 1`}
           <tbody>
             {rows.length === 0 && (
               <tr>
-                <td colSpan={7} style={{ padding: 32, textAlign: "center", color: C.dim, fontSize: 12 }}>
-                  {loading ? "Cargando..." : "No hay Lecaps / Boncaps con vto futuro en el registry"}
+                <td colSpan={9} style={{ padding: 32, textAlign: "center", color: C.dim, fontSize: 12 }}>
+                  {loading
+                    ? "Cargando..."
+                    : activeTab === "cartera"
+                    ? "No hay Lecaps / Boncaps en tus posiciones."
+                    : "No hay Lecaps / Boncaps con vto futuro en el registry"}
                 </td>
               </tr>
             )}
             {rows.map((row) => {
-              const tirArsRaw = tirByTicker[row.bondTicker] ?? "";
+              const matRaw = maturityPayments[row.bondTicker] ?? "";
               return (
                 <tr key={row.bondTicker} style={{ borderBottom: `1px solid ${C.border}` }}>
                   <td style={tdLeft}>
@@ -20505,12 +20623,12 @@ TIR_USD    = USD_factor^(365/T) − 1`}
                   <td style={td}>
                     <input
                       type="number"
-                      value={tirArsRaw}
-                      onChange={(e) => setTir(row.bondTicker, e.target.value)}
-                      placeholder="38"
-                      step="0.1"
+                      value={matRaw}
+                      onChange={(e) => setMaturity(row.bondTicker, e.target.value)}
+                      placeholder="115,5"
+                      step="0.01"
                       style={{
-                        width: 64,
+                        width: 78,
                         padding: "3px 6px",
                         background: "transparent",
                         border: `1px solid ${C.border}`,
@@ -20521,6 +20639,25 @@ TIR_USD    = USD_factor^(365/T) − 1`}
                         fontFamily: "'Roboto Mono', monospace",
                       }}
                     />
+                  </td>
+                  <td style={td}>
+                    {row.bondPrice != null ? (
+                      <>
+                        {fmtNumber(row.bondPrice, { maxDecimals: 3, minDecimals: 2, smartDecimals: true })}
+                        {row.bondPriceSource && (
+                          <span style={{ color: C.dim, fontSize: 9.5, marginLeft: 5, letterSpacing: "0.05em", textTransform: "uppercase" }}>
+                            {row.bondPriceSource}
+                          </span>
+                        )}
+                      </>
+                    ) : <span style={{ color: C.dim }}>—</span>}
+                  </td>
+                  <td style={td}>
+                    {row.tirArs != null ? (
+                      <span style={{ color: C.text }}>
+                        {fmtPct(row.tirArs * 100)}
+                      </span>
+                    ) : <span style={{ color: C.dim }}>—</span>}
                   </td>
                   <td style={tdLeft}>
                     {row.matchFutureTicker ? (
@@ -20560,7 +20697,7 @@ TIR_USD    = USD_factor^(365/T) − 1`}
 
       {/* Footer */}
       <div style={{ marginTop: 14, fontSize: 10, color: C.dim, letterSpacing: "0.05em", textTransform: "uppercase", fontWeight: 500 }}>
-        Fuentes: dolarapi (spot) · Primary (DLR live + settle fallback) · BOND_REGISTRY (maturity). Auto-refresh: 5 min en spot, propio del feed en futuros.
+        Fuentes: dolarapi (spot) · Primary (DLR live + settle fallback) · BYMA/data912/MAE (precio bonos) · BOND_REGISTRY (maturity). Cargás "Vto $" una sola vez por bono; la TIR se recalcula sola con cada refresh de precio.
       </div>
     </div>
   );
