@@ -20788,7 +20788,7 @@ USD_factor = ARS_factor × S_0 / F
 TIR_USD    = USD_factor^(365/T) − 1`}
             </pre>
             <p style={{ margin: "0 0 8px 0" }}>
-              <strong style={{ color: C.text }}>De dónde sale M:</strong> el worker <code style={{ background: "rgba(255,255,255,0.05)", padding: "1px 5px", fontFamily: "'Roboto Mono', monospace", fontSize: 10.5 }}>bond-emissions-sync</code> scrapea argentina.gob.ar (Mi/Ju) y deriva el pago al vencimiento de cada Lecap/Boncap activo. El input "Vto $" viene prefilled con ese valor — si lo editás, tu override gana sobre el del worker.
+              <strong style={{ color: C.text }}>De dónde sale M:</strong> el pago al vencimiento de cada Lecap/Boncap se actualiza solo desde los datos públicos del Tesoro. Aparece prefilled en "Vto $" — si lo editás, tu valor manual prevalece.
             </p>
             <p style={{ margin: "0 0 8px 0" }}>
               <strong style={{ color: C.text }}>El icono</strong> <span style={{ color: C.cat.violet, fontSize: 12 }}>⚠</span> en la columna DLR match: significa que no hay un futuro que expire después del vto del bono, así que usamos el último disponible y la TIR USD queda <em>aproximada</em> (no hedgeada al 100% en el último tramo). Filtrá esas filas si querés sintéticos garantizados.
@@ -20951,7 +20951,7 @@ TIR_USD    = USD_factor^(365/T) − 1`}
 
       {/* Footer */}
       <div style={{ marginTop: 14, fontSize: 10, color: C.dim, letterSpacing: "0.05em", textTransform: "uppercase", fontWeight: 500 }}>
-        Fuentes: dolarapi (spot) · Primary (DLR live + settle fallback) · BYMA/data912/MAE (precio bonos) · bond_emissions (pago al vto del Tesoro, sync Mi/Ju) · BOND_REGISTRY (universo). La TIR se recalcula sola con cada refresh.
+        Fuentes: dolarapi (spot) · Primary (DLR live + settle fallback) · BYMA/data912/MAE (precio bonos) · Tesoro Nacional (pago al vto, actualizado Mi/Ju). La TIR se recalcula sola con cada refresh.
       </div>
     </div>
   );
