@@ -20527,30 +20527,38 @@ function SinteticoDolarModule() {
       const days = daysToMaturity(bond.maturityDate);
       if (days == null || days <= 0) return null;
 
-      // M: pago al vencimiento por 100 VN. Cuatro fuentes en orden de
+      // M: pago al vencimiento por 100 VN. Cinco fuentes en orden de
       // prioridad:
       //   (1) Override manual del usuario en el input local
-      //   (2) bond_emissions del worker (Supabase, tasa fija)
-      //   (3) BONTAM floor (Bonos Duales TAMAR — escenario peor con
+      //   (2) bond_emissions del worker (Supabase, fresco, oficial)
+      //   (3) BOND_REGISTRY.finalPayoff hardcoded (mismo dato que usa
+      //       el CarryTradeModule — verificado contra rendimientos.co,
+      //       cubre todo el universo historico aunque el worker no haya
+      //       visto el bono)
+      //   (4) BONTAM floor (Bonos Duales TAMAR — escenario peor con
       //       tasa fija; el real puede ser mayor si TAMAR sube)
-      //   (4) Nada → la fila aparece con TIR vacia
+      //   (5) Nada → la fila aparece con TIR vacia
       const overrideRaw = maturityPayments[bond.ticker];
       const overrideNum = (overrideRaw === "" || overrideRaw == null)
         ? null
         : Number(overrideRaw);
       const workerPago = bondEmissions?.get(bond.ticker)?.pagoVencimiento;
+      const registryPago = Number.isFinite(bond.finalPayoff) ? bond.finalPayoff : null;
       const bontamInfo = KNOWN_BONTAMS[bond.ticker];
       const bontamFloor = (bond.type === "bontam" && bontamInfo)
         ? computeBontamFloor(bontamInfo.temFija, bontamInfo.fechaEmision, bond.maturityDate)
         : null;
       let maturityPayment;
-      let maturityPaymentSource; // "override" | "worker" | "bontam_floor" | null
+      let maturityPaymentSource; // "override" | "worker" | "registry" | "bontam_floor" | null
       if (Number.isFinite(overrideNum) && overrideNum > 0) {
         maturityPayment = overrideNum;
         maturityPaymentSource = "override";
       } else if (Number.isFinite(workerPago) && workerPago > 0) {
         maturityPayment = workerPago;
         maturityPaymentSource = "worker";
+      } else if (Number.isFinite(registryPago) && registryPago > 0) {
+        maturityPayment = registryPago;
+        maturityPaymentSource = "registry";
       } else if (Number.isFinite(bontamFloor) && bontamFloor > 0) {
         maturityPayment = bontamFloor;
         maturityPaymentSource = "bontam_floor";
@@ -20861,7 +20869,7 @@ USD_factor = ARS_factor × S_0 / F
 TIR_USD    = USD_factor^(365/T) − 1`}
             </pre>
             <p style={{ margin: "0 0 8px 0" }}>
-              <strong style={{ color: C.text }}>De dónde sale M:</strong> el pago al vencimiento de cada Lecap/Boncap se actualiza solo desde los datos públicos del Tesoro. Aparece prefilled en "Vto $" — si lo editás, tu valor manual prevalece.
+              <strong style={{ color: C.text }}>De dónde sale M:</strong> tres fuentes en cascada — primero datos del Tesoro actualizados automáticamente (Mi/Ju), después el catálogo verificado del registry (mismo dato que usa Carry Trade Terminal), y por último override manual si lo cargás. Aparece prefilled en "Vto $"; si lo editás, tu valor manual prevalece.
             </p>
             <p style={{ margin: "0 0 8px 0" }}>
               <strong style={{ color: C.text }}>Bonos <span style={{ color: C.cat.yellow, fontWeight: 700 }}>DUAL</span> (TAMAR):</strong> el badge amarillo marca Bonos Duales — pagan al vto el <em>máximo</em> entre la tasa fija capitalizada y la TAMAR acumulada del período. Como no podemos predecir TAMAR, mostramos el <strong style={{ color: C.text }}>PISO</strong> (escenario tasa fija). Si TAMAR queda arriba, cobrás más; si no, cobrás exactamente eso. <em>La TIR USD que ves es la peor que te puede tocar.</em> Si esa ya es atractiva, el bono es buen sintético casi sin importar el camino de TAMAR.
