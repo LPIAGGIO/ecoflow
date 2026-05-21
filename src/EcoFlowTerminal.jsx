@@ -20922,20 +20922,37 @@ TIR_USD    = USD_factor^(365/T) − 1`}
               </tr>
             )}
             {sortedRows.map((row) => {
-              // matRaw: valor a mostrar en el input. Override > worker > "".
-              // workerPago se muestra prefilled pero NO se persiste en
-              // localStorage hasta que el usuario edita (=> esta vacio en
-              // maturityPayments y se llena al editar).
+              // matRaw: valor a mostrar en el input. Sale de la MISMA
+              // cascada que ya resolvio el calculo (override > worker >
+              // registry > bontam_floor). Si la cascada no resuelve, el
+              // input queda vacio — no usamos placeholder con un numero
+              // porque el usuario lo lee como dato cargado (bug viejo:
+              // mostraba "115,5" mientras el calculo usaba el M real del
+              // registry, dando la impresion de inconsistencia).
               const override = maturityPayments[row.bondTicker];
-              const workerPago = bondEmissions?.get(row.bondTicker)?.pagoVencimiento;
-              const matRaw =
-                (override !== "" && override != null)
-                  ? override
-                  : (Number.isFinite(workerPago) && workerPago > 0
-                      ? workerPago.toFixed(2)
-                      : "");
-              const isFromWorker = (override === "" || override == null) &&
-                                   Number.isFinite(workerPago) && workerPago > 0;
+              const source = row.maturityPaymentSource;
+              const isManual = source === "override";
+              const isPrefilled = !isManual && source != null;
+              let matRaw;
+              if (isManual) {
+                matRaw = override; // tal cual lo escribio el usuario
+              } else if (isPrefilled && Number.isFinite(row.maturityPayment)) {
+                matRaw = row.maturityPayment.toFixed(2);
+              } else {
+                matRaw = ""; // sin dato → input vacio
+              }
+              let inputTitle;
+              if (isManual) {
+                inputTitle = "Override manual. Borrá el valor para volver al valor automático.";
+              } else if (source === "worker") {
+                inputTitle = "Pago al vto. del catálogo del Tesoro (actualizado Mi/Ju). Editá para anular con un valor manual.";
+              } else if (source === "registry") {
+                inputTitle = "Pago al vto. del catálogo verificado interno. Editá para anular con un valor manual.";
+              } else if (source === "bontam_floor") {
+                inputTitle = "Piso garantizado (escenario tasa fija) — el pago real puede ser mayor si TAMAR supera la fija. Editá para forzar un valor.";
+              } else {
+                inputTitle = "Sin dato — la TIR queda en blanco hasta que cargues el pago al vto. (sale del prospecto del bono).";
+              }
               return (
                 <tr key={row.bondTicker} style={{ borderBottom: `1px solid ${C.border}` }}>
                   <td style={tdLeft}>
@@ -20968,19 +20985,15 @@ TIR_USD    = USD_factor^(365/T) − 1`}
                       type="number"
                       value={matRaw}
                       onChange={(e) => setMaturity(row.bondTicker, e.target.value)}
-                      placeholder="115,5"
+                      placeholder=""
                       step="0.01"
-                      title={isFromWorker
-                        ? "Pre-cargado por el worker bond-emissions-sync (Tesoro). Editá para anular con un valor manual."
-                        : (row.maturityPaymentSource === "override"
-                            ? "Override manual. Borrá el valor para volver al del worker."
-                            : "Cargá el pago al vencimiento por 100 VN (sale del prospecto del bono).")}
+                      title={inputTitle}
                       style={{
                         width: 78,
                         padding: "3px 6px",
                         background: "transparent",
-                        border: `1px solid ${isFromWorker ? C.accentBorder : C.border}`,
-                        color: isFromWorker ? C.dim : C.text,
+                        border: `1px solid ${isPrefilled ? C.accentBorder : C.border}`,
+                        color: isPrefilled ? C.dim : C.text,
                         fontSize: 11.5,
                         textAlign: "right",
                         fontVariantNumeric: "tabular-nums",
