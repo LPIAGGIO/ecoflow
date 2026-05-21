@@ -20314,6 +20314,52 @@ function useBondEmissions() {
   return { emissions, loading, error, refetch: fetchEmissions };
 }
 
+/**
+ * Bonos Duales TAMAR (BONTAM) — catalogo hardcoded.
+ *
+ * Estos bonos pagan al vencimiento el MAX entre:
+ *   (a) tasa fija capitalizada desde la emision (TEM fija conocida)
+ *   (b) TAMAR mensual acumulada del periodo (variable, depende del
+ *       camino real de la tasa)
+ *
+ * Como no podemos predecir TAMAR, computamos solo el rama (a) — el
+ * PISO garantizado del pago. Si TAMAR > tasa fija promedio, el pago
+ * real va a ser mayor; en cambio, si TAMAR queda por debajo, el bono
+ * paga exactamente este floor.
+ *
+ * La idea: si la TIR USD del FLOOR ya es atractiva, el sintetico es
+ * buena oportunidad casi sin importar el camino de TAMAR.
+ *
+ * Long-term: hay que extender el worker bond-emissions-sync para que
+ * detecte BONTAMs en los articulos del Tesoro y los persista con
+ * fecha de emision + tasa fija. Hoy lo hardcodeamos.
+ *
+ * Datos sacados del canje de ene-2025: bonos a marzo, junio, sept
+ * y dic de 2026. Tasas fijas 2.25%, 2.19%, 2.17% y 2.14% TEM
+ * respectivamente (fuente: comunicado de Secretaria de Finanzas
+ * y notas de prensa de Cronista/Debursa/Bloomberg).
+ */
+const KNOWN_BONTAMS = {
+  TTM26: { temFija: 0.0225, fechaEmision: "2025-01-29", maturityDate: "2026-03-16" },
+  TTJ26: { temFija: 0.0219, fechaEmision: "2025-01-29", maturityDate: "2026-06-30" },
+  TTS26: { temFija: 0.0217, fechaEmision: "2025-01-29", maturityDate: "2026-09-15" },
+  TTD26: { temFija: 0.0214, fechaEmision: "2025-01-29", maturityDate: "2026-12-15" },
+};
+
+/**
+ * Computa el pago al vto FLOOR de un BONTAM usando solo la rama de
+ * tasa fija. Es el escenario "TAMAR queda por debajo de la fija en
+ * todo el periodo" — el peor caso garantizado.
+ *
+ * Formula: 100 × (1 + temFija)^N_meses_desde_emision_a_vto
+ */
+function computeBontamFloor(temFija, fechaEmision, maturityDate) {
+  const ms = new Date(maturityDate).getTime() - new Date(fechaEmision).getTime();
+  if (!Number.isFinite(ms) || ms <= 0) return null;
+  const meses = ms / (1000 * 60 * 60 * 24 * 30.4375);
+  return 100 * Math.pow(1 + temFija, meses);
+}
+
 function SinteticoDolarModule() {
   // ─── State ──────────────────────────────────────────────
   const [spotMayorista, setSpotMayorista] = useState(null);
@@ -20368,18 +20414,24 @@ function SinteticoDolarModule() {
   //      sirve de fallback si Supabase falla)
   //   2. bond_emissions del worker (Supabase) — capta automaticamente
   //      bonos nuevos sin que tengamos que tocar codigo
-  // Si un ticker aparece en ambos, prevalece la maturityDate del
-  // registry (estable, validada); el worker solo suma cobertura.
+  //   3. KNOWN_BONTAMS hardcoded — fuerza el type a "bontam" para los
+  //      Bonos Duales TAMAR conocidos. El registry los marca mal como
+  //      "boncap" (tasa fija) pero son tasa variable.
+  // Si un ticker aparece en multiples fuentes, el orden de prioridad
+  // es: KNOWN_BONTAMS > registry > emissions (solo para maturityDate).
   const universeFull = useMemo(() => {
     const today = new Date().toLocaleDateString("en-CA", {
       timeZone: "America/Argentina/Buenos_Aires",
     });
     const byTicker = new Map();
-    // Step 1: registry
+    // Step 1: registry — incluye Lecaps/Boncaps. Si el ticker esta
+    // en KNOWN_BONTAMS, override del type a "bontam".
     for (const [ticker, info] of Object.entries(BOND_REGISTRY)) {
       if (!info?.maturityDate || info.maturityDate <= today) continue;
-      if (info.type !== "lecap" && info.type !== "boncap") continue;
-      byTicker.set(ticker, { ticker, ...info });
+      const isBontam = !!KNOWN_BONTAMS[ticker];
+      const type = isBontam ? "bontam" : info.type;
+      if (type !== "lecap" && type !== "boncap" && type !== "bontam") continue;
+      byTicker.set(ticker, { ticker, ...info, type });
     }
     // Step 2: bond_emissions (agrega los que no estan en registry)
     if (bondEmissions) {
@@ -20393,6 +20445,17 @@ function SinteticoDolarModule() {
             maturityDate: row.maturityDate,
           });
         }
+      }
+    }
+    // Step 3: BONTAMs que no estan en registry (raro pero posible)
+    for (const [ticker, info] of Object.entries(KNOWN_BONTAMS)) {
+      if (info.maturityDate <= today) continue;
+      if (!byTicker.has(ticker)) {
+        byTicker.set(ticker, {
+          ticker,
+          type: "bontam",
+          maturityDate: info.maturityDate,
+        });
       }
     }
     return [...byTicker.values()].sort((a, b) =>
@@ -20464,23 +20527,33 @@ function SinteticoDolarModule() {
       const days = daysToMaturity(bond.maturityDate);
       if (days == null || days <= 0) return null;
 
-      // M: pago al vencimiento por 100 VN. Tres fuentes en orden de
-      // prioridad: (1) override manual del usuario en el input local,
-      // (2) bond_emissions del worker (Supabase), (3) nada → bond
-      // queda sin TIR computada y aparece al final de la tabla.
+      // M: pago al vencimiento por 100 VN. Cuatro fuentes en orden de
+      // prioridad:
+      //   (1) Override manual del usuario en el input local
+      //   (2) bond_emissions del worker (Supabase, tasa fija)
+      //   (3) BONTAM floor (Bonos Duales TAMAR — escenario peor con
+      //       tasa fija; el real puede ser mayor si TAMAR sube)
+      //   (4) Nada → la fila aparece con TIR vacia
       const overrideRaw = maturityPayments[bond.ticker];
       const overrideNum = (overrideRaw === "" || overrideRaw == null)
         ? null
         : Number(overrideRaw);
       const workerPago = bondEmissions?.get(bond.ticker)?.pagoVencimiento;
+      const bontamInfo = KNOWN_BONTAMS[bond.ticker];
+      const bontamFloor = (bond.type === "bontam" && bontamInfo)
+        ? computeBontamFloor(bontamInfo.temFija, bontamInfo.fechaEmision, bond.maturityDate)
+        : null;
       let maturityPayment;
-      let maturityPaymentSource; // "override" | "worker" | null
+      let maturityPaymentSource; // "override" | "worker" | "bontam_floor" | null
       if (Number.isFinite(overrideNum) && overrideNum > 0) {
         maturityPayment = overrideNum;
         maturityPaymentSource = "override";
       } else if (Number.isFinite(workerPago) && workerPago > 0) {
         maturityPayment = workerPago;
         maturityPaymentSource = "worker";
+      } else if (Number.isFinite(bontamFloor) && bontamFloor > 0) {
+        maturityPayment = bontamFloor;
+        maturityPaymentSource = "bontam_floor";
       } else {
         maturityPayment = null;
         maturityPaymentSource = null;
@@ -20791,10 +20864,16 @@ TIR_USD    = USD_factor^(365/T) − 1`}
               <strong style={{ color: C.text }}>De dónde sale M:</strong> el pago al vencimiento de cada Lecap/Boncap se actualiza solo desde los datos públicos del Tesoro. Aparece prefilled en "Vto $" — si lo editás, tu valor manual prevalece.
             </p>
             <p style={{ margin: "0 0 8px 0" }}>
+              <strong style={{ color: C.text }}>Bonos <span style={{ color: C.cat.yellow, fontWeight: 700 }}>DUAL</span> (TAMAR):</strong> el badge amarillo marca Bonos Duales — pagan al vto el <em>máximo</em> entre la tasa fija capitalizada y la TAMAR acumulada del período. Como no podemos predecir TAMAR, mostramos el <strong style={{ color: C.text }}>PISO</strong> (escenario tasa fija). Si TAMAR queda arriba, cobrás más; si no, cobrás exactamente eso. <em>La TIR USD que ves es la peor que te puede tocar.</em> Si esa ya es atractiva, el bono es buen sintético casi sin importar el camino de TAMAR.
+            </p>
+            <p style={{ margin: "0 0 8px 0" }}>
+              <strong style={{ color: C.text }}>Cómo usar la pantalla:</strong> la idea no es necesariamente <em>hold-to-maturity</em>. Podés entrar al sintético y salir en 30/60/90 días si el carry te conviene; la TIR USD anual te dice cuánto rinde el armado mientras lo aguantes. Ordená por TIR USD descendente para ver las oportunidades top. Las desalineadas suelen aparecer cuando hay shocks de tasa, inflación o tipo de cambio — ahí está el desarbitraje.
+            </p>
+            <p style={{ margin: "0 0 8px 0" }}>
               <strong style={{ color: C.text }}>El icono</strong> <span style={{ color: C.cat.violet, fontSize: 12 }}>⚠</span> en la columna DLR match: significa que no hay un futuro que expire después del vto del bono, así que usamos el último disponible y la TIR USD queda <em>aproximada</em> (no hedgeada al 100% en el último tramo). Filtrá esas filas si querés sintéticos garantizados.
             </p>
             <p style={{ margin: 0 }}>
-              <strong style={{ color: C.text }}>Limitaciones de v1:</strong> el match con DLR no es perfecto incluso cuando hay cobertura (el futuro expira fin de mes, el bono cualquier día). FCI money market queda para v2 (no tiene maturity natural).
+              <strong style={{ color: C.text }}>Limitaciones de v1:</strong> el match con DLR no es perfecto incluso cuando hay cobertura (el futuro expira fin de mes, el bono cualquier día). Para BONTAMs mostramos solo el piso (el techo con TAMAR actual queda para v2). Alertas de oportunidades arbitrables y exits anticipados con cálculo de carry parcial también van en próximas iteraciones.
             </p>
           </div>
         )}
@@ -20853,9 +20932,26 @@ TIR_USD    = USD_factor^(365/T) − 1`}
                 <tr key={row.bondTicker} style={{ borderBottom: `1px solid ${C.border}` }}>
                   <td style={tdLeft}>
                     <span style={{ fontWeight: 600 }}>{row.bondTicker}</span>
-                    <span style={{ color: C.dim, marginLeft: 6, fontSize: 10, textTransform: "uppercase", letterSpacing: "0.05em" }}>
-                      {row.bondType}
-                    </span>
+                    {row.bondType === "bontam" ? (
+                      <span
+                        style={{
+                          color: C.cat?.yellow || "#fbbf24",
+                          marginLeft: 6,
+                          fontSize: 10,
+                          textTransform: "uppercase",
+                          letterSpacing: "0.05em",
+                          fontWeight: 600,
+                          cursor: "help",
+                        }}
+                        title="Bono Dual TAMAR — paga al vto el MAX entre tasa fija capitalizada y TAMAR mensual acumulada. El 'Vto $' mostrado es el PISO (escenario tasa fija). Si TAMAR queda arriba del piso, cobrás más; si no, exactamente eso. La TIR USD que ves es la garantizada en el peor caso."
+                      >
+                        DUAL
+                      </span>
+                    ) : (
+                      <span style={{ color: C.dim, marginLeft: 6, fontSize: 10, textTransform: "uppercase", letterSpacing: "0.05em" }}>
+                        {row.bondType}
+                      </span>
+                    )}
                   </td>
                   <td style={tdLeft}>{row.bondMaturity}</td>
                   <td style={tdDim}>{row.days}</td>
