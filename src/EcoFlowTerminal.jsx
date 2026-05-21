@@ -20531,12 +20531,16 @@ function SinteticoDolarModule() {
       // prioridad:
       //   (1) Override manual del usuario en el input local
       //   (2) bond_emissions del worker (Supabase, fresco, oficial)
-      //   (3) BOND_REGISTRY.finalPayoff hardcoded (mismo dato que usa
+      //   (3) Para BONTAMs: bontam_floor calculado (escenario peor con
+      //       tasa fija). Va ANTES que el registry porque los TT26 del
+      //       registry tienen un finalPayoff hardcodeado que es exacta-
+      //       mente el mismo floor (verificado: diff < 0.20 entre ambos)
+      //       pero el bontam_floor deja claro la semantica de "piso
+      //       garantizado, el real puede ser mayor si TAMAR supera la fija".
+      //   (4) BOND_REGISTRY.finalPayoff hardcoded (mismo dato que usa
       //       el CarryTradeModule — verificado contra rendimientos.co,
       //       cubre todo el universo historico aunque el worker no haya
       //       visto el bono)
-      //   (4) BONTAM floor (Bonos Duales TAMAR — escenario peor con
-      //       tasa fija; el real puede ser mayor si TAMAR sube)
       //   (5) Nada → la fila aparece con TIR vacia
       const overrideRaw = maturityPayments[bond.ticker];
       const overrideNum = (overrideRaw === "" || overrideRaw == null)
@@ -20545,21 +20549,26 @@ function SinteticoDolarModule() {
       const workerPago = bondEmissions?.get(bond.ticker)?.pagoVencimiento;
       const registryPago = Number.isFinite(bond.finalPayoff) ? bond.finalPayoff : null;
       const bontamInfo = KNOWN_BONTAMS[bond.ticker];
-      const bontamFloor = (bond.type === "bontam" && bontamInfo)
+      const isBontam = bond.type === "bontam";
+      const bontamFloor = (isBontam && bontamInfo)
         ? computeBontamFloor(bontamInfo.temFija, bontamInfo.fechaEmision, bond.maturityDate)
         : null;
       let maturityPayment;
-      let maturityPaymentSource; // "override" | "worker" | "registry" | "bontam_floor" | null
+      let maturityPaymentSource; // "override" | "worker" | "bontam_floor" | "registry" | null
       if (Number.isFinite(overrideNum) && overrideNum > 0) {
         maturityPayment = overrideNum;
         maturityPaymentSource = "override";
       } else if (Number.isFinite(workerPago) && workerPago > 0) {
         maturityPayment = workerPago;
         maturityPaymentSource = "worker";
+      } else if (isBontam && Number.isFinite(bontamFloor) && bontamFloor > 0) {
+        maturityPayment = bontamFloor;
+        maturityPaymentSource = "bontam_floor";
       } else if (Number.isFinite(registryPago) && registryPago > 0) {
         maturityPayment = registryPago;
         maturityPaymentSource = "registry";
       } else if (Number.isFinite(bontamFloor) && bontamFloor > 0) {
+        // Edge case: tipo no marcado como bontam pero hay floor calculable
         maturityPayment = bontamFloor;
         maturityPaymentSource = "bontam_floor";
       } else {
@@ -20608,6 +20617,16 @@ function SinteticoDolarModule() {
 
       const tirUsd = computeSyntheticUsdReturn(arsFactor, days, spotMayorista, futurePrice);
 
+      // Flag: el bono es BONTAM y el precio cotiza ARRIBA del piso. Eso
+      // significa que el mercado esta pagando una prima por encima de la
+      // tasa fija (descuenta TAMAR > fija al promedio). Las TIR mostradas
+      // (tanto ARS como USD) son del PEOR CASO; el payoff real probable-
+      // mente sea mayor, asi que pintarlas en rojo brillante seria
+      // alarmante y enganoso. Las atenuamos visualmente cuando aplica.
+      const isBontamAbovePremium = isBontam &&
+        Number.isFinite(bondPrice) && Number.isFinite(maturityPayment) &&
+        bondPrice > maturityPayment;
+
       return {
         bondTicker: bond.ticker,
         bondType: bond.type,
@@ -20624,6 +20643,7 @@ function SinteticoDolarModule() {
         futurePrice,
         futureSource,
         tirUsd,
+        isBontamAbovePremium,
       };
     })
     .filter(Boolean);
@@ -21015,7 +21035,12 @@ TIR_USD    = USD_factor^(365/T) − 1`}
                   </td>
                   <td style={td}>
                     {row.tirArs != null ? (
-                      <span style={{ color: C.text }}>
+                      <span
+                        style={{ color: row.isBontamAbovePremium ? C.muted : C.text, cursor: row.isBontamAbovePremium ? "help" : "default" }}
+                        title={row.isBontamAbovePremium
+                          ? "El mercado paga prima sobre el piso de tasa fija (descuenta TAMAR > fija). La TIR mostrada es la del peor caso — el bono probablemente pague más al vencimiento."
+                          : undefined}
+                      >
                         {fmtPct(row.tirArs * 100)}
                       </span>
                     ) : <span style={{ color: C.dim }}>—</span>}
@@ -21054,9 +21079,18 @@ TIR_USD    = USD_factor^(365/T) − 1`}
                   </td>
                   <td style={{ ...td, fontWeight: 600 }}>
                     {row.tirUsd != null ? (
-                      <span style={{ color: row.tirUsd > 0 ? C.green : C.red }}>
-                        {row.tirUsd >= 0 ? "+" : ""}{fmtPct(row.tirUsd * 100)}
-                      </span>
+                      row.isBontamAbovePremium ? (
+                        <span
+                          style={{ color: C.muted, fontWeight: 500, cursor: "help" }}
+                          title="El mercado paga prima sobre el piso de tasa fija (descuenta TAMAR > fija). La TIR USD mostrada es la del peor caso — el sintético real probablemente rinda más al vencimiento si TAMAR queda arriba."
+                        >
+                          {row.tirUsd >= 0 ? "+" : ""}{fmtPct(row.tirUsd * 100)}
+                        </span>
+                      ) : (
+                        <span style={{ color: row.tirUsd > 0 ? C.green : C.red }}>
+                          {row.tirUsd >= 0 ? "+" : ""}{fmtPct(row.tirUsd * 100)}
+                        </span>
+                      )
                     ) : <span style={{ color: C.dim, fontWeight: 400 }}>—</span>}
                   </td>
                 </tr>

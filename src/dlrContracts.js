@@ -60,6 +60,10 @@ function decodeDlrSuffix(suffix) {
 
 // Lista canónica de contratos vigentes al 30/04/2026 con sus precios seed.
 // Ticker, mes, año y precio "Ajuste Ant." de la captura matbarofex.primary.ventures.
+// DLRABR27: agregado el 21/05/2026 (bid 1.750,0, sin operar últ); el último futuro
+// listado en MtR. T30A7 ya queda con cobertura exacta (mismo vencimiento).
+// T31Y7 y T30J7 (vto mayo y junio 2027) siguen con ⚠ porque MtR todavía no
+// listó DLRMAY27 ni DLRJUN27.
 const DLR_SEED_RAW = [
   { suffix: "MAY26", priceSeed: 1416.0 },
   { suffix: "JUN26", priceSeed: 1443.5 },
@@ -72,6 +76,7 @@ const DLR_SEED_RAW = [
   { suffix: "ENE27", priceSeed: 1655.0 },
   { suffix: "FEB27", priceSeed: 1685.0 },
   { suffix: "MAR27", priceSeed: 1717.0 },
+  { suffix: "ABR27", priceSeed: 1750.0 },
 ];
 
 /**
