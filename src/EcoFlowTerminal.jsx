@@ -6703,12 +6703,122 @@ function useFutureAdjustments(positions, futurePrices) {
 
   const refresh = useCallback(() => setRefreshKey((k) => k + 1), []);
 
+  /**
+   * confirmGroup: confirma N ajustes consolidados como UN solo movement.
+   *
+   * Caso de uso: el worker `futures-settlement` genera 1 fila de ajuste por
+   * (operación, día) en lugar de 1 por (ticker, día). Como resultado, si el
+   * usuario tiene varias ops del mismo futuro y mismo día, le aparecen N
+   * cards distintas para algo que conceptualmente es UN movimiento de cash.
+   *
+   * Esta función toma N adjustmentIds y un actualAmount total, y:
+   *   1) Crea UN solo cash_movement con amount=actualAmount.
+   *   2) Marca las N filas como status='confirmed' y todas apuntan al
+   *      mismo cash_movement_id.
+   *   3) Para preservar la traza por op, cada fila guarda en actual_amount
+   *      su porción prorrateada según su estimated_amount original. Si
+   *      todos los estimated son cero, prorrateo uniforme. Si el total
+   *      cambia respecto al estimated_sum, se mantiene la proporción.
+   *
+   * Esto es un patch del frontend; el fix definitivo va en el worker
+   * (que debería emitir 1 fila por ticker × día desde la raíz).
+   */
+  const confirmGroup = useCallback(
+    async (adjustmentIds, actualAmount) => {
+      if (!user) throw new Error("No hay sesión");
+      if (!Array.isArray(adjustmentIds) || adjustmentIds.length === 0) {
+        throw new Error("Sin ajustes para confirmar");
+      }
+      const monto = Number(actualAmount);
+      if (!Number.isFinite(monto)) throw new Error("Monto inválido");
+      const groupAdjs = pendingAdjustments.filter((a) => adjustmentIds.includes(a.id));
+      if (groupAdjs.length === 0) throw new Error("Ajustes no encontrados");
+
+      // Sanity: todos deben ser del mismo (ticker, fecha) por construcción
+      // del agrupador, pero validamos.
+      const first = groupAdjs[0];
+      const allSameGroup = groupAdjs.every(
+        (a) => a.ticker === first.ticker && a.adjustment_date === first.adjustment_date
+      );
+      if (!allSameGroup) throw new Error("Los ajustes no pertenecen al mismo grupo");
+
+      // 1) Crear UN cash_movement (solo si monto != 0).
+      let cashMovementId = null;
+      if (monto !== 0) {
+        const movementType = monto > 0 ? "deposit" : "withdrawal";
+        const absAmount = Math.abs(monto);
+        const notes = groupAdjs.length === 1
+          ? `Ajuste futuro ${first.ticker} (${first.adjustment_date})`
+          : `Ajuste futuro ${first.ticker} (${first.adjustment_date}) — consolidado ${groupAdjs.length} ops`;
+        const { data: cm, error: cmErr } = await supabase
+          .from("cash_movements")
+          .insert({
+            user_id: user.id,
+            movement_date: first.adjustment_date,
+            currency: "ARS",
+            amount: absAmount,
+            movement_type: movementType,
+            related_position_id: null,
+            notes,
+          })
+          .select()
+          .single();
+        if (cmErr) throw cmErr;
+        cashMovementId = cm.id;
+      }
+
+      // 2) Prorratear actualAmount entre las N filas según su estimated_amount.
+      //    Si la suma de estimated es cero, repartimos uniforme.
+      const estimatedSum = groupAdjs.reduce(
+        (acc, a) => acc + (Number(a.estimated_amount) || 0), 0
+      );
+      const useUniform = estimatedSum === 0;
+      const updates = groupAdjs.map((a) => {
+        let portion;
+        if (useUniform) {
+          portion = monto / groupAdjs.length;
+        } else {
+          const w = (Number(a.estimated_amount) || 0) / estimatedSum;
+          portion = monto * w;
+        }
+        return {
+          id: a.id,
+          actual_amount: portion,
+        };
+      });
+
+      // 3) Update bulk (un UPDATE por fila; Supabase no tiene batch nativo
+      //    sin RPC custom). Promise.all para paralelizar.
+      await Promise.all(
+        updates.map((u) =>
+          supabase
+            .from("futures_daily_adjustments")
+            .update({
+              actual_amount: u.actual_amount,
+              status: "confirmed",
+              confirmed_at: new Date().toISOString(),
+              cash_movement_id: cashMovementId,
+            })
+            .eq("id", u.id)
+            .then(({ error }) => {
+              if (error) throw error;
+            })
+        )
+      );
+
+      setRefreshKey((k) => k + 1);
+      return { cashMovementId, amount: monto, confirmedCount: groupAdjs.length };
+    },
+    [user, pendingAdjustments]
+  );
+
   return {
     pendingAdjustments,
     confirmedAdjustments,
     loading,
     error,
     confirm,
+    confirmGroup,
     refresh,
   };
 }
@@ -12138,14 +12248,84 @@ function getAdjustmentDisplayValues(adj, futurePrices) {
   return { currSettle, prevSettle, estimatedAmount, isLive: useLive };
 }
 
-function FutureAdjustmentsModal({ adjustments, futurePrices, onConfirm, onClose }) {
-  // Estado local: { [adjustmentId]: { value: string, processing: bool, error: string } }
+function FutureAdjustmentsModal({ adjustments, futurePrices, onConfirm, onConfirmGroup, onClose }) {
+  // Agrupamos por (ticker, adjustment_date). El worker actual genera 1 fila
+  // por (op, día), así que un mismo (ticker, día) puede tener N filas si el
+  // usuario tiene N ops del mismo futuro. Conceptualmente debería ser UN
+  // solo ajuste — acá los unificamos en cards consolidadas.
+  //
+  // groupedAdjustments = [
+  //   {
+  //     key: "DLRMAY26__2026-05-21",
+  //     ticker, adjustmentDate,
+  //     ids: [adj1.id, adj2.id, ...],     // ids originales
+  //     items: [adj1, adj2, ...],          // filas originales
+  //     totalNetQty,
+  //     multiplier,
+  //     totalEstimated,
+  //     anyEstimated,                      // si al menos una fue is_estimated
+  //     uniformPrev,                       // string del prev_settle si todos iguales, null si difieren
+  //     uniformCurr,                       // string del curr_settle si todos iguales, null si difieren
+  //   }, ...
+  // ]
+  const groupedAdjustments = useMemo(() => {
+    const map = new Map();
+    for (const a of adjustments) {
+      const key = `${a.ticker}__${a.adjustment_date}`;
+      if (!map.has(key)) {
+        map.set(key, {
+          key,
+          ticker: a.ticker,
+          adjustmentDate: a.adjustment_date,
+          ids: [],
+          items: [],
+          totalNetQty: 0,
+          multiplier: a.multiplier, // asumimos uniforme dentro del grupo
+          totalEstimated: 0,
+          anyEstimated: false,
+          prevSet: new Set(),
+          currSet: new Set(),
+        });
+      }
+      const g = map.get(key);
+      g.ids.push(a.id);
+      g.items.push(a);
+      g.totalNetQty += Number(a.net_qty) || 0;
+      // Recalculamos display con feed live
+      const display = getAdjustmentDisplayValues(a, futurePrices);
+      g.totalEstimated += display.estimatedAmount;
+      if (a.is_estimated) g.anyEstimated = true;
+      // Para detectar si prev/curr son uniformes en el grupo
+      const prevKey = Number(display.prevSettle).toFixed(4);
+      const currKey = Number(display.currSettle).toFixed(4);
+      g.prevSet.add(prevKey);
+      g.currSet.add(currKey);
+    }
+    // Resolver uniform displays
+    const result = [];
+    for (const g of map.values()) {
+      const uniformPrev = g.prevSet.size === 1 ? [...g.prevSet][0] : null;
+      const uniformCurr = g.currSet.size === 1 ? [...g.currSet][0] : null;
+      result.push({
+        ...g,
+        uniformPrev: uniformPrev != null ? Number(uniformPrev) : null,
+        uniformCurr: uniformCurr != null ? Number(uniformCurr) : null,
+      });
+    }
+    // Ordenar por fecha desc, después por ticker asc
+    result.sort((a, b) => {
+      if (a.adjustmentDate !== b.adjustmentDate) return b.adjustmentDate.localeCompare(a.adjustmentDate);
+      return a.ticker.localeCompare(b.ticker);
+    });
+    return result;
+  }, [adjustments, futurePrices]);
+
+  // Estado local: { [groupKey]: { value: string, processing: bool, error: string } }
   const [drafts, setDrafts] = useState(() => {
     const init = {};
-    for (const a of adjustments) {
-      const { estimatedAmount } = getAdjustmentDisplayValues(a, futurePrices);
-      init[a.id] = {
-        value: String(Math.round(estimatedAmount)),
+    for (const g of groupedAdjustments) {
+      init[g.key] = {
+        value: String(Math.round(g.totalEstimated)),
         processing: false,
         error: null,
       };
@@ -12153,20 +12333,17 @@ function FutureAdjustmentsModal({ adjustments, futurePrices, onConfirm, onClose 
     return init;
   });
 
-  // Si la lista de adjustments cambia (porque uno se confirmó/skipped y se
-  // reprodujo el fetch), filtramos los que ya no están del state local.
-  // Para los que sobrevivieron mantenemos su draft (no pisar lo que el
-  // usuario tipeó). Los adjustments nuevos arrancan con el monto recalculado.
+  // Si la lista cambia (un grupo se confirmó y se refrescó), filtramos los
+  // que ya no están del state local y agregamos los nuevos.
   useEffect(() => {
     setDrafts((prev) => {
       const next = {};
-      for (const a of adjustments) {
-        if (prev[a.id]) {
-          next[a.id] = prev[a.id];
+      for (const g of groupedAdjustments) {
+        if (prev[g.key]) {
+          next[g.key] = prev[g.key];
         } else {
-          const { estimatedAmount } = getAdjustmentDisplayValues(a, futurePrices);
-          next[a.id] = {
-            value: String(Math.round(estimatedAmount)),
+          next[g.key] = {
+            value: String(Math.round(g.totalEstimated)),
             processing: false,
             error: null,
           };
@@ -12174,36 +12351,48 @@ function FutureAdjustmentsModal({ adjustments, futurePrices, onConfirm, onClose 
       }
       return next;
     });
-    // futurePrices intencionalmente FUERA de deps: no queremos pisar el
-    // valor del input cuando llega un tick nuevo del feed. El recálculo
-    // con feed live solo aplica al MONTAR el modal (cerrar + reabrir).
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [adjustments]);
+  }, [groupedAdjustments.length, groupedAdjustments.map((g) => g.key).join(",")]);
 
-  const handleConfirm = async (adj) => {
-    const draft = drafts[adj.id];
+  const handleConfirmGroup = async (group) => {
+    const draft = drafts[group.key];
     if (!draft) return;
     const monto = Number(draft.value.replace(/,/g, "."));
     if (!Number.isFinite(monto)) {
       setDrafts((prev) => ({
         ...prev,
-        [adj.id]: { ...prev[adj.id], error: "Monto inválido" },
+        [group.key]: { ...prev[group.key], error: "Monto inválido" },
       }));
       return;
     }
     setDrafts((prev) => ({
       ...prev,
-      [adj.id]: { ...prev[adj.id], processing: true, error: null },
+      [group.key]: { ...prev[group.key], processing: true, error: null },
     }));
     try {
-      await onConfirm(adj.id, monto);
-      // El parent re-fetch hará que adjustments se actualice y este
-      // bloque se desmonte automáticamente.
+      // Si solo hay 1 ajuste en el grupo, podemos usar el onConfirm clásico.
+      // Si hay >1, necesitamos onConfirmGroup (que crea 1 cash_movement consolidado).
+      if (group.ids.length === 1 && onConfirm) {
+        await onConfirm(group.ids[0], monto);
+      } else if (onConfirmGroup) {
+        await onConfirmGroup(group.ids, monto);
+      } else {
+        // Fallback: si no hay onConfirmGroup, llamar onConfirm N veces (crea N movements).
+        // Lo evitamos prorrateando para no romper la suma.
+        const totalEst = group.totalEstimated || 1;
+        for (const item of group.items) {
+          const display = getAdjustmentDisplayValues(item, futurePrices);
+          const portion = group.totalEstimated === 0
+            ? monto / group.items.length
+            : monto * (display.estimatedAmount / totalEst);
+          await onConfirm(item.id, portion);
+        }
+      }
     } catch (e) {
       setDrafts((prev) => ({
         ...prev,
-        [adj.id]: {
-          ...prev[adj.id],
+        [group.key]: {
+          ...prev[group.key],
           processing: false,
           error: e.message || "Error al confirmar",
         },
@@ -12264,9 +12453,14 @@ function FutureAdjustmentsModal({ adjustments, futurePrices, onConfirm, onClose 
               marginTop: 2,
               fontFamily: "'Roboto', sans-serif",
             }}>
-              {adjustments.length === 1
+              {groupedAdjustments.length === 1
                 ? "1 ajuste pendiente"
-                : `${adjustments.length} ajustes pendientes`}
+                : `${groupedAdjustments.length} ajustes pendientes`}
+              {adjustments.length > groupedAdjustments.length && (
+                <span style={{ color: C.dim, marginLeft: 4 }}>
+                  · {adjustments.length} filas consolidadas
+                </span>
+              )}
             </span>
           </div>
           <button
@@ -12290,7 +12484,7 @@ function FutureAdjustmentsModal({ adjustments, futurePrices, onConfirm, onClose 
           overflowY: "auto",
           flex: 1,
         }}>
-          {adjustments.length === 0 ? (
+          {groupedAdjustments.length === 0 ? (
             <div style={{
               textAlign: "center",
               padding: "40px 0",
@@ -12300,25 +12494,34 @@ function FutureAdjustmentsModal({ adjustments, futurePrices, onConfirm, onClose 
               No hay ajustes pendientes
             </div>
           ) : (
-            adjustments.map((adj) => {
-              const draft = drafts[adj.id] || { value: "0", processing: false, error: null };
-              // Recalculamos curr_settle y estimated_amount con feed live
-              // si es_estimated. Esto refleja el último precio de Primary
-              // al momento de abrir el modal — más actualizado que el
-              // snapshot que dejó el cron en BD.
-              const display = getAdjustmentDisplayValues(adj, futurePrices);
-              const variation = display.currSettle - display.prevSettle;
-              const variationPct = display.prevSettle > 0
-                ? (variation / display.prevSettle) * 100
+            groupedAdjustments.map((group) => {
+              const draft = drafts[group.key] || { value: "0", processing: false, error: null };
+              // Variación: si todos los items tienen el mismo prev/curr, mostramos
+              // los números. Si difieren, mostramos "varios" con tooltip.
+              const uniformPrev = group.uniformPrev;
+              const uniformCurr = group.uniformCurr;
+              const allUniform = uniformPrev != null && uniformCurr != null;
+              const variation = allUniform ? uniformCurr - uniformPrev : null;
+              const variationPct = (allUniform && uniformPrev > 0)
+                ? (variation / uniformPrev) * 100
                 : null;
-              const variationColor = variation >= 0 ? C.green : C.red;
-              const variationSign = variation >= 0 ? "+" : "";
-              const estimated = display.estimatedAmount;
+              const variationColor = (variation != null && variation >= 0) ? C.green : C.red;
+              const variationSign = (variation != null && variation >= 0) ? "+" : "";
+              const estimated = group.totalEstimated;
               const estIsPositive = estimated >= 0;
+              const isConsolidated = group.ids.length > 1;
+
+              // Tooltip que lista los prev/curr distintos cuando no son uniformes
+              const variationTooltip = !allUniform
+                ? group.items.map((it) => {
+                    const d = getAdjustmentDisplayValues(it, futurePrices);
+                    return `${fmtNumber(d.prevSettle, { maxDecimals: 2 })} → ${fmtNumber(d.currSettle, { maxDecimals: 2 })} (qty ${it.net_qty})`;
+                  }).join(" · ")
+                : null;
 
               return (
                 <div
-                  key={adj.id}
+                  key={group.key}
                   style={{
                     border: `1px solid ${C.border}`,
                     padding: 14,
@@ -12326,7 +12529,7 @@ function FutureAdjustmentsModal({ adjustments, futurePrices, onConfirm, onClose 
                     backgroundColor: C.deep,
                   }}
                 >
-                  {/* Header de la fila */}
+                  {/* Header de la card */}
                   <div className="flex items-center justify-between" style={{ marginBottom: 10 }}>
                     <div className="flex items-center gap-3">
                       <span
@@ -12338,16 +12541,35 @@ function FutureAdjustmentsModal({ adjustments, futurePrices, onConfirm, onClose 
                           letterSpacing: "0.04em",
                         }}
                       >
-                        {adj.ticker}
+                        {group.ticker}
                       </span>
                       <span style={{
                         fontSize: 10.5,
                         color: C.dim,
                         fontFamily: "'Roboto', sans-serif",
                       }}>
-                        {adj.adjustment_date}
+                        {group.adjustmentDate}
                       </span>
-                      {adj.is_estimated && (
+                      {isConsolidated && (
+                        <span
+                          title={`Este ajuste consolida ${group.ids.length} operaciones del mismo contrato y día.`}
+                          style={{
+                            fontSize: 9,
+                            fontWeight: 600,
+                            color: C.accent,
+                            backgroundColor: "rgba(91, 141, 214, 0.1)",
+                            border: `1px solid ${C.accentBorder}`,
+                            padding: "2px 6px",
+                            letterSpacing: "0.06em",
+                            fontFamily: "'Roboto', sans-serif",
+                            textTransform: "uppercase",
+                            cursor: "help",
+                          }}
+                        >
+                          Consolidado · {group.ids.length}
+                        </span>
+                      )}
+                      {group.anyEstimated && (
                         <span style={{
                           fontSize: 9,
                           fontWeight: 600,
@@ -12365,8 +12587,8 @@ function FutureAdjustmentsModal({ adjustments, futurePrices, onConfirm, onClose 
                     </div>
                   </div>
 
-                  {/* Cartel explicativo cuando es estimado */}
-                  {adj.is_estimated && (
+                  {/* Cartel cuando es estimado */}
+                  {group.anyEstimated && (
                     <div style={{
                       backgroundColor: "rgba(234,179,8,0.08)",
                       borderLeft: "2px solid #eab308",
@@ -12384,7 +12606,7 @@ function FutureAdjustmentsModal({ adjustments, futurePrices, onConfirm, onClose 
                     </div>
                   )}
 
-                  {/* Detalles: variación + cantidad */}
+                  {/* Variación + cantidad */}
                   <div
                     className="flex items-center gap-4"
                     style={{ marginBottom: 10, fontSize: 11 }}
@@ -12399,23 +12621,33 @@ function FutureAdjustmentsModal({ adjustments, futurePrices, onConfirm, onClose 
                       }}>
                         Variación settlement
                       </span>
-                      <span
-                        className="eco-mono"
-                        style={{ color: C.text, marginTop: 2 }}
-                      >
-                        {fmtNumber(display.prevSettle, { maxDecimals: 2 })}
-                        &nbsp;→&nbsp;
-                        {fmtNumber(display.currSettle, { maxDecimals: 2 })}
-                        &nbsp;
-                        <span style={{ color: variationColor }}>
-                          ({variationSign}{fmtNumber(variation, { maxDecimals: 2 })}
-                          {variationPct != null && (
-                            <>
-                              {" / "}{variationSign}{variationPct.toFixed(2)}%
-                            </>
-                          )})
+                      {allUniform ? (
+                        <span
+                          className="eco-mono"
+                          style={{ color: C.text, marginTop: 2 }}
+                        >
+                          {fmtNumber(uniformPrev, { maxDecimals: 2 })}
+                          &nbsp;→&nbsp;
+                          {fmtNumber(uniformCurr, { maxDecimals: 2 })}
+                          &nbsp;
+                          <span style={{ color: variationColor }}>
+                            ({variationSign}{fmtNumber(variation, { maxDecimals: 2 })}
+                            {variationPct != null && (
+                              <>
+                                {" / "}{variationSign}{variationPct.toFixed(2)}%
+                              </>
+                            )})
+                          </span>
                         </span>
-                      </span>
+                      ) : (
+                        <span
+                          className="eco-mono"
+                          title={variationTooltip || ""}
+                          style={{ color: C.muted, marginTop: 2, cursor: "help", fontStyle: "italic" }}
+                        >
+                          varios prev/curr — hover para detalle
+                        </span>
+                      )}
                     </div>
                     <div className="flex flex-col">
                       <span style={{
@@ -12431,8 +12663,8 @@ function FutureAdjustmentsModal({ adjustments, futurePrices, onConfirm, onClose 
                         className="eco-mono"
                         style={{ color: C.text, marginTop: 2 }}
                       >
-                        {fmtNumber(adj.net_qty, { maxDecimals: 0 })} ×{" "}
-                        {fmtNumber(adj.multiplier, { maxDecimals: 0 })}
+                        {fmtNumber(group.totalNetQty, { maxDecimals: 0 })} ×{" "}
+                        {fmtNumber(group.multiplier, { maxDecimals: 0 })}
                       </span>
                     </div>
                   </div>
@@ -12448,7 +12680,7 @@ function FutureAdjustmentsModal({ adjustments, futurePrices, onConfirm, onClose 
                         fontFamily: "'Roboto', sans-serif",
                         marginBottom: 4,
                       }}>
-                        Monto a acreditar (ARS)
+                        Monto a acreditar (ARS) {isConsolidated && <span style={{ textTransform: "none", letterSpacing: 0, color: C.accent }}>· total consolidado</span>}
                       </label>
                       <input
                         type="text"
@@ -12456,7 +12688,7 @@ function FutureAdjustmentsModal({ adjustments, futurePrices, onConfirm, onClose 
                         value={draft.value}
                         onChange={(e) => setDrafts((prev) => ({
                           ...prev,
-                          [adj.id]: { ...prev[adj.id], value: e.target.value, error: null },
+                          [group.key]: { ...prev[group.key], value: e.target.value, error: null },
                         }))}
                         disabled={draft.processing}
                         className="eco-mono"
@@ -12506,12 +12738,10 @@ function FutureAdjustmentsModal({ adjustments, futurePrices, onConfirm, onClose 
                     </div>
                   )}
 
-                  {/* Botón confirmar (sin "Saltar" — si querés que un día
-                       no impacte, ponés monto 0 igual). Texto explicativo
-                       abajo para clarificar el uso. */}
+                  {/* Botón confirmar */}
                   <div className="flex flex-col gap-2">
                     <button
-                      onClick={() => handleConfirm(adj)}
+                      onClick={() => handleConfirmGroup(group)}
                       disabled={draft.processing}
                       style={{
                         backgroundColor: C.accent,
@@ -12535,9 +12765,9 @@ function FutureAdjustmentsModal({ adjustments, futurePrices, onConfirm, onClose 
                       fontFamily: "'Roboto', sans-serif",
                       lineHeight: 1.5,
                     }}>
-                      Si Cocos te liquidó un monto distinto al estimado,
-                      editalo antes de confirmar. Si ese día no hubo
-                      movimiento real, dejalo en 0.
+                      {isConsolidated
+                        ? `Confirmar consolida las ${group.ids.length} filas en UN solo movimiento de cash. Si Cocos te liquidó un monto distinto, editalo. Si no hubo movimiento real, dejalo en 0.`
+                        : "Si Cocos te liquidó un monto distinto al estimado, editalo antes de confirmar. Si ese día no hubo movimiento real, dejalo en 0."}
                     </span>
                   </div>
                 </div>
@@ -12773,6 +13003,7 @@ function ConsolidatedSection({
           adjustments={pending}
           futurePrices={futurePrices}
           onConfirm={futureAdjustmentsState.confirm}
+          onConfirmGroup={futureAdjustmentsState.confirmGroup}
           onClose={() => setAdjustmentsModalOpen(false)}
         />
       )}
