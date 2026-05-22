@@ -21995,80 +21995,39 @@ function BondDetailModal({ row, spotMayorista, spotMep, futuresLive, curveData, 
   ];
 
   // ─── Cálculo del simulador ──────────────────────────────
-  // Reproducimos paso a paso el armado del sintético. Lógica del flujo
-  // REAL del inversor argentino:
+  // CRITERIO DE COHERENCIA (este modelo es el que usa la tabla principal):
+  //   USD_inicial = ARS_capital / SPOT_MAYORISTA_HOY
+  //   USD_final   = ARS_final   / FUTURO_DLR_DEL_HEDGE
   //
-  //   1) Capital inicial: el usuario ingresa monto en ARS o USD.
-  //      - Si entra en USD, asumimos que los vende a MEP (spot bolsa)
-  //        para obtener pesos. Eso refleja la operativa real (no se
-  //        vende al mayorista, eso lo hacen bancos/mayoristas; un retail
-  //        opera MEP).
-  //      - Si entra en ARS, ya tiene pesos (capital propio o producto
-  //        de una venta MEP previa).
-  //   2) Con los ARS compra el bono peso.
-  //   3) Hedge con DLR (single o rolling).
-  //   4) Al horizonte H: vende bono → recibe ARS_final. El P&L del
-  //      futuro DLR ya está implícito en el FX efectivo (= precio del
-  //      futuro o avg del rolling).
-  //   5) Conversión de salida: ARS_final / FX_efectivo = USD_final.
-  //      El FX efectivo del futuro DLR es el "MEP implicito" al que
-  //      el inversor convierte los pesos finales a dólares.
-  //   6) Profit: USD_final - USD_inicial_equivalente, donde el
-  //      "equivalente" se calcula:
-  //        - Si entró en USD: el monto que ingresó (lo que el inversor
-  //          efectivamente puso, en USD).
-  //        - Si entró en ARS: ARS_inicial / spotMep, el "valor en
-  //          USD MEP" que tenía el capital al ingresar.
+  // ¿Por qué es coherente?
+  //   Mayorista_hoy y Futuro_hoy son DOS SNAPSHOTS del MISMO INSTRUMENTO
+  //   (dólar mayorista) en DOS MOMENTOS DEL TIEMPO (spot vs expiry del
+  //   futuro). El sintético captura la diferencia entre el rendimiento
+  //   en pesos del bono y el carry implícito del futuro contra el spot.
+  //
+  // Lo que NO sería coherente (y rompía la lógica antes):
+  //   - Mezclar MEP_hoy con Futuro_hoy → son instrumentos distintos
+  //     (bolsa vs mayorista futuro). Generaría un "alfa del gap" como
+  //     ruido artificial.
+  //   - Usar el mismo FX para entrada y salida → daría TIR USD = TIR ARS
+  //     y "borraría" el efecto del hedge en el número.
+  //
+  // El MEP de hoy se sigue mostrando como referencia informativa en el
+  // paso 1 (lo que un retail pagaría hoy por hacer la conversión USD↔ARS),
+  // pero no entra en el cálculo de la TIR.
   const sim = useMemo(() => {
     const amount = Number(simInputAmount);
     if (!Number.isFinite(amount) || amount <= 0) return null;
     if (!Number.isFinite(spotMayorista) || spotMayorista <= 0) return null;
     if (!Number.isFinite(row.bondPrice) || row.bondPrice <= 0) return null;
     if (!Number.isFinite(row.maturityPayment) || row.maturityPayment <= 0) return null;
-    // MEP es opcional: si falta, mostramos un warning y caemos al
-    // spot mayorista para no romper el simulador completamente.
-    const fxEntry = (Number.isFinite(spotMep) && spotMep > 0) ? spotMep : spotMayorista;
-    const mepIsFallback = !(Number.isFinite(spotMep) && spotMep > 0);
-
-    // Day 0: capital inicial
-    let arsCapital, usdEquivalentEntry, usdOriginal;
-    if (simInputCurrency === "USD") {
-      // Entra con USD, los vende a MEP para obtener pesos.
-      usdOriginal = amount;
-      arsCapital = amount * fxEntry;
-      usdEquivalentEntry = amount; // ya está en USD
-    } else {
-      // Entra con ARS, equivalente USD MEP es referencia.
-      arsCapital = amount;
-      usdEquivalentEntry = amount / fxEntry;
-      usdOriginal = null; // no había USD inicial real
-    }
-
-    // VN del bono comprado
-    const bondVN = (arsCapital * 100) / row.bondPrice;
 
     // Horizonte efectivo (cap al vto del bono)
     const horizonValue = simHorizon === "vto" ? row.days : Number(simHorizon);
     const effH = Math.min(horizonValue, row.days);
     const daysRemaining = row.days - effH;
 
-    // TIR ARS según modelo
-    const tirArsConst = Number.isFinite(row.tirArs) ? row.tirArs : null;
-    const tirArsCurve = curveData
-      ? interpolateLinear(curveData.xs, curveData.ys, daysRemaining)
-      : null;
-    const tirArsUsed = simModel === "curve" ? tirArsCurve : tirArsConst;
-    if (!Number.isFinite(tirArsUsed)) return null;
-
-    // Precio del bono al horizonte
-    const priceAtH = (effH === row.days)
-      ? row.maturityPayment
-      : computeBondPriceAtHorizon(row.maturityPayment, daysRemaining, tirArsUsed);
-
-    // ARS recibidos al vender el bono al día H
-    const arsFromBond = (bondVN * priceAtH) / 100;
-
-    // FX efectivo de salida (del hedge)
+    // FX efectivo del hedge (necesario para el USD final).
     let fxEffective = null;
     let dlrInfo = null;
     if (simStrategy === "rolling") {
@@ -22086,27 +22045,67 @@ function BondDetailModal({ row, spotMayorista, spotMep, futuresLive, curveData, 
     }
     if (!Number.isFinite(fxEffective) || fxEffective <= 0) return null;
 
-    // USD final (al FX del hedge, que es el MEP implicito al expiry)
+    // Day 0: capital inicial.
+    let arsCapital, usdOriginal;
+    if (simInputCurrency === "USD") {
+      // Entra con USD nominales, los valuamos en pesos al spot mayorista
+      // (coherente con el modelo: la base USD es el mayorista-hoy).
+      usdOriginal = amount;
+      arsCapital = amount * spotMayorista;
+    } else {
+      arsCapital = amount;
+      usdOriginal = null;
+    }
+
+    // USD equivalente del capital inicial AL SPOT MAYORISTA (base del modelo).
+    const usdEquivalentEntry = arsCapital / spotMayorista;
+
+    // VN del bono comprado
+    const bondVN = (arsCapital * 100) / row.bondPrice;
+
+    // TIR ARS según modelo (al horizonte H)
+    const tirArsConst = Number.isFinite(row.tirArs) ? row.tirArs : null;
+    const tirArsCurve = curveData
+      ? interpolateLinear(curveData.xs, curveData.ys, daysRemaining)
+      : null;
+    const tirArsUsed = simModel === "curve" ? tirArsCurve : tirArsConst;
+    if (!Number.isFinite(tirArsUsed)) return null;
+
+    // Precio del bono al horizonte H
+    const priceAtH = (effH === row.days)
+      ? row.maturityPayment
+      : computeBondPriceAtHorizon(row.maturityPayment, daysRemaining, tirArsUsed);
+
+    // ARS recibidos al vender el bono al día H
+    const arsFromBond = (bondVN * priceAtH) / 100;
+
+    // USD final al FX del hedge (= mayorista al expiry por convergencia del futuro).
     const usdFinal = arsFromBond / fxEffective;
 
-    // Profit en USD: comparamos el USD final con el USD equivalente
-    // del capital inicial (sea que entró con USD o con ARS).
+    // Profit USD: rendimiento puro del armado sintético.
     const usdProfit = usdFinal - usdEquivalentEntry;
     const usdPct = usdEquivalentEntry !== 0 ? usdProfit / usdEquivalentEntry : 0;
 
-    // Profit en ARS: ARS_final - ARS_inicial.
+    // Profit ARS: ganancia bruta en pesos.
     const arsProfit = arsFromBond - arsCapital;
     const arsPct = arsCapital !== 0 ? arsProfit / arsCapital : 0;
 
-    // TIR USD anualizada (referencia con la tabla principal)
+    // TIR USD anualizada (coincide con la tabla principal, fórmula:
+    //   arsFactor × spot / future, anualizado).
     const tirUsdAnnualized = effH > 0
       ? Math.pow(usdFinal / usdEquivalentEntry, 365 / effH) - 1
+      : null;
+
+    // Info MEP: cuántos USD recibiría el retail si vendiera al MEP de hoy
+    // (referencia, no entra en la TIR).
+    const usdAtMepToday = (Number.isFinite(spotMep) && spotMep > 0)
+      ? arsCapital / spotMep
       : null;
 
     return {
       simInputCurrency, amount,
       arsCapital, usdEquivalentEntry, usdOriginal,
-      fxEntry, mepIsFallback,
+      usdAtMepToday, spotMep, spotMayorista,
       bondVN, priceAtH, arsFromBond,
       fxEffective, dlrInfo,
       usdFinal, usdProfit, usdPct,
@@ -22368,13 +22367,15 @@ function BondDetailModal({ row, spotMayorista, spotMep, futuresLive, curveData, 
           <div style={{ display: "flex", gap: 20, flexWrap: "wrap", alignItems: "center", marginBottom: 16, padding: "10px 14px", background: C.panel, border: `1px solid ${C.border}` }}>
             <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
               <span style={{ fontSize: 10, color: C.dim, letterSpacing: "0.1em", textTransform: "uppercase", fontWeight: 600 }}>Entrás con</span>
-              {/* Toggle ARS/USD */}
+              {/* Toggle ARS/USD. La conversión visual usa spot mayorista
+                  (consistente con el modelo del cálculo). Es solo un
+                  ajuste de display para que el usuario tenga un valor
+                  inicial razonable al cambiar de moneda. */}
               <div style={{ display: "flex", border: `1px solid ${C.accentBorder}` }}>
                 <button
                   onClick={() => {
-                    // Al cambiar a ARS, si veníamos de USD convertimos manteniendo equivalencia (con MEP si lo tenemos).
                     if (simInputCurrency === "USD") {
-                      const fx = (Number.isFinite(spotMep) && spotMep > 0) ? spotMep : (spotMayorista || 1);
+                      const fx = spotMayorista || 1;
                       setSimInputAmount(Math.round(Number(simInputAmount) * fx));
                     }
                     setSimInputCurrency("ARS");
@@ -22396,7 +22397,7 @@ function BondDetailModal({ row, spotMayorista, spotMep, futuresLive, curveData, 
                 <button
                   onClick={() => {
                     if (simInputCurrency === "ARS") {
-                      const fx = (Number.isFinite(spotMep) && spotMep > 0) ? spotMep : (spotMayorista || 1);
+                      const fx = spotMayorista || 1;
                       setSimInputAmount(Math.round((Number(simInputAmount) / fx) * 100) / 100);
                     }
                     setSimInputCurrency("USD");
@@ -22456,21 +22457,6 @@ function BondDetailModal({ row, spotMayorista, spotMep, futuresLive, curveData, 
             </div>
           </div>
 
-          {/* Warning si el MEP no se pudo fetchear y caímos a mayorista */}
-          {sim && sim.mepIsFallback && (
-            <div style={{
-              padding: "8px 12px",
-              marginBottom: 12,
-              background: "rgba(234, 179, 8, 0.08)",
-              borderLeft: `2px solid #eab308`,
-              fontSize: 11,
-              color: C.muted,
-              lineHeight: 1.5,
-            }}>
-              <strong style={{ color: "#eab308" }}>⚠ MEP no disponible.</strong> Usando spot mayorista como referencia de entrada. El cálculo puede subestimar el resultado en USD (típicamente el MEP cotiza 3-5% arriba del mayorista).
-            </div>
-          )}
-
           {/* Resultado del simulador */}
           {sim ? (
             <div style={{ background: C.panel, border: `1px solid ${C.border}`, padding: "14px 18px", fontSize: 12, lineHeight: 1.7, color: C.text, fontVariantNumeric: "tabular-nums" }}>
@@ -22479,12 +22465,22 @@ function BondDetailModal({ row, spotMayorista, spotMep, futuresLive, curveData, 
                 {sim.simInputCurrency === "USD" ? (
                   <div style={{ color: C.muted, marginBottom: 2 }}>
                     <span style={{ color: C.dim, marginRight: 8, fontSize: 10 }}>1.</span>
-                    Entrás con <strong style={{ color: C.text }}>USD {fmtARS(sim.amount)}</strong>, los vendés al MEP <strong style={{ color: C.text }}>$ {fmtARS(sim.fxEntry)}</strong> → recibís <strong style={{ color: C.text }}>$ {fmtARS(sim.arsCapital)}</strong>.
+                    Entrás con <strong style={{ color: C.text }}>USD {fmtARS(sim.amount)}</strong> valuados al spot mayorista (<strong style={{ color: C.text }}>$ {fmtARS(sim.spotMayorista)}</strong>) → equivalen a <strong style={{ color: C.text }}>$ {fmtARS(sim.arsCapital)} ARS</strong>.
+                    {Number.isFinite(sim.spotMep) && sim.spotMep > 0 && (
+                      <span style={{ color: C.dim, fontSize: 10.5 }}>
+                        {" "}<span style={{ marginLeft: 4 }}>·</span> Si vendieras a MEP retail hoy ($ {fmtARS(sim.spotMep)}): $ {fmtARS(sim.amount * sim.spotMep)} <em style={{ fontStyle: "italic" }}>(info, no entra en el cálculo)</em>
+                      </span>
+                    )}
                   </div>
                 ) : (
                   <div style={{ color: C.muted, marginBottom: 2 }}>
                     <span style={{ color: C.dim, marginRight: 8, fontSize: 10 }}>1.</span>
-                    Entrás con <strong style={{ color: C.text }}>$ {fmtARS(sim.arsCapital)} ARS</strong> <span style={{ color: C.dim }}>(≈ USD {fmtARS(sim.usdEquivalentEntry)} al MEP $ {fmtARS(sim.fxEntry)})</span>.
+                    Entrás con <strong style={{ color: C.text }}>$ {fmtARS(sim.arsCapital)} ARS</strong>. Equivalen a <strong style={{ color: C.text }}>USD {fmtARS(sim.usdEquivalentEntry)}</strong> al spot mayorista ($ {fmtARS(sim.spotMayorista)}).
+                    {Number.isFinite(sim.usdAtMepToday) && (
+                      <span style={{ color: C.dim, fontSize: 10.5 }}>
+                        {" "}<span style={{ marginLeft: 4 }}>·</span> Si vendieras al MEP retail hoy ($ {fmtARS(sim.spotMep)}) recibirías USD {fmtARS(sim.usdAtMepToday)} <em style={{ fontStyle: "italic" }}>(info, no entra en el cálculo)</em>
+                      </span>
+                    )}
                   </div>
                 )}
                 <div style={{ color: C.muted, marginBottom: 2 }}>
@@ -22521,7 +22517,7 @@ function BondDetailModal({ row, spotMayorista, spotMep, futuresLive, curveData, 
                 </div>
                 <div style={{ color: C.muted }}>
                   <span style={{ color: C.dim, marginRight: 8, fontSize: 10 }}>6.</span>
-                  Convertís pesos a USD al FX efectivo del hedge (<strong style={{ color: C.text }}>$ {fmtARS(sim.fxEffective)}</strong>, MEP implícito por el futuro) → <strong style={{ color: C.text }}>USD {fmtARS(sim.usdFinal)}</strong>.
+                  Convertís pesos a USD al FX efectivo del hedge (<strong style={{ color: C.text }}>$ {fmtARS(sim.fxEffective)}</strong>, ≈ mayorista al expiry por convergencia del futuro) → <strong style={{ color: C.text }}>USD {fmtARS(sim.usdFinal)}</strong>.
                 </div>
               </div>
 
@@ -22588,7 +22584,7 @@ function BondDetailModal({ row, spotMayorista, spotMep, futuresLive, curveData, 
           <br />
           <strong style={{ color: C.text }}>Rolling V1:</strong> asume cada DLR mantiene su precio actual hasta expirar. La Fase 2 va a refinar esto modelando la curva DLR completa y los roll costs reales.
           <br />
-          <strong style={{ color: C.text }}>MEP de entrada:</strong> usamos el MEP en tiempo real (casa "bolsa" de dolarapi) como referencia del FX al que el inversor convierte USD a pesos para entrar. El FX de salida es el precio del futuro DLR del hedge (que actúa como MEP implícito al expiry — asume MEP y mayorista convergen a esa fecha, supuesto razonable mientras el gap esté contenido).
+          <strong style={{ color: C.text }}>Cálculo coherente:</strong> USD inicial al spot mayorista de hoy, USD final al FX del hedge (≈ mayorista al expiry por convergencia del futuro). Son dos snapshots del MISMO instrumento (mayorista) en dos momentos del tiempo, lo que hace el cálculo internamente coherente y matchea la TIR USD de la tabla principal. El MEP de hoy se muestra solo como referencia retail.
         </div>
       </div>
     </div>
