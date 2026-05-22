@@ -24146,8 +24146,10 @@ function typeLabel(type) {
   }
 }
 
+
 function formatDate(iso) {
   if (!iso) return "—";
   const d = new Date(iso + "T00:00:00");
   return d.toLocaleDateString("es-AR", { day: "2-digit", month: "short", year: "2-digit" }).replace(/\./g, "");
 }
+
