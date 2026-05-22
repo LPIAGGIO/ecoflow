@@ -20365,14 +20365,40 @@ function computeRollingFxOut(spot, futuresList, horizonDays) {
 }
 
 /**
+ * Encuentra el mejor DLR para Single hedge a un horizonte H.
+ * - Si existe un DLR cuyo expiry >= H, usa el más cercano (cobertura limpia).
+ * - Si no, usa el último DLR disponible (aprox, igual que matchIsApprox).
+ *
+ * @param {Array}  futuresList   Ordenada asc por expiryDays. Solo DLRs con precio.
+ * @param {number} horizonDays   Cuántos días queremos cubrir.
+ * @returns {object|null} { ticker, price, expiryDays, isApprox } o null.
+ */
+function findBestSingleHedgeForHorizon(futuresList, horizonDays) {
+  if (!Array.isArray(futuresList) || futuresList.length === 0) return null;
+  if (!Number.isFinite(horizonDays) || horizonDays <= 0) return null;
+  const cover = futuresList.find((f) => f.expiryDays >= horizonDays);
+  if (cover) {
+    return { ticker: cover.ticker, price: cover.price, expiryDays: cover.expiryDays, isApprox: false };
+  }
+  const last = futuresList[futuresList.length - 1];
+  return { ticker: last.ticker, price: last.price, expiryDays: last.expiryDays, isApprox: true };
+}
+
+/**
  * Computa todas las TIR USD para un bono dado a multiples horizontes y
  * estrategias. Devuelve la matriz completa para que la UI elija qué mostrar.
  *
  * Variantes computadas (5 horizontes × 2 estrategias × 2 modelos = 20 valores):
  *   - Horizontes: 30, 60, 90, 180, vto
- *   - Estrategias: "single" (un DLR), "rolling" (sucesion DLR mensual)
+ *   - Estrategias: "single" (un DLR que cubra H), "rolling" (sucesion DLR mensual)
  *   - Modelos de precio futuro del bono: "const" (TIR ARS constante),
  *                                        "curve" (TIR ARS interpolada de la curva)
+ *
+ * Nota importante (post-fix del bug del Single a horizontes intermedios):
+ *   Single hedge a horizonte H usa el DLR MÁS CERCANO A H (no el que cubre
+ *   el vto del bono). Antes usaba siempre matchFuture del bono, lo que daba
+ *   TIRs absurdas (-93%, -83%) para H < vto. Ahora "Single hedge a 30d"
+ *   = compro el DLR que vence a ~30d (ej. DLRJUN26 para T30A7), no DLRABR27.
  *
  * @param {object} ctx  Contexto compartido
  *   - daysToBondMaturity: días hoy → vto del bono
@@ -20381,21 +20407,21 @@ function computeRollingFxOut(spot, futuresList, horizonDays) {
  *   - tirArsToday: TIR ARS computada hoy (constante baseline)
  *   - spot: spot mayorista
  *   - curveData: { xs: [días], ys: [tirArs] } curva ARS para interpolar
- *   - matchFuture: DLR del Single hedge (el actual)
- *   - matchFuturePrice: precio del DLR del Single
- *   - matchIsApprox: si el Single es aprox (no cubre)
- *   - futuresList: lista ordenada para Rolling
+ *   - futuresList: lista ordenada asc por expiryDays (DLRs vivos con precio)
  *
- * @returns {object} { single: { const: {...horizons}, curve: {...} }, rolling: {...} }
+ * @returns {object} { single: { const: {...horizons}, curve: {...} }, rolling: {...},
+ *                     singleHedges: { horizonKey: {ticker, isApprox} },
+ *                     rollingPaths: { horizonKey: {dlrPath, isApprox} } }
  */
 function computeMultiHorizonTirUsd(ctx) {
   const { daysToBondMaturity, maturityPayment, bondPrice, tirArsToday, spot,
-          curveData, matchFuturePrice, matchIsApprox, futuresList } = ctx;
+          curveData, futuresList } = ctx;
   const HORIZONS = [30, 60, 90, 180, daysToBondMaturity];
   const result = {
     single: { const: {}, curve: {} },
     rolling: { const: {}, curve: {} },
-    rollingPaths: {}, // horizon → dlrPath para el panel de detalle
+    singleHedges: {}, // horizonKey → {ticker, price, isApprox}
+    rollingPaths: {}, // horizonKey → {dlrPath, isApprox}
   };
 
   if (!Number.isFinite(maturityPayment) || maturityPayment <= 0 ||
@@ -20429,20 +20455,21 @@ function computeMultiHorizonTirUsd(ctx) {
     const arsFactor_curve = priceAtH_curve ? priceAtH_curve / bondPrice : null;
 
     // ─── Single hedge ───
-    // Usa el mismo DLR del match global (cubre o aprox). El FX de salida es
-    // su precio actual (que el contrato fija). Si el horizonte H < expiry del
-    // DLR, el contrato sigue vivo y vendemos el bono → convertimos al spot
-    // proyectado por el DLR (= su precio).
-    if (Number.isFinite(matchFuturePrice) && matchFuturePrice > 0) {
+    // Usa el DLR mas cercano a H (NO el que cubre el vto del bono). Si no
+    // hay DLR que cubra H, usa el ultimo (aprox).
+    const bestSingle = findBestSingleHedgeForHorizon(futuresList, effH);
+    if (bestSingle && Number.isFinite(bestSingle.price) && bestSingle.price > 0) {
       result.single.const[horizonKey] = arsFactor_const
-        ? computeSyntheticUsdReturn(arsFactor_const, effH, spot, matchFuturePrice)
+        ? computeSyntheticUsdReturn(arsFactor_const, effH, spot, bestSingle.price)
         : null;
       result.single.curve[horizonKey] = arsFactor_curve
-        ? computeSyntheticUsdReturn(arsFactor_curve, effH, spot, matchFuturePrice)
+        ? computeSyntheticUsdReturn(arsFactor_curve, effH, spot, bestSingle.price)
         : null;
+      result.singleHedges[horizonKey] = bestSingle;
     } else {
       result.single.const[horizonKey] = null;
       result.single.curve[horizonKey] = null;
+      result.singleHedges[horizonKey] = null;
     }
 
     // ─── Rolling ───
@@ -20924,8 +20951,6 @@ function SinteticoDolarModule() {
         tirArsToday: r.tirArs,
         spot: spotMayorista,
         curveData,
-        matchFuturePrice: r.futurePrice,
-        matchIsApprox: r.matchIsApprox,
         futuresList: futuresLive,
       });
 
@@ -21726,7 +21751,7 @@ TIR_USD    = USD_factor^(365/T) − 1`}
                     Single hedge
                   </h3>
                   <span style={{ fontSize: 10.5, color: C.dim }}>
-                    Un solo DLR ({detail.matchFutureTicker || "—"}{detail.matchIsApprox && " ⚠"}) cubre todo el holding.
+                    Un solo DLR que cubre el horizonte. La columna "DLR usado" muestra cuál.
                   </span>
                 </div>
                 <table style={{ width: "100%", borderCollapse: "collapse" }}>
@@ -21735,16 +21760,29 @@ TIR_USD    = USD_factor^(365/T) − 1`}
                       <th style={thLeftStyle}>Horizonte</th>
                       <th style={thStyle}>TIR USD (const)</th>
                       <th style={thStyle}>TIR USD (curva)</th>
+                      <th style={thLeftStyle}>DLR usado</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {HORIZONS_DISPLAY.map((h) => (
-                      <tr key={`single-${h.id}`} style={{ borderBottom: `1px solid ${C.border}` }}>
-                        <td style={tdLeftStyle}>{h.label}</td>
-                        <td style={tdStyle}>{renderTirCell(detail.multiTir?.single?.const?.[h.id])}</td>
-                        <td style={tdStyle}>{renderTirCell(detail.multiTir?.single?.curve?.[h.id])}</td>
-                      </tr>
-                    ))}
+                    {HORIZONS_DISPLAY.map((h) => {
+                      const sh = detail.multiTir?.singleHedges?.[h.id];
+                      return (
+                        <tr key={`single-${h.id}`} style={{ borderBottom: `1px solid ${C.border}` }}>
+                          <td style={tdLeftStyle}>{h.label}</td>
+                          <td style={tdStyle}>{renderTirCell(detail.multiTir?.single?.const?.[h.id])}</td>
+                          <td style={tdStyle}>{renderTirCell(detail.multiTir?.single?.curve?.[h.id])}</td>
+                          <td style={{ ...tdLeftStyle, fontSize: 10.5 }}>
+                            {sh ? (
+                              <>
+                                <span style={{ color: C.text }}>{sh.ticker.replace("DLR", "")}</span>
+                                <span style={{ color: C.dim, fontSize: 9.5, marginLeft: 3 }}>({sh.expiryDays}d)</span>
+                                {sh.isApprox && <span style={{ color: C.cat.violet, marginLeft: 2 }}>⚠</span>}
+                              </>
+                            ) : <span style={{ color: C.dim }}>—</span>}
+                          </td>
+                        </tr>
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>
