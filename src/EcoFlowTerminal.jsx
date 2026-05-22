@@ -20795,8 +20795,12 @@ function SinteticoDolarModule() {
   //                 Lista de futures vivos con precios live + settle.
   //   Pass 2: por cada baseRow, calcular multi-horizonte (5h × 2 modelos
   //           × 2 estrategias) y el peak. Resultado: rows.
-  const rows = useMemo(() => {
-    if (!spotMayorista) return [];
+  //
+  // El useMemo retorna { rows, curveData, futuresLive } porque el modal de
+  // detalle también necesita acceso a curveData y futuresLive para el
+  // simulador interno.
+  const rowsResult = useMemo(() => {
+    if (!spotMayorista) return { rows: [], curveData: null, futuresLive: [] };
     const futuresWithDays = DLR_REGISTRY
       .map((c) => ({ ...c, expiryDays: daysToExpiry(c.maturityDate) }))
       .filter((c) => c.expiryDays > 0);
@@ -20943,7 +20947,7 @@ function SinteticoDolarModule() {
       .sort((a, b) => a.expiryDays - b.expiryDays);
 
     // ─── Pass 2: multi-horizonte por bono ─────────────────
-    return baseRows.map((r) => {
+    const rows = baseRows.map((r) => {
       const multiTir = computeMultiHorizonTirUsd({
         daysToBondMaturity: r.days,
         maturityPayment: r.maturityPayment,
@@ -20966,7 +20970,11 @@ function SinteticoDolarModule() {
         peakConst,
       };
     });
+    return { rows, curveData, futuresLive };
   }, [universe, maturityPayments, bondEmissions, bondPrices, spotMayorista, futurePrices, selectedStrategy]);
+  const rows = rowsResult.rows;
+  const curveData = rowsResult.curveData;
+  const futuresLive = rowsResult.futuresLive;
 
   // Sort dinamico: aplica sortKey/sortDir sobre rows. Las filas con
   // valor null/undefined en la columna activa caen al fondo siempre
@@ -21164,7 +21172,9 @@ function SinteticoDolarModule() {
         })}
       </div>
 
-      {/* Explainer (collapsable) - combina "que es" + "como se calcula" */}
+      {/* Explainer (collapsable) — Manual extendido para cualquier perfil.
+          Diseñado para que alguien sin experiencia en finanzas/tecnología
+          pueda entender la pantalla y tomar una decisión informada. */}
       <div
         className="mb-4"
         style={{
@@ -21188,7 +21198,7 @@ function SinteticoDolarModule() {
         >
           <Info size={13} color={C.accent} strokeWidth={1.8} style={{ flexShrink: 0, marginTop: 2 }} />
           <span style={{ fontSize: 11.5, color: C.text, lineHeight: 1.55, fontWeight: 500, flex: 1 }}>
-            ¿Qué es el sintético dólar y cómo se calcula?
+            ¿Qué es esta pantalla y cómo se usa? <span style={{ color: C.dim, fontWeight: 400 }}>· Manual completo (clickeá para abrir)</span>
           </span>
           <ChevronDown
             size={14}
@@ -21201,38 +21211,146 @@ function SinteticoDolarModule() {
           />
         </button>
         {explainerOpen && (
-          <div style={{ padding: "0 16px 14px 38px", fontSize: 11.5, color: C.muted, lineHeight: 1.65 }}>
-            <p style={{ margin: "0 0 8px 0" }}>
-              <strong style={{ color: C.text }}>Para qué sirve:</strong> compara combinaciones <strong style={{ color: C.text }}>bono peso + DLR futuro</strong> como sintéticos en USD. La idea es captar la tasa en pesos del bono y fijar el FX de salida comprando un futuro DLR — te queda una TIR en USD <em>conocida desde el día cero</em>, independiente del spot al vencimiento. Usalo como comparativa contra GD30/AL30 o money market USD para decidir dónde poner cash USD.
+          <div style={{ padding: "0 16px 18px 38px", fontSize: 12, color: C.muted, lineHeight: 1.7 }}>
+
+            {/* ── SECCIÓN 1: ¿Qué es esto en una frase? ── */}
+            <h4 style={{ color: C.text, fontSize: 12.5, fontWeight: 600, margin: "10px 0 6px 0", letterSpacing: "0.02em" }}>
+              ¿Qué hace esta pantalla, en una frase?
+            </h4>
+            <p style={{ margin: "0 0 10px 0" }}>
+              Es un <strong style={{ color: C.text }}>comparador</strong> que te dice: si tenés dólares hoy, qué armado en pesos te puede dar más dólares dentro de un tiempo, cubriéndote del riesgo de devaluación.
             </p>
-            <p style={{ margin: "0 0 8px 0" }}>
-              <strong style={{ color: C.text }}>Cómo funciona:</strong> con C pesos hoy comprás un bono peso que paga M por cada 100 VN al vencimiento (en T días), y a la vez comprás K contratos DLR futuro long. Eligiendo K = X/(1000×F) — donde X es lo que cobrás del bono — el resultado en USD queda fijo: <strong style={{ color: C.text }}>USD_final = X/F</strong>, independientemente del spot al vencimiento.
+
+            {/* ── SECCIÓN 2: El problema concreto ── */}
+            <h4 style={{ color: C.text, fontSize: 12.5, fontWeight: 600, margin: "16px 0 6px 0", letterSpacing: "0.02em" }}>
+              El problema que resuelve
+            </h4>
+            <p style={{ margin: "0 0 6px 0" }}>
+              Imaginate que tenés USD 1.000 guardados. Tus opciones son:
             </p>
-            <p style={{ margin: "0 0 8px 0" }}>
-              <strong style={{ color: C.text }}>Fórmula (TEA, compuesta):</strong>
+            <ul style={{ margin: "0 0 10px 0", paddingLeft: 20 }}>
+              <li>Dejarlos quietos: 0% de rendimiento.</li>
+              <li>Plazo fijo en dólares: 2-4% al año (bajo).</li>
+              <li>Bonos argentinos en dólares (AL30, GD30): rinden más pero arriesgás default.</li>
+              <li><strong style={{ color: C.text }}>El truco de esta pantalla:</strong> pasarlos a pesos, comprar un bono en pesos que rinde alto (~25-30% anual), Y al mismo tiempo "asegurar" el tipo de cambio al que volvés a dólares comprando un contrato de dólar futuro.</li>
+            </ul>
+            <p style={{ margin: "0 0 10px 0" }}>
+              Eso último se llama <strong style={{ color: C.text }}>sintético dólar</strong>. Capturás la tasa alta en pesos pero te cubrís de la devaluación con el futuro. La pregunta clave: <em>¿qué combinación bono + futuro me conviene más hoy?</em> Eso es lo que esta tabla responde.
+            </p>
+
+            {/* ── SECCIÓN 3: La tabla columna por columna ── */}
+            <h4 style={{ color: C.text, fontSize: 12.5, fontWeight: 600, margin: "16px 0 6px 0", letterSpacing: "0.02em" }}>
+              Cómo leer la tabla, columna por columna
+            </h4>
+            <ul style={{ margin: "0 0 10px 0", paddingLeft: 20 }}>
+              <li><strong style={{ color: C.text }}>Bono:</strong> el nombre del bono. Hay tres tipos: <em>LECAP</em> (corto, hasta 1 año), <em>BONCAP</em> (más largo), y <em>DUAL</em> (caso especial — abajo lo explico).</li>
+              <li><strong style={{ color: C.text }}>Vto:</strong> la fecha en que el bono devuelve la plata.</li>
+              <li><strong style={{ color: C.text }}>Días:</strong> cuántos días faltan a esa fecha.</li>
+              <li><strong style={{ color: C.text }}>Vto $:</strong> cuántos pesos te paga el bono al vencimiento por cada $100 invertidos. Si dice "145,29" significa que recibís $145,29 por cada $100 nominales al final.</li>
+              <li><strong style={{ color: C.text }}>P actual:</strong> el precio al que cotiza el bono HOY. Si dice "141,60" significa que hoy comprás $100 nominales por $141,60. La diferencia entre "P actual" y "Vto $" es tu ganancia bruta en pesos.</li>
+              <li><strong style={{ color: C.text }}>TIR ARS:</strong> rendimiento anualizado del bono en pesos. "Este bono rinde 27% por año en pesos si lo aguantás hasta el final".</li>
+              <li><strong style={{ color: C.text }}>DLR match:</strong> el contrato de dólar futuro que se usa para hedgear. Si tiene un <span style={{ color: C.cat.violet }}>⚠</span> amarillo, significa que la cobertura no es perfecta (el futuro vence antes que el bono).</li>
+              <li><strong style={{ color: C.text }}>F (futuro):</strong> precio del dólar futuro hoy. Si dice "1.432" significa que el mercado vende un dólar para esa fecha a $1.432.</li>
+              <li><strong style={{ color: C.text }}>TIR USD:</strong> <em>la columna más importante.</em> Cuánto rinde el armado completo en dólares anualizado, al horizonte que vos elegiste. <span style={{ color: C.green }}>Verde positivo</span> = ganás dólares. <span style={{ color: C.red }}>Rojo negativo</span> = perdés.</li>
+              <li><strong style={{ color: C.text }}>Peak:</strong> el horizonte óptimo para ese bono. Te dice "este rinde mejor si lo aguantás 90 días" o "hasta el vto". Útil porque a veces no conviene esperar al final.</li>
+            </ul>
+
+            {/* ── SECCIÓN 4: Los dos selectores ── */}
+            <h4 style={{ color: C.text, fontSize: 12.5, fontWeight: 600, margin: "16px 0 6px 0", letterSpacing: "0.02em" }}>
+              Los dos selectores arriba: Horizonte y Estrategia
+            </h4>
+            <p style={{ margin: "0 0 6px 0" }}>
+              <strong style={{ color: C.text }}>Horizonte = ¿cuánto tiempo voy a mantener el sintético?</strong> 30/60/90/180 días o "Vto" (hasta el vencimiento del bono). A veces no conviene esperar al final: un bono puede rendir mejor en sus primeros 60 días que aguantado un año entero.
+            </p>
+            <p style={{ margin: "0 0 6px 0" }}>
+              <strong style={{ color: C.text }}>Estrategia = ¿cómo me cubro del dólar?</strong>
+            </p>
+            <ul style={{ margin: "0 0 8px 0", paddingLeft: 20 }}>
+              <li><em>Single hedge:</em> comprás UN solo contrato de futuro que cubra todo el período. Versión simple, una sola operación.</li>
+              <li><em>Rolling mensual:</em> comprás el futuro del mes que viene; cuando expira, comprás el del mes siguiente; así hasta cubrir todo. Más activo (una operación por mes) pero suele capturar más ganancia.</li>
+            </ul>
+            <p style={{ margin: "0 0 10px 0" }}>
+              <strong style={{ color: C.text }}>¿Cuándo gana cada una?</strong> Si la curva de futuros está empinada hacia adelante (que es lo normal en Argentina), <strong style={{ color: C.green }}>Rolling suele ganar fácil</strong> porque los futuros cercanos son más baratos. Si la curva está plana, son equivalentes.
+            </p>
+
+            {/* ── SECCIÓN 5: El modal de detalle ── */}
+            <h4 style={{ color: C.text, fontSize: 12.5, fontWeight: 600, margin: "16px 0 6px 0", letterSpacing: "0.02em" }}>
+              Click en un bono → modal de detalle + simulador
+            </h4>
+            <p style={{ margin: "0 0 6px 0" }}>
+              Al hacer click en cualquier fila, se abre una ventana con todo el desglose del bono:
+            </p>
+            <ul style={{ margin: "0 0 8px 0", paddingLeft: 20 }}>
+              <li><strong style={{ color: C.text }}>Tabla Single hedge:</strong> una fila por horizonte, dos columnas de TIR (modelo Const y modelo Curva — abajo los explico), y la columna "DLR usado" que muestra cuál contrato se compra.</li>
+              <li><strong style={{ color: C.text }}>Tabla Rolling mensual:</strong> idem, más una columna extra "Camino de DLRs" que muestra exactamente qué contratos comprás y cuántos días cada uno. Ej: <span style={{ color: C.text, fontFamily: "'Roboto Mono', monospace" }}>MAY26 (8d) → JUN26 (32d) → JUL26 (30d)</span>.</li>
+              <li><strong style={{ color: C.text }}>Simulador con tu monto:</strong> ingresás cuántos USD vas a invertir y la pantalla te muestra <em>paso a paso</em>: cuántos pesos te dan al spot, cuántos VN del bono comprás, qué futuros tomás, cuánto recibís al final, y la ganancia/pérdida en USD. Cambiás el monto, estrategia, horizonte y modelo y recalcula al instante.</li>
+            </ul>
+            <p style={{ margin: "0 0 6px 0" }}>
+              <strong style={{ color: C.text }}>Los dos modelos del detalle:</strong>
+            </p>
+            <ul style={{ margin: "0 0 10px 0", paddingLeft: 20 }}>
+              <li><em>Const (constante):</em> asume que las tasas de pesos se quedan como están hoy. Escenario base, conservador.</li>
+              <li><em>Curva:</em> asume que las tasas se van a comportar como el mercado las descuenta hoy. Más realista. <strong style={{ color: C.text }}>Si los dos coinciden, el cálculo es robusto. Si difieren mucho, estás expuesto a movimientos de tasas.</strong></li>
+            </ul>
+
+            {/* ── SECCIÓN 6: Cómo decidir ── */}
+            <h4 style={{ color: C.text, fontSize: 12.5, fontWeight: 600, margin: "16px 0 6px 0", letterSpacing: "0.02em" }}>
+              Cómo tomar una decisión, paso a paso
+            </h4>
+            <ol style={{ margin: "0 0 10px 0", paddingLeft: 22 }}>
+              <li style={{ marginBottom: 4 }}>Ordená la tabla por <strong style={{ color: C.text }}>Peak</strong> descendente (click en el header). Te aparecen los bonos con mayor potencial arriba.</li>
+              <li style={{ marginBottom: 4 }}>Mirá si los top están en <span style={{ color: C.green }}>verde positivo</span>. Si todos están negativos, hoy no es buen día para sintéticos — guardá los dólares.</li>
+              <li style={{ marginBottom: 4 }}>Elegí un bono con buen Peak Y horizonte cómodo para vos. Si necesitás la plata en 60 días, no agarres uno con peak "vto" a 300 días.</li>
+              <li style={{ marginBottom: 4 }}>Click en el bono → abre el modal. Mirá si Rolling supera a Single por más de 1-2 puntos. Si sí, andá por Rolling; si están parecidos, agarrá Single (menos operaciones).</li>
+              <li style={{ marginBottom: 4 }}>Usá el <strong style={{ color: C.text }}>simulador</strong> con tu monto real para ver cuánto te queda al final. Si el número absoluto te cierra, anotá los contratos del "camino DLRs" y andá a comprar.</li>
+            </ol>
+
+            {/* ── SECCIÓN 7: DUAL y ⚠ ── */}
+            <h4 style={{ color: C.text, fontSize: 12.5, fontWeight: 600, margin: "16px 0 6px 0", letterSpacing: "0.02em" }}>
+              Casos especiales: <span style={{ color: C.cat.yellow }}>DUAL</span> y <span style={{ color: C.cat.violet }}>⚠</span>
+            </h4>
+            <p style={{ margin: "0 0 6px 0" }}>
+              <strong style={{ color: C.cat.yellow }}>DUAL:</strong> algunos bonos están marcados con badge amarillo. Son bonos especiales que pagan un <em>piso garantizado</em> pero pueden pagar más si la tasa TAMAR sube. Como TAMAR no se puede predecir, mostramos solo el <strong style={{ color: C.text }}>peor caso</strong>. Si la TIR USD del peor caso ya te cierra, está perfecto. Si no, podés ignorarlos. <strong style={{ color: C.text }}>Cuando el precio del bono cotiza arriba del piso</strong>, las TIRs aparecen en gris atenuado — el mercado descuenta que vas a cobrar más que el piso, pero no podemos cuantificarlo todavía.
+            </p>
+            <p style={{ margin: "0 0 10px 0" }}>
+              <strong style={{ color: C.cat.violet }}>⚠ Triángulo violeta:</strong> significa cobertura aproximada. El futuro usado vence antes que el bono o que el horizonte, así que los últimos días del armado quedan expuestos al spot del momento. Si querés sintéticos 100% cubiertos, evitá esas filas.
+            </p>
+
+            {/* ── SECCIÓN 8: Limitaciones honestas ── */}
+            <h4 style={{ color: C.text, fontSize: 12.5, fontWeight: 600, margin: "16px 0 6px 0", letterSpacing: "0.02em" }}>
+              Limitaciones honestas (qué NO te dice esta pantalla)
+            </h4>
+            <ul style={{ margin: "0 0 10px 0", paddingLeft: 20 }}>
+              <li><strong style={{ color: C.text }}>No predice el dólar.</strong> Te muestra el rendimiento bajo la curva de futuros ACTUAL. Si el dólar pega un salto sorpresivo o cambia la política, los números se mueven.</li>
+              <li><strong style={{ color: C.text }}>No incluye comisiones del broker.</strong> Restá ~0.5-1% al año por costos operativos reales.</li>
+              <li><strong style={{ color: C.text }}>No incluye impuestos.</strong> Las ganancias por bonos pueden estar gravadas según el régimen tuyo.</li>
+              <li><strong style={{ color: C.text }}>Rolling v1 asume que los DLR no se mueven entre rolleos.</strong> Es una primera aproximación; en la próxima versión vamos a modelar el riesgo de basis real.</li>
+              <li><strong style={{ color: C.text }}>Para BONTAMs cotizando con prima</strong>, las TIRs mostradas son el peor caso. El real probablemente sea mejor.</li>
+            </ul>
+
+            {/* ── SECCIÓN 9: Detalles técnicos (al final) ── */}
+            <h4 style={{ color: C.text, fontSize: 12.5, fontWeight: 600, margin: "16px 0 6px 0", letterSpacing: "0.02em" }}>
+              Detalles técnicos (para quienes quieran)
+            </h4>
+            <p style={{ margin: "0 0 6px 0" }}>
+              <strong style={{ color: C.text }}>Fórmula básica del sintético al vencimiento:</strong>
             </p>
             <pre style={{ margin: "0 0 8px 0", fontFamily: "'Roboto Mono', monospace", fontSize: 11, color: C.text, background: "rgba(255,255,255,0.03)", padding: "8px 10px", overflowX: "auto" }}>
-{`ARS_factor = M / P             (gross return ARS sobre T días)
-USD_factor = ARS_factor × S_0 / F
+{`ARS_factor = M / P             (ganancia bruta en pesos)
+USD_factor = ARS_factor × Spot / F
 TIR_USD    = USD_factor^(365/T) − 1`}
             </pre>
-            <p style={{ margin: "0 0 8px 0" }}>
-              <strong style={{ color: C.text }}>De dónde sale M:</strong> tres fuentes en cascada — primero datos del Tesoro actualizados automáticamente (Mi/Ju), después el catálogo verificado del registry (mismo dato que usa Carry Trade Terminal), y por último override manual si lo cargás. Aparece prefilled en "Vto $"; si lo editás, tu valor manual prevalece.
+            <p style={{ margin: "0 0 6px 0" }}>
+              donde M es el pago al vencimiento, P el precio actual, T los días al vto, Spot el dólar mayorista de hoy, y F el precio del futuro DLR.
+            </p>
+            <p style={{ margin: "0 0 6px 0" }}>
+              <strong style={{ color: C.text }}>Para horizontes intermedios (H &lt; T):</strong> precio del bono al día H se estima como <span style={{ fontFamily: "'Roboto Mono', monospace" }}>M / (1+TIR_ARS)^((T-H)/365)</span>. El modelo "Const" usa la TIR ARS de hoy; el modelo "Curva" interpola la TIR ARS de los bonos con (T-H) días restantes.
             </p>
             <p style={{ margin: "0 0 8px 0" }}>
-              <strong style={{ color: C.text }}>Bonos <span style={{ color: C.cat.yellow, fontWeight: 700 }}>DUAL</span> (TAMAR):</strong> el badge amarillo marca Bonos Duales — pagan al vto el <em>máximo</em> entre la tasa fija capitalizada y la TAMAR acumulada del período. Como no podemos predecir TAMAR, mostramos el <strong style={{ color: C.text }}>PISO</strong> (escenario tasa fija). Si TAMAR queda arriba, cobrás más; si no, cobrás exactamente eso. <em>La TIR USD que ves es la peor que te puede tocar.</em> Si esa ya es atractiva, el bono es buen sintético casi sin importar el camino de TAMAR.
-            </p>
-            <p style={{ margin: "0 0 8px 0" }}>
-              <strong style={{ color: C.text }}>Cómo usar la pantalla:</strong> la idea no es necesariamente <em>hold-to-maturity</em>. Con los toggles de arriba elegís <strong style={{ color: C.text }}>horizonte</strong> (30/60/90/180d/vto) y <strong style={{ color: C.text }}>estrategia</strong> (Single hedge = un solo DLR, o Rolling mensual = rollear cada mes). La columna <strong style={{ color: C.text }}>TIR USD</strong> muestra el rendimiento al horizonte elegido con esa estrategia. La columna <strong style={{ color: C.text }}>Peak</strong> te dice cuál es el horizonte óptimo para ese bono — útil para ver de un saque "este conviene salir en 90d, no aguantarlo al vto". <strong style={{ color: C.text }}>Click en cualquier bono</strong> abre el detalle con todos los horizontes y modelos (constante y curva interpolada) lado a lado.
-            </p>
-            <p style={{ margin: "0 0 8px 0" }}>
-              <strong style={{ color: C.text }}>Los dos modelos del detalle:</strong> <em>Const</em> asume que la TIR ARS de hoy se mantiene hasta el horizonte (escenario base, conservador). <em>Curva</em> interpola la TIR ARS desde los bonos con días-restantes similares (más realista donde el universo está bien poblado). Si los dos números coinciden, el modelo no está agregando información. Si difieren mucho, estás expuesto a movimientos de la curva.
-            </p>
-            <p style={{ margin: "0 0 8px 0" }}>
-              <strong style={{ color: C.text }}>El icono</strong> <span style={{ color: C.cat.violet, fontSize: 12 }}>⚠</span> en la columna DLR match: significa que no hay un futuro que expire después del vto del bono, así que usamos el último disponible y la TIR USD queda <em>aproximada</em> (no hedgeada al 100% en el último tramo). Filtrá esas filas si querés sintéticos garantizados.
+              <strong style={{ color: C.text }}>Para Rolling:</strong> el FX efectivo se aproxima como promedio ponderado por días de los precios actuales de cada DLR del camino. Hipótesis simplificadora de v1 — se refina en Fase 2.
             </p>
             <p style={{ margin: 0 }}>
-              <strong style={{ color: C.text }}>Limitaciones de v1:</strong> el match con DLR no es perfecto incluso cuando hay cobertura (el futuro expira fin de mes, el bono cualquier día). Para BONTAMs mostramos solo el piso (el techo con TAMAR actual queda para v2). <strong style={{ color: C.text }}>Rolling mensual</strong> asume que cada DLR mantiene su precio actual hasta expirar — es una primera aproximación; la Fase 2 va a refinar esto modelando la curva DLR completa y los roll costs reales. <strong style={{ color: C.text }}>Modelo "Curva"</strong> requiere universo bien poblado en cada horizonte — donde haya gaps, cae al extremo más cercano. Alertas de oportunidades arbitrables, snapshots históricos y sparklines van en Fase 3.
+              <strong style={{ color: C.text }}>De dónde sale M:</strong> en cascada — primero override manual si lo cargás, después datos del Tesoro actualizados Mi/Ju, después catálogo verificado interno, después el piso calculado para BONTAMs.
             </p>
           </div>
         )}
@@ -21573,270 +21691,516 @@ TIR_USD    = USD_factor^(365/T) − 1`}
         Fuentes: dolarapi (spot) · Primary (DLR live + settle fallback) · BYMA/data912/MAE (precio bonos) · Tesoro Nacional (pago al vto, actualizado Mi/Ju). La TIR se recalcula sola con cada refresh.
       </div>
 
-      {/* Modal de detalle multi-horizonte (Fase 1).
-          Se abre al clickear una fila. Muestra para el bono seleccionado:
-            - Header: ticker, tipo, vto, días, datos base
-            - Single hedge: tabla 5 horizontes × 2 modelos (const / curva)
-            - Rolling mensual: tabla 5 horizontes × 2 modelos + path de DLRs
-          El overlay es semi-transparente y bloqueador. Click fuera del modal
-          cierra. */}
+      {/* Modal de detalle multi-horizonte + simulador (Fase 1).
+          Componente standalone — definido más abajo. Le pasamos la row
+          completa, spot, futuresLive y curveData para el simulador. */}
       {expandedBond && (() => {
         const detail = rows.find((r) => r.bondTicker === expandedBond);
         if (!detail) return null;
-        const HORIZONS_DISPLAY = [
-          { id: "30", label: "30 días" },
-          { id: "60", label: "60 días" },
-          { id: "90", label: "90 días" },
-          { id: "180", label: "180 días" },
-          { id: "vto", label: `Vto (${detail.days}d)` },
-        ];
-        const renderTirCell = (v) => {
-          if (!Number.isFinite(v)) {
-            return <span style={{ color: C.dim }}>—</span>;
-          }
-          if (detail.isBontamAbovePremium) {
-            return (
-              <span style={{ color: C.muted, fontWeight: 500 }}>
-                {v >= 0 ? "+" : ""}{fmtPct(v * 100)}
-              </span>
-            );
-          }
-          return (
-            <span style={{ color: v > 0 ? C.green : C.red, fontWeight: 600 }}>
-              {v >= 0 ? "+" : ""}{fmtPct(v * 100)}
-            </span>
-          );
-        };
-        const renderRollingPath = (h) => {
-          const rp = detail.multiTir?.rollingPaths?.[h];
-          if (!rp || !Array.isArray(rp.dlrPath)) return <span style={{ color: C.dim }}>—</span>;
-          return (
-            <span style={{ fontSize: 10.5, color: C.muted, fontVariantNumeric: "tabular-nums" }}>
-              {rp.dlrPath.map((seg, idx) => (
-                <span key={idx}>
-                  {idx > 0 && <span style={{ color: C.dim, margin: "0 4px" }}>→</span>}
-                  <span style={{ color: C.text }}>{seg.ticker.replace("DLR", "")}</span>
-                  <span style={{ color: C.dim, fontSize: 9.5, marginLeft: 3 }}>({seg.days}d)</span>
-                  {seg.isApprox && <span style={{ color: C.cat.violet, marginLeft: 2 }}>⚠</span>}
-                </span>
-              ))}
-            </span>
-          );
-        };
-        const thStyle = {
-          padding: "8px 12px",
-          fontSize: 9.5,
-          color: C.dim,
-          letterSpacing: "0.12em",
-          textTransform: "uppercase",
-          fontWeight: 600,
-          textAlign: "right",
-          whiteSpace: "nowrap",
-          borderBottom: `1px solid ${C.border}`,
-        };
-        const thLeftStyle = { ...thStyle, textAlign: "left" };
-        const tdStyle = {
-          padding: "8px 12px",
-          fontSize: 12,
-          color: C.text,
-          textAlign: "right",
-          fontVariantNumeric: "tabular-nums",
-          whiteSpace: "nowrap",
-        };
-        const tdLeftStyle = { ...tdStyle, textAlign: "left", color: C.muted };
         return (
-          <div
-            onClick={() => setExpandedBond(null)}
-            style={{
-              position: "fixed",
-              inset: 0,
-              background: "rgba(0,0,0,0.6)",
-              backdropFilter: "blur(2px)",
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              zIndex: 1000,
-              padding: 20,
-            }}
-          >
-            <div
-              onClick={(e) => e.stopPropagation()}
-              style={{
-                background: C.panel,
-                border: `1px solid ${C.border}`,
-                maxWidth: 880,
-                width: "100%",
-                maxHeight: "90vh",
-                overflow: "auto",
-                boxShadow: "0 20px 60px rgba(0,0,0,0.5)",
-              }}
-            >
-              {/* Header del modal */}
-              <div style={{
-                padding: "18px 22px",
-                borderBottom: `1px solid ${C.border}`,
-                display: "flex",
-                justifyContent: "space-between",
-                alignItems: "flex-start",
-                gap: 16,
-              }}>
-                <div>
-                  <div style={{ display: "flex", alignItems: "baseline", gap: 10 }}>
-                    <h2 style={{ fontSize: 18, fontWeight: 700, color: C.text, margin: 0, letterSpacing: "-0.01em" }}>
-                      {detail.bondTicker}
-                    </h2>
-                    {detail.bondType === "bontam" ? (
-                      <span style={{
-                        color: C.cat?.yellow || "#fbbf24",
-                        fontSize: 10,
-                        textTransform: "uppercase",
-                        letterSpacing: "0.05em",
-                        fontWeight: 600,
-                      }}>
-                        DUAL
-                      </span>
-                    ) : (
-                      <span style={{ color: C.dim, fontSize: 10, textTransform: "uppercase", letterSpacing: "0.05em" }}>
-                        {detail.bondType}
-                      </span>
-                    )}
-                  </div>
-                  <div style={{ marginTop: 4, fontSize: 11, color: C.muted, fontVariantNumeric: "tabular-nums" }}>
-                    Vto {detail.bondMaturity} · {detail.days} días
-                    {Number.isFinite(detail.maturityPayment) && (
-                      <> · Pago al vto: <span style={{ color: C.text }}>{fmtNumber(detail.maturityPayment, { minDecimals: 2, maxDecimals: 2 })}</span></>
-                    )}
-                    {Number.isFinite(detail.bondPrice) && (
-                      <> · Precio: <span style={{ color: C.text }}>{fmtNumber(detail.bondPrice, { minDecimals: 2, maxDecimals: 3, smartDecimals: true })}</span></>
-                    )}
-                    {Number.isFinite(detail.tirArs) && (
-                      <> · TIR ARS: <span style={{ color: C.text }}>{fmtPct(detail.tirArs * 100)}</span></>
-                    )}
-                  </div>
-                </div>
-                <button
-                  onClick={() => setExpandedBond(null)}
-                  style={{
-                    background: "transparent",
-                    border: `1px solid ${C.border}`,
-                    color: C.muted,
-                    cursor: "pointer",
-                    padding: "4px 12px",
-                    fontSize: 11,
-                    letterSpacing: "0.05em",
-                  }}
-                >
-                  Cerrar ✕
-                </button>
-              </div>
-
-              {/* BONTAM warning si aplica */}
-              {detail.isBontamAbovePremium && (
-                <div style={{
-                  padding: "10px 22px",
-                  background: "rgba(250, 204, 21, 0.06)",
-                  borderBottom: `1px solid ${C.border}`,
-                  fontSize: 11,
-                  color: C.muted,
-                  lineHeight: 1.55,
-                }}>
-                  <strong style={{ color: C.cat.yellow }}>Bono Dual con prima:</strong> el precio actual cotiza ARRIBA del piso de tasa fija. El mercado descuenta que TAMAR > fija en promedio. Las TIRs USD mostradas son las del PEOR CASO (escenario TAMAR queda en o por debajo de la fija). El payoff real probablemente sea mayor.
-                </div>
-              )}
-
-              {/* Tabla Single hedge */}
-              <div style={{ padding: "16px 22px" }}>
-                <div style={{ display: "flex", alignItems: "baseline", gap: 10, marginBottom: 8 }}>
-                  <h3 style={{ fontSize: 12, fontWeight: 600, color: C.text, margin: 0, letterSpacing: "0.04em", textTransform: "uppercase" }}>
-                    Single hedge
-                  </h3>
-                  <span style={{ fontSize: 10.5, color: C.dim }}>
-                    Un solo DLR que cubre el horizonte. La columna "DLR usado" muestra cuál.
-                  </span>
-                </div>
-                <table style={{ width: "100%", borderCollapse: "collapse" }}>
-                  <thead>
-                    <tr>
-                      <th style={thLeftStyle}>Horizonte</th>
-                      <th style={thStyle}>TIR USD (const)</th>
-                      <th style={thStyle}>TIR USD (curva)</th>
-                      <th style={thLeftStyle}>DLR usado</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {HORIZONS_DISPLAY.map((h) => {
-                      const sh = detail.multiTir?.singleHedges?.[h.id];
-                      return (
-                        <tr key={`single-${h.id}`} style={{ borderBottom: `1px solid ${C.border}` }}>
-                          <td style={tdLeftStyle}>{h.label}</td>
-                          <td style={tdStyle}>{renderTirCell(detail.multiTir?.single?.const?.[h.id])}</td>
-                          <td style={tdStyle}>{renderTirCell(detail.multiTir?.single?.curve?.[h.id])}</td>
-                          <td style={{ ...tdLeftStyle, fontSize: 10.5 }}>
-                            {sh ? (
-                              <>
-                                <span style={{ color: C.text }}>{sh.ticker.replace("DLR", "")}</span>
-                                <span style={{ color: C.dim, fontSize: 9.5, marginLeft: 3 }}>({sh.expiryDays}d)</span>
-                                {sh.isApprox && <span style={{ color: C.cat.violet, marginLeft: 2 }}>⚠</span>}
-                              </>
-                            ) : <span style={{ color: C.dim }}>—</span>}
-                          </td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              </div>
-
-              {/* Tabla Rolling mensual */}
-              <div style={{ padding: "0 22px 16px 22px" }}>
-                <div style={{ display: "flex", alignItems: "baseline", gap: 10, marginBottom: 8 }}>
-                  <h3 style={{ fontSize: 12, fontWeight: 600, color: C.text, margin: 0, letterSpacing: "0.04em", textTransform: "uppercase" }}>
-                    Rolling mensual
-                  </h3>
-                  <span style={{ fontSize: 10.5, color: C.dim }}>
-                    Compramos sucesivamente cada DLR mensual; al expirar, rolleamos al siguiente.
-                  </span>
-                </div>
-                <table style={{ width: "100%", borderCollapse: "collapse" }}>
-                  <thead>
-                    <tr>
-                      <th style={thLeftStyle}>Horizonte</th>
-                      <th style={thStyle}>TIR USD (const)</th>
-                      <th style={thStyle}>TIR USD (curva)</th>
-                      <th style={thLeftStyle}>Camino de DLRs</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {HORIZONS_DISPLAY.map((h) => (
-                      <tr key={`rolling-${h.id}`} style={{ borderBottom: `1px solid ${C.border}` }}>
-                        <td style={tdLeftStyle}>{h.label}</td>
-                        <td style={tdStyle}>{renderTirCell(detail.multiTir?.rolling?.const?.[h.id])}</td>
-                        <td style={tdStyle}>{renderTirCell(detail.multiTir?.rolling?.curve?.[h.id])}</td>
-                        <td style={tdLeftStyle}>{renderRollingPath(h.id)}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-
-              {/* Notas metodológicas del detalle */}
-              <div style={{
-                padding: "12px 22px 18px 22px",
-                borderTop: `1px solid ${C.border}`,
-                fontSize: 10.5,
-                color: C.muted,
-                lineHeight: 1.6,
-              }}>
-                <strong style={{ color: C.text }}>Const:</strong> asume que la TIR ARS de hoy se mantiene hasta el horizonte. Escenario base, conservador.
-                <br />
-                <strong style={{ color: C.text }}>Curva:</strong> usa la curva LECAP/BONCAP actual para inferir qué TIR ARS tendrá el bono al horizonte. Más realista donde la curva está bien poblada.
-                <br />
-                <strong style={{ color: C.text }}>Rolling V1:</strong> asume cada DLR mantiene su precio actual hasta expirar. La Fase 2 va a refinar esto modelando la curva DLR completa y los roll costs reales.
-              </div>
-            </div>
-          </div>
+          <BondDetailModal
+            row={detail}
+            spotMayorista={spotMayorista}
+            futuresLive={futuresLive}
+            curveData={curveData}
+            selectedHorizon={selectedHorizon}
+            selectedStrategy={selectedStrategy}
+            onClose={() => setExpandedBond(null)}
+          />
         );
       })()}
+    </div>
+  );
+}
+
+/* ─────────── BondDetailModal (modal de detalle + simulador) ─────────── */
+
+/**
+ * Modal que se abre al clickear una fila del Sintético Dólar. Muestra:
+ *   - Header con datos base del bono.
+ *   - Tabla Single hedge: 5 horizontes × 2 modelos (const/curva) + DLR usado.
+ *   - Tabla Rolling mensual: idem + path de DLRs.
+ *   - Simulador: input USD → desglose paso a paso del armado del sintético
+ *     y resultado final esperado bajo el horizonte/estrategia/modelo elegidos.
+ *   - Notas metodológicas.
+ *
+ * Es componente externo (no inline IIFE) porque el simulador tiene state
+ * propio (monto, estrategia/modelo locales del simulador).
+ */
+function BondDetailModal({ row, spotMayorista, futuresLive, curveData, selectedHorizon, selectedStrategy, onClose }) {
+  // State del simulador. Defaults: USD 1.000, estrategia/horizonte
+  // heredados de la pantalla principal, modelo "const" (escenario base).
+  const [simInputUsd, setSimInputUsd] = useState(1000);
+  const [simStrategy, setSimStrategy] = useState(selectedStrategy || "rolling");
+  const [simHorizon, setSimHorizon] = useState(selectedHorizon || "vto");
+  const [simModel, setSimModel] = useState("const");
+
+  const HORIZONS_DISPLAY = [
+    { id: "30", label: "30 días" },
+    { id: "60", label: "60 días" },
+    { id: "90", label: "90 días" },
+    { id: "180", label: "180 días" },
+    { id: "vto", label: `Vto (${row.days}d)` },
+  ];
+
+  // ─── Cálculo del simulador ──────────────────────────────
+  // Reproducimos paso a paso el armado del sintético para el monto USD
+  // ingresado. Devolvemos un objeto con todos los valores intermedios para
+  // mostrar el desglose narrativo abajo.
+  const sim = useMemo(() => {
+    const usd0 = Number(simInputUsd);
+    if (!Number.isFinite(usd0) || usd0 <= 0) return null;
+    if (!Number.isFinite(spotMayorista) || spotMayorista <= 0) return null;
+    if (!Number.isFinite(row.bondPrice) || row.bondPrice <= 0) return null;
+    if (!Number.isFinite(row.maturityPayment) || row.maturityPayment <= 0) return null;
+
+    // Día 0
+    const arsCapital = usd0 * spotMayorista;
+    // VN del bono: el precio es por 100 VN, así que VN = arsCapital * 100 / P
+    const bondVN = (arsCapital * 100) / row.bondPrice;
+
+    // Horizonte efectivo (cap al vto del bono)
+    const horizonValue = simHorizon === "vto" ? row.days : Number(simHorizon);
+    const effH = Math.min(horizonValue, row.days);
+    const daysRemaining = row.days - effH;
+
+    // TIR ARS a usar segun modelo
+    const tirArsConst = Number.isFinite(row.tirArs) ? row.tirArs : null;
+    const tirArsCurve = curveData
+      ? interpolateLinear(curveData.xs, curveData.ys, daysRemaining)
+      : null;
+    const tirArsUsed = simModel === "curve" ? tirArsCurve : tirArsConst;
+
+    if (!Number.isFinite(tirArsUsed)) return null;
+
+    // Precio del bono al horizonte
+    const priceAtH = (effH === row.days)
+      ? row.maturityPayment
+      : computeBondPriceAtHorizon(row.maturityPayment, daysRemaining, tirArsUsed);
+
+    // ARS recibidos al vender el bono al día H
+    const arsFromBond = (bondVN * priceAtH) / 100;
+
+    // FX efectivo segun estrategia
+    let fxEffective = null;
+    let dlrInfo = null; // info para el desglose narrativo
+    if (simStrategy === "rolling") {
+      const r = computeRollingFxOut(spotMayorista, futuresLive, effH);
+      if (r && Number.isFinite(r.fxEffective) && r.fxEffective > 0) {
+        fxEffective = r.fxEffective;
+        dlrInfo = { type: "rolling", path: r.dlrPath, isApprox: r.isApprox };
+      }
+    } else {
+      const best = findBestSingleHedgeForHorizon(futuresLive, effH);
+      if (best && Number.isFinite(best.price) && best.price > 0) {
+        fxEffective = best.price;
+        dlrInfo = { type: "single", ticker: best.ticker, price: best.price, expiryDays: best.expiryDays, isApprox: best.isApprox };
+      }
+    }
+    if (!Number.isFinite(fxEffective) || fxEffective <= 0) return null;
+
+    // USD final
+    const usdFinal = arsFromBond / fxEffective;
+    const usdProfit = usdFinal - usd0;
+    const usdPct = usdProfit / usd0;
+    // TIR USD anualizada (sanity check con la tabla)
+    const tirUsdAnnualized = effH > 0
+      ? Math.pow(usdFinal / usd0, 365 / effH) - 1
+      : null;
+
+    return {
+      usd0, spot: spotMayorista, arsCapital, bondVN, priceAtH, arsFromBond,
+      fxEffective, dlrInfo, usdFinal, usdProfit, usdPct, tirUsdAnnualized,
+      effH, daysRemaining, tirArsUsed, modelLabel: simModel === "curve" ? "curva" : "const",
+    };
+  }, [simInputUsd, simStrategy, simHorizon, simModel, row, spotMayorista, futuresLive, curveData]);
+
+  // ─── Helpers de render ──────────────────────────────────
+  const renderTirCell = (v) => {
+    if (!Number.isFinite(v)) {
+      return <span style={{ color: C.dim }}>—</span>;
+    }
+    if (row.isBontamAbovePremium) {
+      return (
+        <span style={{ color: C.muted, fontWeight: 500 }}>
+          {v >= 0 ? "+" : ""}{fmtPct(v * 100)}
+        </span>
+      );
+    }
+    return (
+      <span style={{ color: v > 0 ? C.green : C.red, fontWeight: 600 }}>
+        {v >= 0 ? "+" : ""}{fmtPct(v * 100)}
+      </span>
+    );
+  };
+  const renderRollingPath = (h) => {
+    const rp = row.multiTir?.rollingPaths?.[h];
+    if (!rp || !Array.isArray(rp.dlrPath)) return <span style={{ color: C.dim }}>—</span>;
+    return (
+      <span style={{ fontSize: 10.5, color: C.muted, fontVariantNumeric: "tabular-nums" }}>
+        {rp.dlrPath.map((seg, idx) => (
+          <span key={idx}>
+            {idx > 0 && <span style={{ color: C.dim, margin: "0 4px" }}>→</span>}
+            <span style={{ color: C.text }}>{seg.ticker.replace("DLR", "")}</span>
+            <span style={{ color: C.dim, fontSize: 9.5, marginLeft: 3 }}>({seg.days}d)</span>
+            {seg.isApprox && <span style={{ color: C.cat.violet, marginLeft: 2 }}>⚠</span>}
+          </span>
+        ))}
+      </span>
+    );
+  };
+  const thStyle = {
+    padding: "8px 12px",
+    fontSize: 9.5,
+    color: C.dim,
+    letterSpacing: "0.12em",
+    textTransform: "uppercase",
+    fontWeight: 600,
+    textAlign: "right",
+    whiteSpace: "nowrap",
+    borderBottom: `1px solid ${C.border}`,
+  };
+  const thLeftStyle = { ...thStyle, textAlign: "left" };
+  const tdStyle = {
+    padding: "8px 12px",
+    fontSize: 12,
+    color: C.text,
+    textAlign: "right",
+    fontVariantNumeric: "tabular-nums",
+    whiteSpace: "nowrap",
+  };
+  const tdLeftStyle = { ...tdStyle, textAlign: "left", color: C.muted };
+
+  // Estilos compactos para los toggle del simulador (similar a la barra
+  // de la tabla principal pero mas chico).
+  const simToggleBtn = (active) => ({
+    padding: "3px 10px",
+    fontSize: 10,
+    fontWeight: active ? 600 : 500,
+    letterSpacing: "0.04em",
+    color: active ? C.text : C.muted,
+    background: active ? "rgba(91, 141, 214, 0.08)" : "transparent",
+    border: `1px solid ${active ? C.accentBorder : C.border}`,
+    cursor: "pointer",
+    transition: "all 120ms ease",
+  });
+
+  return (
+    <div
+      onClick={onClose}
+      style={{
+        position: "fixed",
+        inset: 0,
+        background: "rgba(0,0,0,0.6)",
+        backdropFilter: "blur(2px)",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        zIndex: 1000,
+        padding: 20,
+      }}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          background: C.panel,
+          border: `1px solid ${C.border}`,
+          maxWidth: 920,
+          width: "100%",
+          maxHeight: "92vh",
+          overflow: "auto",
+          boxShadow: "0 20px 60px rgba(0,0,0,0.5)",
+        }}
+      >
+        {/* Header */}
+        <div style={{
+          padding: "18px 22px",
+          borderBottom: `1px solid ${C.border}`,
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "flex-start",
+          gap: 16,
+        }}>
+          <div>
+            <div style={{ display: "flex", alignItems: "baseline", gap: 10 }}>
+              <h2 style={{ fontSize: 18, fontWeight: 700, color: C.text, margin: 0, letterSpacing: "-0.01em" }}>
+                {row.bondTicker}
+              </h2>
+              {row.bondType === "bontam" ? (
+                <span style={{ color: C.cat?.yellow || "#fbbf24", fontSize: 10, textTransform: "uppercase", letterSpacing: "0.05em", fontWeight: 600 }}>
+                  DUAL
+                </span>
+              ) : (
+                <span style={{ color: C.dim, fontSize: 10, textTransform: "uppercase", letterSpacing: "0.05em" }}>
+                  {row.bondType}
+                </span>
+              )}
+            </div>
+            <div style={{ marginTop: 4, fontSize: 11, color: C.muted, fontVariantNumeric: "tabular-nums" }}>
+              Vto {row.bondMaturity} · {row.days} días
+              {Number.isFinite(row.maturityPayment) && (
+                <> · Pago al vto: <span style={{ color: C.text }}>{fmtNumber(row.maturityPayment, { minDecimals: 2, maxDecimals: 2 })}</span></>
+              )}
+              {Number.isFinite(row.bondPrice) && (
+                <> · Precio: <span style={{ color: C.text }}>{fmtNumber(row.bondPrice, { minDecimals: 2, maxDecimals: 3, smartDecimals: true })}</span></>
+              )}
+              {Number.isFinite(row.tirArs) && (
+                <> · TIR ARS: <span style={{ color: C.text }}>{fmtPct(row.tirArs * 100)}</span></>
+              )}
+            </div>
+          </div>
+          <button
+            onClick={onClose}
+            style={{
+              background: "transparent",
+              border: `1px solid ${C.border}`,
+              color: C.muted,
+              cursor: "pointer",
+              padding: "4px 12px",
+              fontSize: 11,
+              letterSpacing: "0.05em",
+            }}
+          >
+            Cerrar ✕
+          </button>
+        </div>
+
+        {/* BONTAM warning */}
+        {row.isBontamAbovePremium && (
+          <div style={{ padding: "10px 22px", background: "rgba(250, 204, 21, 0.06)", borderBottom: `1px solid ${C.border}`, fontSize: 11, color: C.muted, lineHeight: 1.55 }}>
+            <strong style={{ color: C.cat.yellow }}>Bono Dual con prima:</strong> el precio actual cotiza ARRIBA del piso de tasa fija. El mercado descuenta que TAMAR &gt; fija en promedio. Las TIRs USD mostradas son las del PEOR CASO. El payoff real probablemente sea mayor.
+          </div>
+        )}
+
+        {/* Tabla Single hedge */}
+        <div style={{ padding: "16px 22px" }}>
+          <div style={{ display: "flex", alignItems: "baseline", gap: 10, marginBottom: 8 }}>
+            <h3 style={{ fontSize: 12, fontWeight: 600, color: C.text, margin: 0, letterSpacing: "0.04em", textTransform: "uppercase" }}>
+              Single hedge
+            </h3>
+            <span style={{ fontSize: 10.5, color: C.dim }}>
+              Un solo DLR que cubre el horizonte. La columna "DLR usado" muestra cuál.
+            </span>
+          </div>
+          <table style={{ width: "100%", borderCollapse: "collapse" }}>
+            <thead>
+              <tr>
+                <th style={thLeftStyle}>Horizonte</th>
+                <th style={thStyle}>TIR USD (const)</th>
+                <th style={thStyle}>TIR USD (curva)</th>
+                <th style={thLeftStyle}>DLR usado</th>
+              </tr>
+            </thead>
+            <tbody>
+              {HORIZONS_DISPLAY.map((h) => {
+                const sh = row.multiTir?.singleHedges?.[h.id];
+                return (
+                  <tr key={`single-${h.id}`} style={{ borderBottom: `1px solid ${C.border}` }}>
+                    <td style={tdLeftStyle}>{h.label}</td>
+                    <td style={tdStyle}>{renderTirCell(row.multiTir?.single?.const?.[h.id])}</td>
+                    <td style={tdStyle}>{renderTirCell(row.multiTir?.single?.curve?.[h.id])}</td>
+                    <td style={{ ...tdLeftStyle, fontSize: 10.5 }}>
+                      {sh ? (
+                        <>
+                          <span style={{ color: C.text }}>{sh.ticker.replace("DLR", "")}</span>
+                          <span style={{ color: C.dim, fontSize: 9.5, marginLeft: 3 }}>({sh.expiryDays}d)</span>
+                          {sh.isApprox && <span style={{ color: C.cat.violet, marginLeft: 2 }}>⚠</span>}
+                        </>
+                      ) : <span style={{ color: C.dim }}>—</span>}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+
+        {/* Tabla Rolling mensual */}
+        <div style={{ padding: "0 22px 16px 22px" }}>
+          <div style={{ display: "flex", alignItems: "baseline", gap: 10, marginBottom: 8 }}>
+            <h3 style={{ fontSize: 12, fontWeight: 600, color: C.text, margin: 0, letterSpacing: "0.04em", textTransform: "uppercase" }}>
+              Rolling mensual
+            </h3>
+            <span style={{ fontSize: 10.5, color: C.dim }}>
+              Compramos sucesivamente cada DLR mensual; al expirar, rolleamos al siguiente.
+            </span>
+          </div>
+          <table style={{ width: "100%", borderCollapse: "collapse" }}>
+            <thead>
+              <tr>
+                <th style={thLeftStyle}>Horizonte</th>
+                <th style={thStyle}>TIR USD (const)</th>
+                <th style={thStyle}>TIR USD (curva)</th>
+                <th style={thLeftStyle}>Camino de DLRs</th>
+              </tr>
+            </thead>
+            <tbody>
+              {HORIZONS_DISPLAY.map((h) => (
+                <tr key={`rolling-${h.id}`} style={{ borderBottom: `1px solid ${C.border}` }}>
+                  <td style={tdLeftStyle}>{h.label}</td>
+                  <td style={tdStyle}>{renderTirCell(row.multiTir?.rolling?.const?.[h.id])}</td>
+                  <td style={tdStyle}>{renderTirCell(row.multiTir?.rolling?.curve?.[h.id])}</td>
+                  <td style={tdLeftStyle}>{renderRollingPath(h.id)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+
+        {/* ─── SIMULADOR ─── */}
+        <div style={{
+          padding: "16px 22px",
+          borderTop: `1px solid ${C.border}`,
+          background: "rgba(91, 141, 214, 0.03)",
+        }}>
+          <div style={{ display: "flex", alignItems: "baseline", gap: 10, marginBottom: 12, flexWrap: "wrap" }}>
+            <h3 style={{ fontSize: 12, fontWeight: 600, color: C.text, margin: 0, letterSpacing: "0.04em", textTransform: "uppercase" }}>
+              Simulador con tu monto
+            </h3>
+            <span style={{ fontSize: 10.5, color: C.dim }}>
+              Cambiá monto, estrategia, horizonte y modelo. Recalcula al instante.
+            </span>
+          </div>
+
+          {/* Controles del simulador */}
+          <div style={{ display: "flex", gap: 20, flexWrap: "wrap", alignItems: "center", marginBottom: 16, padding: "10px 14px", background: C.panel, border: `1px solid ${C.border}` }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <span style={{ fontSize: 10, color: C.dim, letterSpacing: "0.1em", textTransform: "uppercase", fontWeight: 600 }}>USD</span>
+              <input
+                type="number"
+                value={simInputUsd}
+                onChange={(e) => setSimInputUsd(e.target.value)}
+                min="0"
+                step="100"
+                style={{
+                  width: 110,
+                  padding: "5px 10px",
+                  background: "transparent",
+                  border: `1px solid ${C.accentBorder}`,
+                  color: C.text,
+                  fontSize: 13,
+                  fontWeight: 600,
+                  textAlign: "right",
+                  fontVariantNumeric: "tabular-nums",
+                  fontFamily: "'Roboto Mono', monospace",
+                }}
+              />
+            </div>
+            <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+              <span style={{ fontSize: 10, color: C.dim, letterSpacing: "0.1em", textTransform: "uppercase", fontWeight: 600 }}>Horizonte</span>
+              {HORIZONS_DISPLAY.map((h) => (
+                <button key={`sim-h-${h.id}`} onClick={() => setSimHorizon(h.id)} style={simToggleBtn(simHorizon === h.id)}>
+                  {h.id === "vto" ? "Vto" : `${h.id}d`}
+                </button>
+              ))}
+            </div>
+            <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+              <span style={{ fontSize: 10, color: C.dim, letterSpacing: "0.1em", textTransform: "uppercase", fontWeight: 600 }}>Estrategia</span>
+              <button onClick={() => setSimStrategy("single")} style={simToggleBtn(simStrategy === "single")}>Single</button>
+              <button onClick={() => setSimStrategy("rolling")} style={simToggleBtn(simStrategy === "rolling")}>Rolling</button>
+            </div>
+            <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+              <span style={{ fontSize: 10, color: C.dim, letterSpacing: "0.1em", textTransform: "uppercase", fontWeight: 600 }}>Modelo</span>
+              <button onClick={() => setSimModel("const")} style={simToggleBtn(simModel === "const")}>Const</button>
+              <button onClick={() => setSimModel("curve")} style={simToggleBtn(simModel === "curve")}>Curva</button>
+            </div>
+          </div>
+
+          {/* Resultado del simulador */}
+          {sim ? (
+            <div style={{ background: C.panel, border: `1px solid ${C.border}`, padding: "14px 18px", fontSize: 12, lineHeight: 1.7, color: C.text, fontVariantNumeric: "tabular-nums" }}>
+              {/* Pasos */}
+              <div style={{ marginBottom: 14 }}>
+                <div style={{ color: C.muted, marginBottom: 2 }}>
+                  <span style={{ color: C.dim, marginRight: 8, fontSize: 10 }}>1.</span>
+                  Entrás con <strong style={{ color: C.text }}>USD {fmtARS(sim.usd0)}</strong>, los vendés al spot mayorista <strong style={{ color: C.text }}>$ {fmtARS(sim.spot)}</strong> → recibís <strong style={{ color: C.text }}>$ {fmtARS(sim.arsCapital)}</strong>.
+                </div>
+                <div style={{ color: C.muted, marginBottom: 2 }}>
+                  <span style={{ color: C.dim, marginRight: 8, fontSize: 10 }}>2.</span>
+                  Comprás <strong style={{ color: C.text }}>{fmtARS(sim.bondVN)}</strong> VN de <strong style={{ color: C.text }}>{row.bondTicker}</strong> al precio <strong style={{ color: C.text }}>{fmtNumber(row.bondPrice, { minDecimals: 2, maxDecimals: 3 })}</strong> por 100 VN.
+                </div>
+                {sim.dlrInfo?.type === "single" && (
+                  <div style={{ color: C.muted, marginBottom: 2 }}>
+                    <span style={{ color: C.dim, marginRight: 8, fontSize: 10 }}>3.</span>
+                    Comprás futuro <strong style={{ color: C.text }}>{sim.dlrInfo.ticker.replace("DLR", "DLR/")}</strong> a <strong style={{ color: C.text }}>$ {fmtARS(sim.dlrInfo.price)}</strong> para hedgear el FX.
+                    {sim.dlrInfo.isApprox && <span style={{ color: C.cat.violet, marginLeft: 4 }}>⚠ cobertura aprox</span>}
+                  </div>
+                )}
+                {sim.dlrInfo?.type === "rolling" && (
+                  <div style={{ color: C.muted, marginBottom: 2 }}>
+                    <span style={{ color: C.dim, marginRight: 8, fontSize: 10 }}>3.</span>
+                    Hedgeás con rolling mensual: {sim.dlrInfo.path.map((seg, idx) => (
+                      <span key={idx}>
+                        {idx > 0 && <span style={{ color: C.dim }}> → </span>}
+                        <strong style={{ color: C.text }}>{seg.ticker.replace("DLR", "")}</strong>
+                        <span style={{ color: C.dim }}> {seg.days}d</span>
+                      </span>
+                    ))}
+                    {sim.dlrInfo.isApprox && <span style={{ color: C.cat.violet, marginLeft: 4 }}>⚠ aprox</span>}
+                  </div>
+                )}
+                <div style={{ color: C.muted, marginBottom: 2 }}>
+                  <span style={{ color: C.dim, marginRight: 8, fontSize: 10 }}>4.</span>
+                  Después de <strong style={{ color: C.text }}>{sim.effH} días</strong>{sim.daysRemaining > 0 ? ` (le quedarían ${sim.daysRemaining}d al bono)` : " (al vto del bono)"}, el bono vale <strong style={{ color: C.text }}>{fmtNumber(sim.priceAtH, { minDecimals: 2, maxDecimals: 3 })}</strong> por 100 VN (modelo {sim.modelLabel}).
+                </div>
+                <div style={{ color: C.muted, marginBottom: 2 }}>
+                  <span style={{ color: C.dim, marginRight: 8, fontSize: 10 }}>5.</span>
+                  Vendés el bono → recibís <strong style={{ color: C.text }}>$ {fmtARS(sim.arsFromBond)}</strong>.
+                </div>
+                <div style={{ color: C.muted }}>
+                  <span style={{ color: C.dim, marginRight: 8, fontSize: 10 }}>6.</span>
+                  Convertís a USD al FX efectivo del hedge ($ <strong style={{ color: C.text }}>{fmtARS(sim.fxEffective)}</strong>) → <strong style={{ color: C.text }}>USD {fmtARS(sim.usdFinal)}</strong>.
+                </div>
+              </div>
+
+              {/* Resultado bottom-line */}
+              <div style={{
+                padding: "12px 14px",
+                background: sim.usdProfit >= 0 ? "rgba(34, 197, 94, 0.08)" : "rgba(248, 113, 113, 0.08)",
+                border: `1px solid ${sim.usdProfit >= 0 ? C.green : C.red}`,
+                display: "flex",
+                justifyContent: "space-between",
+                flexWrap: "wrap",
+                gap: 14,
+                alignItems: "center",
+              }}>
+                <div>
+                  <div style={{ fontSize: 10, color: C.dim, letterSpacing: "0.1em", textTransform: "uppercase", fontWeight: 600 }}>
+                    Resultado en {sim.effH} días
+                  </div>
+                  <div style={{ fontSize: 18, fontWeight: 700, color: sim.usdProfit >= 0 ? C.green : C.red, marginTop: 2 }}>
+                    {sim.usdProfit >= 0 ? "+" : ""}USD {fmtARS(sim.usdProfit)}
+                    <span style={{ fontSize: 13, color: C.muted, fontWeight: 500, marginLeft: 8 }}>
+                      ({sim.usdPct >= 0 ? "+" : ""}{fmtPct(sim.usdPct * 100)})
+                    </span>
+                  </div>
+                </div>
+                <div style={{ textAlign: "right" }}>
+                  <div style={{ fontSize: 10, color: C.dim, letterSpacing: "0.1em", textTransform: "uppercase", fontWeight: 600 }}>
+                    TIR USD anualizada
+                  </div>
+                  <div style={{ fontSize: 16, fontWeight: 600, color: sim.tirUsdAnnualized > 0 ? C.green : C.red, marginTop: 2 }}>
+                    {sim.tirUsdAnnualized >= 0 ? "+" : ""}{fmtPct((sim.tirUsdAnnualized || 0) * 100)}
+                  </div>
+                </div>
+              </div>
+            </div>
+          ) : (
+            <div style={{ padding: "14px 18px", background: C.panel, border: `1px solid ${C.border}`, fontSize: 12, color: C.muted }}>
+              No se puede simular: faltan datos (monto, precio del bono, spot o futuro).
+            </div>
+          )}
+        </div>
+
+        {/* Notas metodológicas */}
+        <div style={{ padding: "12px 22px 18px 22px", borderTop: `1px solid ${C.border}`, fontSize: 10.5, color: C.muted, lineHeight: 1.6 }}>
+          <strong style={{ color: C.text }}>Const:</strong> asume que la TIR ARS de hoy se mantiene hasta el horizonte. Escenario base, conservador.
+          <br />
+          <strong style={{ color: C.text }}>Curva:</strong> usa la curva LECAP/BONCAP actual para inferir qué TIR ARS tendrá el bono al horizonte. Más realista donde la curva está bien poblada.
+          <br />
+          <strong style={{ color: C.text }}>Rolling V1:</strong> asume cada DLR mantiene su precio actual hasta expirar. La Fase 2 va a refinar esto modelando la curva DLR completa y los roll costs reales.
+        </div>
+      </div>
     </div>
   );
 }
