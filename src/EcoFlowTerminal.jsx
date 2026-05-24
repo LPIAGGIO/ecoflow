@@ -21994,13 +21994,20 @@ function BondDetailModal({ row, spotMayorista, spotMep, futuresLive, curveData, 
   const [simModel, setSimModel] = useState("const");
 
   // State de la tabla comparativa de estrategias (nueva). Permite al usuario:
-  //   - Ajustar la tasa de caución (default = TIR ARS del bono más corto
-  //     del menú, sensato como proxy del money market).
-  //   - Mover un slider de devaluación libre (-20% a +100%) para
-  //     explorar escenarios custom.
-  const [caucionRateInput, setCaucionRateInput] = useState(
-    Number.isFinite(shortestBondTir) ? (shortestBondTir * 100).toFixed(2) : "30.00"
-  );
+  //   - Ajustar la tasa de caución en TNA (default = TNA derivada del bono
+  //     más corto del menú; la caución real argentina se cotiza siempre en
+  //     TNA, no TEA, así que respetamos la convención del mercado).
+  //   - Mover un slider de devaluación fino (0% a +5%, step 0.01) para
+  //     explorar escenarios custom en el rango realista. Los escenarios
+  //     extremos (+15%, -5%) están como columnas fijas.
+  const defaultCaucionTNA = useMemo(() => {
+    if (!Number.isFinite(shortestBondTir) || shortestBondTir <= 0) return 35;
+    // Convertir TEA → TNA con capitalización diaria
+    // TNA = 365 × ((1 + TEA)^(1/365) - 1)
+    const tna = 365 * (Math.pow(1 + shortestBondTir, 1 / 365) - 1);
+    return Number((tna * 100).toFixed(2));
+  }, [shortestBondTir]);
+  const [caucionRateInput, setCaucionRateInput] = useState(String(defaultCaucionTNA));
   const [customDevPercent, setCustomDevPercent] = useState(0);
 
   const HORIZONS_DISPLAY = [
@@ -22179,14 +22186,21 @@ function BondDetailModal({ row, spotMayorista, spotMep, futuresLive, curveData, 
     }
     if (!Number.isFinite(usdIn) || usdIn <= 0) return null;
 
-    // Tasa de caución (TEA decimal). Default desde shortestBondTir, editable.
-    const caucionTEA = Number(caucionRateInput) / 100;
-    const caucionTEAvalid = Number.isFinite(caucionTEA) ? Math.max(0, caucionTEA) : 0.30;
+    // Tasa de caución (input en TNA decimal). Default desde defaultCaucionTNA.
+    const caucionTNA = Number(caucionRateInput) / 100;
+    const caucionTNAvalid = Number.isFinite(caucionTNA) ? Math.max(0, caucionTNA) : 0.35;
+    // TEA derivada (capitalización diaria), para mostrar como info.
+    const caucionTEA = Math.pow(1 + caucionTNAvalid / 365, 365) - 1;
 
     // ARS al horizonte H para cada estrategia
     const factorBono = M / bondPrice;
     const ARS_at_H_bono = arsIn * factorBono;
-    const factorCaucion = Math.pow(1 + caucionTEAvalid, days / 365);
+    // Caución: capitalización diaria sobre N días.
+    //   factor = (1 + TNA/365)^N
+    // (Asume rolear todos los días, que es lo típico de la caución bursátil
+    // a 1 día. Si se usa cauciones a plazo fijo más largo el factor sería
+    // lineal: 1 + TNA × N/365. Diferencia chica para horizontes cortos.)
+    const factorCaucion = Math.pow(1 + caucionTNAvalid / 365, days);
     const ARS_at_H_caucion = arsIn * factorCaucion;
 
     // Definición de los escenarios de MEP_expiry
@@ -22195,7 +22209,7 @@ function BondDetailModal({ row, spotMayorista, spotMep, futuresLive, curveData, 
       { id: "curva", label: "Curva implícita", subLabel: `MEP = ${(MEP_hoy * F_hedge / Spot_may).toFixed(2)}`, MEP_exp: MEP_hoy * (F_hedge / Spot_may) },
       { id: "stress", label: "Devaluación +15%", subLabel: `MEP = ${(MEP_hoy * 1.15).toFixed(2)}`, MEP_exp: MEP_hoy * 1.15 },
       { id: "baja", label: "Dólar baja -5%", subLabel: `MEP = ${(MEP_hoy * 0.95).toFixed(2)}`, MEP_exp: MEP_hoy * 0.95 },
-      { id: "custom", label: `Slider: ${customDevPercent >= 0 ? "+" : ""}${customDevPercent}%`, subLabel: `MEP = ${(MEP_hoy * (1 + customDevPercent / 100)).toFixed(2)}`, MEP_exp: MEP_hoy * (1 + customDevPercent / 100) },
+      { id: "custom", label: `Slider: +${customDevPercent.toFixed(2)}%`, subLabel: `MEP = ${(MEP_hoy * (1 + customDevPercent / 100)).toFixed(2)}`, MEP_exp: MEP_hoy * (1 + customDevPercent / 100) },
     ];
 
     // Calcular celdas
@@ -22226,7 +22240,7 @@ function BondDetailModal({ row, spotMayorista, spotMep, futuresLive, curveData, 
       return { scenario: s, cells, winner };
     });
 
-    return { rows, usdIn, arsIn, MEP_hoy, F_hedge, days, caucionTEA: caucionTEAvalid };
+    return { rows, usdIn, arsIn, MEP_hoy, F_hedge, days, caucionTNA: caucionTNAvalid, caucionTEA };
   }, [sim, simInputAmount, simInputCurrency, caucionRateInput, customDevPercent, row, spotMayorista, spotMep]);
 
   // Texto explicativo dinámico debajo de la tabla
@@ -22784,7 +22798,12 @@ function BondDetailModal({ row, spotMayorista, spotMep, futuresLive, curveData, 
                     fontFamily: "'Roboto Mono', monospace",
                   }}
                 />
-                <span style={{ fontSize: 10, color: C.dim }}>% TEA</span>
+                <span style={{ fontSize: 10, color: C.dim }}>% TNA</span>
+                {scenarios && Number.isFinite(scenarios.caucionTEA) && (
+                  <span style={{ fontSize: 10, color: C.muted, fontStyle: "italic" }}>
+                    → {(scenarios.caucionTEA * 100).toFixed(2)}% TEA
+                  </span>
+                )}
               </div>
               <div style={{ display: "flex", alignItems: "center", gap: 8, flex: 1, minWidth: 250 }}>
                 <span style={{ fontSize: 10, color: C.dim, letterSpacing: "0.1em", textTransform: "uppercase", fontWeight: 600 }}>
@@ -22792,22 +22811,22 @@ function BondDetailModal({ row, spotMayorista, spotMep, futuresLive, curveData, 
                 </span>
                 <input
                   type="range"
-                  min={-20}
-                  max={100}
-                  step={1}
+                  min={0}
+                  max={5}
+                  step={0.01}
                   value={customDevPercent}
                   onChange={(e) => setCustomDevPercent(Number(e.target.value))}
                   style={{ flex: 1, accentColor: C.accent }}
                 />
                 <span style={{
-                  minWidth: 50,
+                  minWidth: 56,
                   textAlign: "right",
                   fontSize: 12,
                   fontWeight: 600,
-                  color: customDevPercent >= 0 ? C.text : C.cat?.violet || C.muted,
+                  color: C.text,
                   fontVariantNumeric: "tabular-nums",
                 }}>
-                  {customDevPercent >= 0 ? "+" : ""}{customDevPercent}%
+                  +{customDevPercent.toFixed(2)}%
                 </span>
               </div>
             </div>
@@ -22831,7 +22850,7 @@ function BondDetailModal({ row, spotMayorista, spotMep, futuresLive, curveData, 
                     { key: "sintetico", label: "S. DLR (con MEP)", sublabel: "hedge cubre dólar" },
                     { key: "bonoSolo", label: "Bono peso", sublabel: "sin hedge" },
                     { key: "usd", label: "Quedarte en USD", sublabel: "no hacer nada" },
-                    { key: "caucion", label: "Caución ARS", sublabel: `${(scenarios.caucionTEA * 100).toFixed(1)}% TEA` },
+                    { key: "caucion", label: "Caución ARS", sublabel: `${(scenarios.caucionTNA * 100).toFixed(1)}% TNA` },
                   ].map((strat) => (
                     <tr key={`row-${strat.key}`} style={{ borderTop: `1px solid ${C.border}` }}>
                       <td style={scenarioCellLabelStyle()}>
@@ -22906,8 +22925,11 @@ function BondDetailModal({ row, spotMayorista, spotMep, futuresLive, curveData, 
           </div>
         )}
 
-        {/* Notas metodológicas */}
+        {/* Notas metodológicas + glosario */}
         <div style={{ padding: "12px 22px 18px 22px", borderTop: `1px solid ${C.border}`, fontSize: 10.5, color: C.muted, lineHeight: 1.6 }}>
+          <div style={{ marginBottom: 6, fontWeight: 600, color: C.text, textTransform: "uppercase", letterSpacing: "0.05em", fontSize: 10 }}>
+            Modelos del simulador
+          </div>
           <strong style={{ color: C.text }}>Const:</strong> asume que la TIR ARS de hoy se mantiene hasta el horizonte. Escenario base, conservador.
           <br />
           <strong style={{ color: C.text }}>Curva:</strong> usa la curva LECAP/BONCAP actual para inferir qué TIR ARS tendrá el bono al horizonte. Más realista donde la curva está bien poblada.
@@ -22915,6 +22937,27 @@ function BondDetailModal({ row, spotMayorista, spotMep, futuresLive, curveData, 
           <strong style={{ color: C.text }}>Rolling V1:</strong> asume cada DLR mantiene su precio actual hasta expirar. La Fase 2 va a refinar esto modelando la curva DLR completa y los roll costs reales.
           <br />
           <strong style={{ color: C.text }}>Cálculo coherente:</strong> USD inicial al spot mayorista de hoy, USD final al FX del hedge (≈ mayorista al expiry por convergencia del futuro). Son dos snapshots del MISMO instrumento (mayorista) en dos momentos del tiempo, lo que hace el cálculo internamente coherente y matchea la TIR USD de la tabla principal. El MEP de hoy se muestra solo como referencia retail.
+
+          <div style={{ marginTop: 14, marginBottom: 6, fontWeight: 600, color: C.text, textTransform: "uppercase", letterSpacing: "0.05em", fontSize: 10 }}>
+            Glosario rápido
+          </div>
+          <strong style={{ color: C.text }}>MEP:</strong> Dólar bolsa. El FX al que un inversor retail argentino convierte ARS↔USD (vía compra/venta de bonos como AL30/GD30).
+          <br />
+          <strong style={{ color: C.text }}>Spot mayorista:</strong> El FX del mercado interbancario (MAE/A3). Solo accesible a bancos y operadores mayoristas. El futuro DLR converge a este precio al expiry.
+          <br />
+          <strong style={{ color: C.text }}>Sintético DLR:</strong> Estrategia que combina un bono peso + futuros DLR para replicar un instrumento USD. Vendés MEP → comprás bono → ponés bono en garantía → comprás futuro DLR. Al expiry vendés bono y cerrás futuro, recibiendo USD.
+          <br />
+          <strong style={{ color: C.text }}>Caución ARS:</strong> Préstamo de pesos garantizado con bonos (típicamente 1-7 días, roleable). Se cotiza en TNA, no TEA. La tasa lineal sobre el período es ~ TNA × días/365.
+          <br />
+          <strong style={{ color: C.text }}>Curva implícita (en la comparativa):</strong> Escenario donde el dólar termina exactamente donde dice la curva de futuros DLR del mercado. Esa "predicción" del mercado se calcula sobre el ratio del futuro / mayorista de hoy.
+          <br />
+          <strong style={{ color: C.text }}>TEA:</strong> Tasa Efectiva Anual. Lo que rendiría tu inversión proyectada a 365 días con capitalización. Sirve para comparar entre activos de plazos distintos.
+          <br />
+          <strong style={{ color: C.text }}>TNA:</strong> Tasa Nominal Anual. Sin capitalizar. Es el formato estándar de cotización de caución, plazo fijo, etc.
+          <br />
+          <strong style={{ color: C.text }}>% del período (chiquito en cada celda):</strong> lo que efectivamente recibís al final del horizonte real (los días de la inversión), sobre el capital inicial. <em>El que importa para entender cuánta plata real ganás.</em>
+          <br />
+          <strong style={{ color: C.text }}>TEA (grande en cada celda):</strong> el rendimiento del período, anualizado y capitalizado. <em>Útil para comparar entre opciones de plazos distintos, pero NO es lo que recibís realmente en 37 días.</em>
         </div>
       </div>
     </div>
