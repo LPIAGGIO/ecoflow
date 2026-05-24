@@ -21940,6 +21940,13 @@ TIR_USD    = USD_factor^(365/T) − 1`}
       {expandedBond && (() => {
         const detail = rows.find((r) => r.bondTicker === expandedBond);
         if (!detail) return null;
+        // Pasamos al modal la TIR ARS del bono más corto del menú como
+        // proxy de tasa de caución / money market. El usuario puede
+        // ajustarla en el componente comparativo.
+        const candidates = rows
+          .filter((r) => Number.isFinite(r.tirArs) && Number.isFinite(r.days) && r.days > 0)
+          .sort((a, b) => a.days - b.days);
+        const shortestBondTir = candidates.length > 0 ? candidates[0].tirArs : 0.30;
         return (
           <BondDetailModal
             row={detail}
@@ -21949,6 +21956,7 @@ TIR_USD    = USD_factor^(365/T) − 1`}
             curveData={curveData}
             selectedHorizon={selectedHorizon}
             selectedStrategy={selectedStrategy}
+            shortestBondTir={shortestBondTir}
             onClose={() => setExpandedBond(null)}
           />
         );
@@ -21971,10 +21979,9 @@ TIR_USD    = USD_factor^(365/T) − 1`}
  * Es componente externo (no inline IIFE) porque el simulador tiene state
  * propio (monto, estrategia/modelo locales del simulador).
  */
-function BondDetailModal({ row, spotMayorista, spotMep, futuresLive, curveData, selectedHorizon, selectedStrategy, onClose }) {
-  // State del simulador. Defaults: ARS 1.000.000 (default realista para
-  // un inversor argentino), estrategia/horizonte heredados de la pantalla
-  // principal, modelo "const" (escenario base).
+function BondDetailModal({ row, spotMayorista, spotMep, futuresLive, curveData, selectedHorizon, selectedStrategy, shortestBondTir, onClose }) {
+  // State del simulador (existente). Defaults: ARS 1.000.000, estrategia/horizonte
+  // heredados de la pantalla principal, modelo "const" (escenario base).
   //
   // Currency toggle: por defecto entramos en ARS porque es la operativa
   // real (los bonos peso se compran con pesos; si tenes USD, primero los
@@ -21985,6 +21992,16 @@ function BondDetailModal({ row, spotMayorista, spotMep, futuresLive, curveData, 
   const [simStrategy, setSimStrategy] = useState(selectedStrategy || "rolling");
   const [simHorizon, setSimHorizon] = useState(selectedHorizon || "vto");
   const [simModel, setSimModel] = useState("const");
+
+  // State de la tabla comparativa de estrategias (nueva). Permite al usuario:
+  //   - Ajustar la tasa de caución (default = TIR ARS del bono más corto
+  //     del menú, sensato como proxy del money market).
+  //   - Mover un slider de devaluación libre (-20% a +100%) para
+  //     explorar escenarios custom.
+  const [caucionRateInput, setCaucionRateInput] = useState(
+    Number.isFinite(shortestBondTir) ? (shortestBondTir * 100).toFixed(2) : "30.00"
+  );
+  const [customDevPercent, setCustomDevPercent] = useState(0);
 
   const HORIZONS_DISPLAY = [
     { id: "30", label: "30 días" },
@@ -22116,6 +22133,133 @@ function BondDetailModal({ row, spotMayorista, spotMep, futuresLive, curveData, 
     };
   }, [simInputAmount, simInputCurrency, simStrategy, simHorizon, simModel, row, spotMayorista, spotMep, futuresLive, curveData]);
 
+  // ─── Comparativa de estrategias (nueva sección) ──────────
+  // Para una persona no-economista: tabla con 4 estrategias × 5
+  // escenarios de evolución del dólar, para decidir qué le conviene.
+  //
+  // Estrategias:
+  //   1) Sintético DLR con MEP (entrada con MEP, salida al FX hedge,
+  //      asumiendo convergencia mayorista=MEP al expiry).
+  //   2) Bono peso sin hedge (entrada MEP, salida MEP del momento).
+  //   3) Quedarte en USD (no hacer nada).
+  //   4) Caución ARS (entra MEP, capitaliza a tasa, sale MEP del momento).
+  //
+  // Escenarios de evolución del dólar (afectan MEP_expiry):
+  //   - Plano: MEP_expiry = MEP_hoy.
+  //   - Curva implícita: MEP_expiry = MEP_hoy × (F_hedge / Spot_mayorista_hoy).
+  //   - +15%: MEP_expiry = MEP_hoy × 1.15.
+  //   - -5%: MEP_expiry = MEP_hoy × 0.95.
+  //   - Custom slider: MEP_expiry = MEP_hoy × (1 + customDevPercent/100).
+  //
+  // Para el Sintético DLR: la fórmula NO depende del escenario porque
+  // está hedgeado (asumimos convergencia MEP_expiry = F_hedge). Por eso
+  // la columna del Sintético es PLANA — esa es la magia visual que le
+  // explica al usuario qué hace el hedge.
+  const scenarios = useMemo(() => {
+    if (!sim) return null;
+    const amount = Number(simInputAmount);
+    if (!Number.isFinite(amount) || amount <= 0) return null;
+    const MEP_hoy = (Number.isFinite(spotMep) && spotMep > 0) ? spotMep : spotMayorista;
+    if (!Number.isFinite(MEP_hoy) || MEP_hoy <= 0) return null;
+    const Spot_may = spotMayorista;
+    const F_hedge = sim.fxEffective;
+    const bondPrice = row.bondPrice;
+    const M = row.maturityPayment;
+    const days = sim.effH; // horizonte efectivo del simulador
+    if (!Number.isFinite(F_hedge) || F_hedge <= 0 || !Number.isFinite(M) || M <= 0 || !Number.isFinite(bondPrice) || bondPrice <= 0 || days <= 0) return null;
+
+    // Capital inicial (común para todas las estrategias)
+    let usdIn, arsIn;
+    if (simInputCurrency === "USD") {
+      usdIn = amount;
+      arsIn = amount * MEP_hoy;
+    } else {
+      arsIn = amount;
+      usdIn = amount / MEP_hoy;
+    }
+    if (!Number.isFinite(usdIn) || usdIn <= 0) return null;
+
+    // Tasa de caución (TEA decimal). Default desde shortestBondTir, editable.
+    const caucionTEA = Number(caucionRateInput) / 100;
+    const caucionTEAvalid = Number.isFinite(caucionTEA) ? Math.max(0, caucionTEA) : 0.30;
+
+    // ARS al horizonte H para cada estrategia
+    const factorBono = M / bondPrice;
+    const ARS_at_H_bono = arsIn * factorBono;
+    const factorCaucion = Math.pow(1 + caucionTEAvalid, days / 365);
+    const ARS_at_H_caucion = arsIn * factorCaucion;
+
+    // Definición de los escenarios de MEP_expiry
+    const scenarioDefs = [
+      { id: "plano", label: "Dólar plano", subLabel: "MEP = hoy", MEP_exp: MEP_hoy },
+      { id: "curva", label: "Curva implícita", subLabel: `MEP = ${(MEP_hoy * F_hedge / Spot_may).toFixed(2)}`, MEP_exp: MEP_hoy * (F_hedge / Spot_may) },
+      { id: "stress", label: "Devaluación +15%", subLabel: `MEP = ${(MEP_hoy * 1.15).toFixed(2)}`, MEP_exp: MEP_hoy * 1.15 },
+      { id: "baja", label: "Dólar baja -5%", subLabel: `MEP = ${(MEP_hoy * 0.95).toFixed(2)}`, MEP_exp: MEP_hoy * 0.95 },
+      { id: "custom", label: `Slider: ${customDevPercent >= 0 ? "+" : ""}${customDevPercent}%`, subLabel: `MEP = ${(MEP_hoy * (1 + customDevPercent / 100)).toFixed(2)}`, MEP_exp: MEP_hoy * (1 + customDevPercent / 100) },
+    ];
+
+    // Calcular celdas
+    const computeCell = (usdFinal) => {
+      if (!Number.isFinite(usdFinal) || usdFinal <= 0) return null;
+      const profit = usdFinal - usdIn;
+      const pct = usdIn !== 0 ? profit / usdIn : 0;
+      const tea = days > 0 ? Math.pow(usdFinal / usdIn, 365 / days) - 1 : 0;
+      return { usdFinal, profit, pct, tea };
+    };
+
+    const rows = scenarioDefs.map((s) => {
+      const cells = {
+        sintetico: computeCell(ARS_at_H_bono / F_hedge),
+        bonoSolo: computeCell(ARS_at_H_bono / s.MEP_exp),
+        usd: computeCell(usdIn),
+        caucion: computeCell(ARS_at_H_caucion / s.MEP_exp),
+      };
+      // Encontrar ganador (mayor TEA) entre las 4 estrategias
+      let winner = null;
+      let bestTea = -Infinity;
+      for (const [key, cell] of Object.entries(cells)) {
+        if (cell && Number.isFinite(cell.tea) && cell.tea > bestTea) {
+          bestTea = cell.tea;
+          winner = key;
+        }
+      }
+      return { scenario: s, cells, winner };
+    });
+
+    return { rows, usdIn, arsIn, MEP_hoy, F_hedge, days, caucionTEA: caucionTEAvalid };
+  }, [sim, simInputAmount, simInputCurrency, caucionRateInput, customDevPercent, row, spotMayorista, spotMep]);
+
+  // Texto explicativo dinámico debajo de la tabla
+  const explanation = useMemo(() => {
+    if (!scenarios) return null;
+    const winners = scenarios.rows.map(r => r.winner);
+    const wins = winners.reduce((acc, w) => { acc[w] = (acc[w] || 0) + 1; return acc; }, {});
+    const dominant = Object.entries(wins).sort((a, b) => b[1] - a[1])[0];
+
+    const findWinnerByScenario = (id) => scenarios.rows.find(r => r.scenario.id === id)?.winner;
+    const sinteticoTea = scenarios.rows[0].cells.sintetico?.tea;
+    const bonoPlanoTea = scenarios.rows[0].cells.bonoSolo?.tea;
+    const bonoStressTea = scenarios.rows[2].cells.bonoSolo?.tea;
+    const bonoBajaTea = scenarios.rows[3].cells.bonoSolo?.tea;
+
+    if (dominant && dominant[0] === "sintetico" && dominant[1] >= 3) {
+      return {
+        title: "El Sintético DLR domina hoy",
+        body: `Te asegura ${Number.isFinite(sinteticoTea) ? (sinteticoTea >= 0 ? "+" : "") + (sinteticoTea*100).toFixed(2) + "%" : "—"} TEA en USD sin importar lo que pase con el dólar. Bono peso solo te gana únicamente si el dólar baja (escenario -5%: +${Number.isFinite(bonoBajaTea) ? (bonoBajaTea*100).toFixed(2) : "—"}%), pero te hundís si sube fuerte (+15%: ${Number.isFinite(bonoStressTea) ? (bonoStressTea*100).toFixed(2) : "—"}%). Si querés rentabilidad USD asegurada, S. DLR es la elección clara hoy.`,
+      };
+    } else if (dominant && dominant[0] === "bonoSolo") {
+      return {
+        title: "Bono peso solo es el favorito hoy",
+        body: `Asumiendo que el dólar se queda quieto o cae, el bono peso solo gana al Sintético. Pero ojo: pierde fuerte si el dólar sube (+15%: ${Number.isFinite(bonoStressTea) ? (bonoStressTea*100).toFixed(2) : "—"}%). Si querés evitar ese downside, el Sintético DLR es un seguro razonable (${Number.isFinite(sinteticoTea) ? (sinteticoTea*100).toFixed(2) : "—"}% TEA fijo).`,
+      };
+    } else {
+      return {
+        title: "Resultados mixtos según escenario",
+        body: `No hay un ganador único. Si tu hipótesis es que el dólar va a estar quieto o caer, conviene Bono peso solo. Si pensás que va a devaluar, conviene Sintético DLR. El sintético asegura ${Number.isFinite(sinteticoTea) ? (sinteticoTea*100).toFixed(2) : "—"}% TEA sin importar el escenario.`,
+      };
+    }
+  }, [scenarios]);
+
   // ─── Helpers de render ──────────────────────────────────
   const renderTirCell = (v) => {
     if (!Number.isFinite(v)) {
@@ -22184,6 +22328,34 @@ function BondDetailModal({ row, spotMayorista, spotMep, futuresLive, curveData, 
     border: `1px solid ${active ? C.accentBorder : C.border}`,
     cursor: "pointer",
     transition: "all 120ms ease",
+  });
+
+  // Estilos helper para la tabla comparativa de estrategias
+  const scenarioHeaderStyle = () => ({
+    padding: "8px 10px",
+    textAlign: "left",
+    borderBottom: `2px solid ${C.border}`,
+    background: C.panel,
+    fontWeight: 500,
+    color: C.dim,
+    fontSize: 10,
+    letterSpacing: "0.05em",
+    textTransform: "uppercase",
+    verticalAlign: "top",
+  });
+  const scenarioCellLabelStyle = () => ({
+    padding: "8px 10px",
+    background: C.panel,
+    borderRight: `1px solid ${C.border}`,
+    verticalAlign: "middle",
+  });
+  const scenarioCellStyle = (isWinner) => ({
+    padding: "8px 10px",
+    textAlign: "left",
+    background: isWinner ? "rgba(34, 197, 94, 0.10)" : "transparent",
+    borderLeft: isWinner ? `2px solid ${C.green}` : `1px solid ${C.border}`,
+    borderRight: isWinner ? `2px solid ${C.green}` : "none",
+    verticalAlign: "middle",
   });
 
   return (
@@ -22575,6 +22747,164 @@ function BondDetailModal({ row, spotMayorista, spotMep, futuresLive, curveData, 
             </div>
           )}
         </div>
+
+        {/* ═══════════════════════════════════════════════════════════ */}
+        {/* SECCIÓN: COMPARATIVA DE ESTRATEGIAS                          */}
+        {/* ═══════════════════════════════════════════════════════════ */}
+        {scenarios && (
+          <div style={{ padding: "20px 22px 18px 22px", borderTop: `1px solid ${C.border}` }}>
+            <h3 style={{ margin: 0, marginBottom: 4, fontSize: 13, color: C.text, fontWeight: 600, letterSpacing: "0.02em", textTransform: "uppercase" }}>
+              Comparativa de estrategias
+            </h3>
+            <p style={{ margin: 0, marginBottom: 14, fontSize: 11, color: C.muted, lineHeight: 1.5 }}>
+              ¿Qué te conviene HOY con tu capital? El Sintético DLR aparece <strong style={{ color: C.text }}>plano</strong> en todos los escenarios (eso es lo que hace el hedge: protege contra cualquier movimiento del dólar). Bono peso solo y Caución son sensibles al dólar.
+            </p>
+
+            {/* Controles: caución + slider */}
+            <div style={{ display: "flex", gap: 18, flexWrap: "wrap", alignItems: "center", marginBottom: 12, padding: "8px 12px", background: C.panel, border: `1px solid ${C.border}` }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <span style={{ fontSize: 10, color: C.dim, letterSpacing: "0.1em", textTransform: "uppercase", fontWeight: 600 }}>
+                  Tasa caución
+                </span>
+                <input
+                  type="number"
+                  value={caucionRateInput}
+                  onChange={(e) => setCaucionRateInput(e.target.value)}
+                  step="0.5"
+                  style={{
+                    width: 78,
+                    padding: "4px 8px",
+                    background: "transparent",
+                    border: `1px solid ${C.accentBorder}`,
+                    color: C.text,
+                    fontSize: 12,
+                    fontWeight: 600,
+                    textAlign: "right",
+                    fontVariantNumeric: "tabular-nums",
+                    fontFamily: "'Roboto Mono', monospace",
+                  }}
+                />
+                <span style={{ fontSize: 10, color: C.dim }}>% TEA</span>
+              </div>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, flex: 1, minWidth: 250 }}>
+                <span style={{ fontSize: 10, color: C.dim, letterSpacing: "0.1em", textTransform: "uppercase", fontWeight: 600 }}>
+                  Slider devaluación
+                </span>
+                <input
+                  type="range"
+                  min={-20}
+                  max={100}
+                  step={1}
+                  value={customDevPercent}
+                  onChange={(e) => setCustomDevPercent(Number(e.target.value))}
+                  style={{ flex: 1, accentColor: C.accent }}
+                />
+                <span style={{
+                  minWidth: 50,
+                  textAlign: "right",
+                  fontSize: 12,
+                  fontWeight: 600,
+                  color: customDevPercent >= 0 ? C.text : C.cat?.violet || C.muted,
+                  fontVariantNumeric: "tabular-nums",
+                }}>
+                  {customDevPercent >= 0 ? "+" : ""}{customDevPercent}%
+                </span>
+              </div>
+            </div>
+
+            {/* Tabla */}
+            <div style={{ overflowX: "auto", border: `1px solid ${C.border}` }}>
+              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11, fontVariantNumeric: "tabular-nums" }}>
+                <thead>
+                  <tr style={{ background: C.panel }}>
+                    <th style={scenarioHeaderStyle()}>Estrategia</th>
+                    {scenarios.rows.map((r) => (
+                      <th key={`hdr-${r.scenario.id}`} style={scenarioHeaderStyle()}>
+                        <div style={{ fontSize: 11, fontWeight: 600, color: C.text }}>{r.scenario.label}</div>
+                        <div style={{ fontSize: 9, fontWeight: 400, color: C.dim, marginTop: 2 }}>{r.scenario.subLabel}</div>
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {[
+                    { key: "sintetico", label: "S. DLR (con MEP)", sublabel: "hedge cubre dólar" },
+                    { key: "bonoSolo", label: "Bono peso", sublabel: "sin hedge" },
+                    { key: "usd", label: "Quedarte en USD", sublabel: "no hacer nada" },
+                    { key: "caucion", label: "Caución ARS", sublabel: `${(scenarios.caucionTEA * 100).toFixed(1)}% TEA` },
+                  ].map((strat) => (
+                    <tr key={`row-${strat.key}`} style={{ borderTop: `1px solid ${C.border}` }}>
+                      <td style={scenarioCellLabelStyle()}>
+                        <div style={{ fontSize: 11, fontWeight: 600, color: C.text }}>{strat.label}</div>
+                        <div style={{ fontSize: 9, color: C.dim, marginTop: 1 }}>{strat.sublabel}</div>
+                      </td>
+                      {scenarios.rows.map((r) => {
+                        const cell = r.cells[strat.key];
+                        const isWinner = r.winner === strat.key;
+                        return (
+                          <td key={`${strat.key}-${r.scenario.id}`} style={scenarioCellStyle(isWinner)}>
+                            {cell ? (
+                              <>
+                                <div style={{
+                                  fontSize: 12,
+                                  fontWeight: 600,
+                                  color: cell.tea >= 0 ? (isWinner ? C.green : C.text) : C.red,
+                                }}>
+                                  {cell.tea >= 0 ? "+" : ""}{(cell.tea * 100).toFixed(2)}%
+                                </div>
+                                <div style={{
+                                  fontSize: 9,
+                                  color: cell.pct >= 0 ? C.muted : C.red,
+                                  marginTop: 1,
+                                  opacity: 0.85,
+                                }}>
+                                  {cell.pct >= 0 ? "+" : ""}{(cell.pct * 100).toFixed(2)}% en {scenarios.days}d
+                                </div>
+                              </>
+                            ) : (
+                              <span style={{ color: C.dim }}>—</span>
+                            )}
+                          </td>
+                        );
+                      })}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+
+            {/* Texto explicativo dinámico */}
+            {explanation && (
+              <div style={{
+                marginTop: 12,
+                padding: "10px 14px",
+                background: "rgba(91, 141, 214, 0.08)",
+                borderLeft: `3px solid ${C.accent}`,
+              }}>
+                <div style={{
+                  fontSize: 11,
+                  fontWeight: 600,
+                  color: C.accent,
+                  letterSpacing: "0.04em",
+                  textTransform: "uppercase",
+                  marginBottom: 4,
+                }}>
+                  {explanation.title}
+                </div>
+                <div style={{ fontSize: 11.5, color: C.text, lineHeight: 1.55 }}>
+                  {explanation.body}
+                </div>
+              </div>
+            )}
+
+            {/* Leyenda */}
+            <div style={{ marginTop: 10, fontSize: 9.5, color: C.dim, lineHeight: 1.5 }}>
+              Cada celda muestra: <strong style={{ color: C.muted }}>TEA</strong> (rendimiento anualizado, comparable entre bonos) y, en chico, el % absoluto del período. <strong style={{ color: C.green }}>Verde</strong> = mejor estrategia del escenario.
+              <br />
+              <strong style={{ color: C.muted }}>Supuesto del Sintético DLR:</strong> al expiry, MEP converge al precio mayorista (que el futuro replica). En la realidad el gap MEP/mayorista no se cierra del todo, hay un riesgo residual de ±1-3 puntos sobre el resultado del armado.
+            </div>
+          </div>
+        )}
 
         {/* Notas metodológicas */}
         <div style={{ padding: "12px 22px 18px 22px", borderTop: `1px solid ${C.border}`, fontSize: 10.5, color: C.muted, lineHeight: 1.6 }}>
@@ -24146,10 +24476,8 @@ function typeLabel(type) {
   }
 }
 
-
 function formatDate(iso) {
   if (!iso) return "—";
   const d = new Date(iso + "T00:00:00");
   return d.toLocaleDateString("es-AR", { day: "2-digit", month: "short", year: "2-digit" }).replace(/\./g, "");
 }
-
