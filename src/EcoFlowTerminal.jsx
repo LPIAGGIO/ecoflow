@@ -22090,13 +22090,31 @@ function BondDetailModal({ row, spotMayorista, spotMep, futuresLive, curveData, 
   const [caucionRateInput, setCaucionRateInput] = useState(String(defaultCaucionTNA));
   const [customDevPercent, setCustomDevPercent] = useState(0);
 
+  // Horizontes a mostrar en las tablas Single Hedge y Rolling Mensual del modal.
+  // FILTRADO: omitimos los horizontes que exceden el vto del bono. Para un bono
+  // a 36 días, no tiene sentido mostrar 60d/90d/180d porque internamente el cap
+  // a min(horizon, daysAlVto) hace que esas filas tengan exactamente el mismo
+  // número que la fila "Vto", generando 3 filas duplicadas que ensucian la
+  // lectura. Para bonos cortos (S29Y6 a 4d), solo queda visible la fila Vto.
+  // Para bonos largos (T30A7 a 340d), todas las filas se muestran.
   const HORIZONS_DISPLAY = [
-    { id: "30", label: "30 días" },
-    { id: "60", label: "60 días" },
-    { id: "90", label: "90 días" },
-    { id: "180", label: "180 días" },
-    { id: "vto", label: `Vto (${row.days}d)` },
-  ];
+    { id: "30", label: "30 días", days: 30 },
+    { id: "60", label: "60 días", days: 60 },
+    { id: "90", label: "90 días", days: 90 },
+    { id: "180", label: "180 días", days: 180 },
+    { id: "vto", label: `Vto (${row.days}d)`, days: row.days },
+  ].filter((h) => h.id === "vto" || (Number.isFinite(h.days) && h.days < row.days));
+
+  // Si simHorizon heredado de la pantalla principal ya no es válido (ej: pantalla
+  // en "90d", click en S29Y6 a 4d → "90" no aparece más en HORIZONS_DISPLAY),
+  // resetear a "vto" para que el botón quede seleccionado correctamente.
+  useEffect(() => {
+    const validIds = HORIZONS_DISPLAY.map(h => h.id);
+    if (!validIds.includes(simHorizon)) {
+      setSimHorizon("vto");
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [row.days]);
 
   // ─── Cálculo del simulador ──────────────────────────────
   // MODELO: operativa retail real argentina.
@@ -24599,7 +24617,6 @@ function ImplicitRatesChart({ contracts, caucion, remDevTNA }) {
     </div>
   );
 }
-
 
 /* ─────────── Helpers compartidos ─────────── */
 
