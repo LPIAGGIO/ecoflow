@@ -21434,6 +21434,12 @@ function SinteticoDolarModule() {
   const curveData = rowsResult.curveData;
   const futuresLive = rowsResult.futuresLive;
 
+  // Curva DLR con detector de basis (info de MERCADO, no depende del bono).
+  // Se muestra en el menú principal debajo de la tabla de bonos, siempre
+  // visible. El mismo objeto se pasa al modal del bono para mostrar
+  // mini-badges de basis junto a cada DLR usado en el hedge.
+  const dlrCurve = useMemo(() => buildDlrCurve(futuresLive, 0.003), [futuresLive]);
+
   // Sort dinamico: aplica sortKey/sortDir sobre rows. Las filas con
   // valor null/undefined en la columna activa caen al fondo siempre
   // (para no mezclar bonos sin TIR computada entre los buenos).
@@ -22183,6 +22189,218 @@ TIR_USD    = USD_factor^(365/T) − 1`}
         </table>
       </div>
 
+      {/* ═══════════════════════════════════════════════════════════ */}
+      {/* SECCIÓN: CURVA DLR + DETECTOR DE BASIS                       */}
+      {/* (En el menú principal, info de mercado siempre visible)      */}
+      {/* ═══════════════════════════════════════════════════════════ */}
+      {dlrCurve && dlrCurve.points.length >= 2 && (() => {
+        // Constantes de layout del SVG — más grande que en el modal
+        const SVG_W = 1100;
+        const SVG_H = 320;
+        const PAD_LEFT = 70;
+        const PAD_RIGHT = 40;
+        const PAD_TOP = 30;
+        const PAD_BOTTOM = 55;
+        const plotW = SVG_W - PAD_LEFT - PAD_RIGHT;
+        const plotH = SVG_H - PAD_TOP - PAD_BOTTOM;
+
+        const xMin = dlrCurve.points[0].expiryDays;
+        const xMax = dlrCurve.points[dlrCurve.points.length - 1].expiryDays;
+        const xSpan = xMax - xMin;
+
+        const allPrices = dlrCurve.points.flatMap((p) => [p.price, p.priceTheoric]);
+        const yMin = Math.min(...allPrices) * 0.98;
+        const yMax = Math.max(...allPrices) * 1.02;
+        const ySpan = yMax - yMin;
+
+        const xCoord = (days) => PAD_LEFT + ((days - xMin) / xSpan) * plotW;
+        const yCoord = (price) => PAD_TOP + plotH - ((price - yMin) / ySpan) * plotH;
+
+        const pathReal = dlrCurve.points
+          .map((p, i) => `${i === 0 ? "M" : "L"} ${xCoord(p.expiryDays)} ${yCoord(p.price)}`)
+          .join(" ");
+        const pathTheoric = dlrCurve.points
+          .map((p, i) => `${i === 0 ? "M" : "L"} ${xCoord(p.expiryDays)} ${yCoord(p.priceTheoric)}`)
+          .join(" ");
+
+        const yTicks = [0, 0.25, 0.5, 0.75, 1].map((f) => yMin + ySpan * f);
+
+        const colorForStatus = (s) => {
+          if (s === "barato") return C.green;
+          if (s === "caro") return C.red;
+          if (s === "ancla") return C.accent;
+          return C.muted;
+        };
+
+        const baratos = dlrCurve.points.filter((p) => p.status === "barato");
+        const caros = dlrCurve.points.filter((p) => p.status === "caro");
+
+        return (
+          <div style={{ marginTop: 24, padding: "18px 22px 16px 22px", background: C.panel, border: `1px solid ${C.border}` }}>
+            {/* Header */}
+            <div style={{ display: "flex", alignItems: "baseline", gap: 14, marginBottom: 14, flexWrap: "wrap" }}>
+              <h2 style={{ fontSize: 14, fontWeight: 600, color: C.text, margin: 0, letterSpacing: "0.05em", textTransform: "uppercase" }}>
+                Curva DLR · Detector de basis
+              </h2>
+              <span style={{ fontSize: 11.5, color: C.muted }}>
+                Devaluación implícita: <strong style={{ color: C.text }}>{(dlrCurve.monthlyDevRate * 100).toFixed(2)}%</strong> mensual / <strong style={{ color: C.text }}>{(dlrCurve.annualDevRate * 100).toFixed(2)}%</strong> anual
+              </span>
+              {(baratos.length > 0 || caros.length > 0) && (
+                <span style={{ fontSize: 11.5, color: C.muted, marginLeft: "auto" }}>
+                  {baratos.length > 0 && (
+                    <span style={{ color: C.green, fontWeight: 600 }}>
+                      ● {baratos.length} barato{baratos.length > 1 ? "s" : ""}: {baratos.map((p) => p.shortTicker).join(", ")}
+                    </span>
+                  )}
+                  {baratos.length > 0 && caros.length > 0 && <span style={{ color: C.dim, margin: "0 8px" }}>·</span>}
+                  {caros.length > 0 && (
+                    <span style={{ color: C.red, fontWeight: 600 }}>
+                      ● {caros.length} caro{caros.length > 1 ? "s" : ""}: {caros.map((p) => p.shortTicker).join(", ")}
+                    </span>
+                  )}
+                </span>
+              )}
+            </div>
+
+            <div style={{ display: "flex", gap: 22, alignItems: "flex-start", flexWrap: "wrap" }}>
+              {/* Gráfico SVG grande */}
+              <div style={{ flex: "1 1 700px", minWidth: 400 }}>
+                <svg viewBox={`0 0 ${SVG_W} ${SVG_H}`} style={{ width: "100%", height: "auto", maxHeight: 380 }}>
+                  {/* Grid horizontal (ticks Y) */}
+                  {yTicks.map((tick, i) => (
+                    <g key={`yt-${i}`}>
+                      <line
+                        x1={PAD_LEFT}
+                        y1={yCoord(tick)}
+                        x2={SVG_W - PAD_RIGHT}
+                        y2={yCoord(tick)}
+                        stroke={C.border}
+                        strokeWidth="1"
+                        strokeDasharray="2,4"
+                      />
+                      <text
+                        x={PAD_LEFT - 10}
+                        y={yCoord(tick) + 4}
+                        textAnchor="end"
+                        fontSize="11"
+                        fill={C.dim}
+                        fontFamily="'Roboto Mono', monospace"
+                      >
+                        ${tick.toFixed(0)}
+                      </text>
+                    </g>
+                  ))}
+
+                  {/* Curva teórica (punteada) */}
+                  <path
+                    d={pathTheoric}
+                    fill="none"
+                    stroke={C.muted}
+                    strokeWidth="1.8"
+                    strokeDasharray="6,4"
+                    opacity="0.65"
+                  />
+
+                  {/* Curva real (línea continua) */}
+                  <path
+                    d={pathReal}
+                    fill="none"
+                    stroke={C.accent}
+                    strokeWidth="2.5"
+                  />
+
+                  {/* Puntos coloreados */}
+                  {dlrCurve.points.map((p) => {
+                    const cx = xCoord(p.expiryDays);
+                    const cy = yCoord(p.price);
+                    const fill = colorForStatus(p.status);
+                    return (
+                      <g key={`pt-${p.ticker}`}>
+                        <circle cx={cx} cy={cy} r={7} fill={fill} stroke="#0a0e1a" strokeWidth="2.5">
+                          <title>
+                            {p.ticker}: ${p.price.toFixed(2)} (teórico ${p.priceTheoric.toFixed(2)}, basis {p.basisPct >= 0 ? "+" : ""}{p.basisPct.toFixed(2)}%)
+                          </title>
+                        </circle>
+                        {/* Etiqueta del ticker */}
+                        <text
+                          x={cx}
+                          y={SVG_H - PAD_BOTTOM + 18}
+                          textAnchor="middle"
+                          fontSize="11.5"
+                          fill={C.muted}
+                          fontFamily="'Roboto Mono', monospace"
+                          fontWeight="500"
+                        >
+                          {p.shortTicker}
+                        </text>
+                        {/* Basis */}
+                        <text
+                          x={cx}
+                          y={SVG_H - PAD_BOTTOM + 33}
+                          textAnchor="middle"
+                          fontSize="10.5"
+                          fill={fill}
+                          fontFamily="'Roboto Mono', monospace"
+                          fontWeight="600"
+                        >
+                          {p.status === "ancla" ? "⚓" : (p.basisPct >= 0 ? "+" : "") + p.basisPct.toFixed(2) + "%"}
+                        </text>
+                      </g>
+                    );
+                  })}
+
+                  {/* Leyenda */}
+                  <g transform={`translate(${SVG_W - PAD_RIGHT - 175}, ${PAD_TOP + 4})`}>
+                    <line x1="0" y1="6" x2="24" y2="6" stroke={C.accent} strokeWidth="2.5"/>
+                    <text x="30" y="10" fontSize="11" fill={C.muted}>Precio real</text>
+                    <line x1="0" y1="24" x2="24" y2="24" stroke={C.muted} strokeWidth="1.8" strokeDasharray="4,3" opacity="0.65"/>
+                    <text x="30" y="28" fontSize="11" fill={C.muted}>Curva lisa teórica</text>
+                  </g>
+                </svg>
+              </div>
+
+              {/* Tabla compacta de basis */}
+              <div style={{ flex: "0 1 340px", minWidth: 280 }}>
+                <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12, fontVariantNumeric: "tabular-nums" }}>
+                  <thead>
+                    <tr>
+                      <th style={{ textAlign: "left", padding: "6px 8px", color: C.dim, fontSize: 10, letterSpacing: "0.06em", textTransform: "uppercase", fontWeight: 500, borderBottom: `1px solid ${C.border}` }}>DLR</th>
+                      <th style={{ textAlign: "right", padding: "6px 8px", color: C.dim, fontSize: 10, letterSpacing: "0.06em", textTransform: "uppercase", fontWeight: 500, borderBottom: `1px solid ${C.border}` }}>Real</th>
+                      <th style={{ textAlign: "right", padding: "6px 8px", color: C.dim, fontSize: 10, letterSpacing: "0.06em", textTransform: "uppercase", fontWeight: 500, borderBottom: `1px solid ${C.border}` }}>Teórico</th>
+                      <th style={{ textAlign: "right", padding: "6px 8px", color: C.dim, fontSize: 10, letterSpacing: "0.06em", textTransform: "uppercase", fontWeight: 500, borderBottom: `1px solid ${C.border}` }}>Basis</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {dlrCurve.points.map((p) => (
+                      <tr key={`tbl-${p.ticker}`} style={{ borderBottom: `1px solid ${C.border}` }}>
+                        <td style={{ padding: "6px 8px", color: C.text, fontWeight: 500 }}>
+                          <span style={{ color: colorForStatus(p.status), marginRight: 6, fontSize: 13 }}>●</span>
+                          {p.shortTicker}
+                        </td>
+                        <td style={{ padding: "6px 8px", textAlign: "right", color: C.text, fontFamily: "'Roboto Mono', monospace" }}>
+                          {p.price.toFixed(2)}
+                        </td>
+                        <td style={{ padding: "6px 8px", textAlign: "right", color: C.muted, fontFamily: "'Roboto Mono', monospace" }}>
+                          {p.priceTheoric.toFixed(2)}
+                        </td>
+                        <td style={{ padding: "6px 8px", textAlign: "right", color: colorForStatus(p.status), fontWeight: 600, fontFamily: "'Roboto Mono', monospace" }}>
+                          {p.status === "ancla" ? "ancla" : `${p.basisPct >= 0 ? "+" : ""}${p.basisPct.toFixed(2)}%`}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            {/* Nota explicativa al pie */}
+            <div style={{ marginTop: 14, padding: "10px 14px", background: "rgba(91, 141, 214, 0.06)", borderLeft: `2px solid ${C.accentBorder}`, fontSize: 11, color: C.muted, lineHeight: 1.6 }}>
+              <strong style={{ color: C.text }}>Lectura:</strong> la <strong style={{ color: C.text }}>curva lisa teórica</strong> asume devaluación mensual constante entre el primer y último DLR. Un DLR <strong style={{ color: C.green }}>verde</strong> cotiza por debajo de la curva (basis &lt; -0.3%) — hedgear con él captura alfa extra. Un DLR <strong style={{ color: C.red }}>rojo</strong> cotiza encima (basis &gt; +0.3%), se evita como hedge cuando hay alternativa. Las <strong style={{ color: C.accent }}>anclas</strong> (primer y último DLR) definen la curva por construcción.
+            </div>
+          </div>
+        );
+      })()}
+
       {/* Footer */}
       <div style={{ marginTop: 14, fontSize: 10, color: C.dim, letterSpacing: "0.05em", textTransform: "uppercase", fontWeight: 500 }}>
         Fuentes: dolarapi (spot) · Primary (DLR live + settle fallback) · BYMA/data912/MAE (precio bonos) · Tesoro Nacional (pago al vto, actualizado Mi/Ju). La TIR se recalcula sola con cada refresh.
@@ -22211,6 +22429,7 @@ TIR_USD    = USD_factor^(365/T) − 1`}
             selectedHorizon={selectedHorizon}
             selectedStrategy={selectedStrategy}
             shortestBondTir={shortestBondTir}
+            dlrCurve={dlrCurve}
             onClose={() => setExpandedBond(null)}
           />
         );
@@ -22233,7 +22452,7 @@ TIR_USD    = USD_factor^(365/T) − 1`}
  * Es componente externo (no inline IIFE) porque el simulador tiene state
  * propio (monto, estrategia/modelo locales del simulador).
  */
-function BondDetailModal({ row, spotMayorista, spotMep, futuresLive, curveData, selectedHorizon, selectedStrategy, shortestBondTir, onClose }) {
+function BondDetailModal({ row, spotMayorista, spotMep, futuresLive, curveData, selectedHorizon, selectedStrategy, shortestBondTir, dlrCurve, onClose }) {
   // State del simulador (existente). Defaults: ARS 1.000.000, estrategia/horizonte
   // heredados de la pantalla principal, modelo "const" (escenario base).
   //
@@ -22409,10 +22628,6 @@ function BondDetailModal({ row, spotMayorista, spotMep, futuresLive, curveData, 
     };
   }, [simInputAmount, simInputCurrency, simStrategy, simHorizon, simModel, row, spotMayorista, spotMep, futuresLive, curveData]);
 
-  // Curva DLR con detector de basis. Se computa una sola vez por modal
-  // (depende solo de la lista de futuros live, no del bono específico).
-  const dlrCurve = useMemo(() => buildDlrCurve(futuresLive, 0.003), [futuresLive]);
-
   // ─── Comparativa de estrategias (nueva sección) ──────────
   // [...] La comparativa REUTILIZA el ARS al horizonte H que ya calculó
   // el simulador (sim.arsFromBond), porque ese número considera el precio
@@ -22570,6 +22785,33 @@ function BondDetailModal({ row, spotMayorista, spotMep, futuresLive, curveData, 
       <span style={{ color, fontWeight }}>{formatted.text}</span>
     );
   };
+  // Mini-badge de basis para mostrar al lado de un DLR usado en hedge.
+  // Recibe ticker, devuelve un span con dot coloreado + tooltip explicativo.
+  // Si dlrCurve no tiene info de ese ticker (ej: DLR ancla o sin datos),
+  // devuelve null para no agregar nada visual.
+  const basisBadge = (ticker) => {
+    if (!dlrCurve || !dlrCurve.byTicker) return null;
+    const point = dlrCurve.byTicker.get(ticker);
+    if (!point) return null;
+    const colorFor = (s) => {
+      if (s === "barato") return C.green;
+      if (s === "caro") return C.red;
+      if (s === "ancla") return C.accent;
+      return C.muted;
+    };
+    const color = colorFor(point.status);
+    const tooltip = point.status === "ancla"
+      ? `${ticker}: ancla de la curva DLR (basis por construcción = 0)`
+      : `${ticker}: basis ${point.basisPct >= 0 ? "+" : ""}${point.basisPct.toFixed(2)}% vs curva lisa (precio real $${point.price.toFixed(2)}, teórico $${point.priceTheoric.toFixed(2)}). ${point.status === "barato" ? "Hedgear con este DLR captura alfa extra." : point.status === "caro" ? "Hedgear con este DLR tiene prima — evitar si hay alternativa." : "Cotiza alineado con la curva lisa."}`;
+    return (
+      <span
+        title={tooltip}
+        style={{ color, marginLeft: 4, fontSize: 11, cursor: "help", fontWeight: 700 }}
+      >
+        ●
+      </span>
+    );
+  };
   const renderRollingPath = (h) => {
     const rp = row.multiTir?.rollingPaths?.[h];
     if (!rp || !Array.isArray(rp.dlrPath)) return <span style={{ color: C.dim }}>—</span>;
@@ -22579,6 +22821,7 @@ function BondDetailModal({ row, spotMayorista, spotMep, futuresLive, curveData, 
           <span key={idx}>
             {idx > 0 && <span style={{ color: C.dim, margin: "0 4px" }}>→</span>}
             <span style={{ color: C.text }}>{seg.ticker.replace("DLR", "")}</span>
+            {basisBadge(seg.ticker)}
             <span style={{ color: C.dim, fontSize: 9.5, marginLeft: 3 }}>({seg.days}d)</span>
             {seg.isApprox && <span style={{ color: C.cat.violet, marginLeft: 2 }}>⚠</span>}
           </span>
@@ -22737,214 +22980,6 @@ function BondDetailModal({ row, spotMayorista, spotMep, futuresLive, curveData, 
           </div>
         )}
 
-        {/* ═══════════════════════════════════════════════════════════ */}
-        {/* SECCIÓN: CURVA DLR + DETECTOR DE BASIS                       */}
-        {/* ═══════════════════════════════════════════════════════════ */}
-        {dlrCurve && dlrCurve.points.length >= 2 && (() => {
-          // Constantes de layout del SVG
-          const SVG_W = 720;
-          const SVG_H = 220;
-          const PAD_LEFT = 60;
-          const PAD_RIGHT = 30;
-          const PAD_TOP = 20;
-          const PAD_BOTTOM = 40;
-          const plotW = SVG_W - PAD_LEFT - PAD_RIGHT;
-          const plotH = SVG_H - PAD_TOP - PAD_BOTTOM;
-
-          // Rango eje X (días al vto)
-          const xMin = dlrCurve.points[0].expiryDays;
-          const xMax = dlrCurve.points[dlrCurve.points.length - 1].expiryDays;
-          const xSpan = xMax - xMin;
-
-          // Rango eje Y (precio). Padding 3% arriba y abajo.
-          const allPrices = dlrCurve.points.flatMap((p) => [p.price, p.priceTheoric]);
-          const yMin = Math.min(...allPrices) * 0.98;
-          const yMax = Math.max(...allPrices) * 1.02;
-          const ySpan = yMax - yMin;
-
-          // Mappers a coordenadas SVG
-          const xCoord = (days) => PAD_LEFT + ((days - xMin) / xSpan) * plotW;
-          const yCoord = (price) => PAD_TOP + plotH - ((price - yMin) / ySpan) * plotH;
-
-          // Paths
-          const pathReal = dlrCurve.points
-            .map((p, i) => `${i === 0 ? "M" : "L"} ${xCoord(p.expiryDays)} ${yCoord(p.price)}`)
-            .join(" ");
-          const pathTheoric = dlrCurve.points
-            .map((p, i) => `${i === 0 ? "M" : "L"} ${xCoord(p.expiryDays)} ${yCoord(p.priceTheoric)}`)
-            .join(" ");
-
-          // Ticks eje Y (4 valores entre yMin y yMax)
-          const yTicks = [0, 0.33, 0.66, 1].map((f) => yMin + ySpan * f);
-
-          // Color por status
-          const colorForStatus = (s) => {
-            if (s === "barato") return C.green;
-            if (s === "caro") return C.red;
-            if (s === "ancla") return C.accent;
-            return C.muted;
-          };
-
-          // Conteos para el header
-          const baratos = dlrCurve.points.filter((p) => p.status === "barato").length;
-          const caros = dlrCurve.points.filter((p) => p.status === "caro").length;
-
-          return (
-            <div style={{ padding: "16px 22px", borderBottom: `1px solid ${C.border}` }}>
-              {/* Header de la sección */}
-              <div style={{ display: "flex", alignItems: "baseline", gap: 10, marginBottom: 10, flexWrap: "wrap" }}>
-                <h3 style={{ fontSize: 12, fontWeight: 600, color: C.text, margin: 0, letterSpacing: "0.04em", textTransform: "uppercase" }}>
-                  Curva DLR · Detector de basis
-                </h3>
-                <span style={{ fontSize: 10.5, color: C.dim }}>
-                  Devaluación implícita: <strong style={{ color: C.text }}>{(dlrCurve.monthlyDevRate * 100).toFixed(2)}%</strong> mensual / <strong style={{ color: C.text }}>{(dlrCurve.annualDevRate * 100).toFixed(2)}%</strong> anual.
-                </span>
-                {(baratos > 0 || caros > 0) && (
-                  <span style={{ fontSize: 10.5, color: C.dim, marginLeft: "auto" }}>
-                    {baratos > 0 && <span style={{ color: C.green }}>● {baratos} barato{baratos > 1 ? "s" : ""}</span>}
-                    {baratos > 0 && caros > 0 && <span style={{ color: C.dim }}> · </span>}
-                    {caros > 0 && <span style={{ color: C.red }}>● {caros} caro{caros > 1 ? "s" : ""}</span>}
-                  </span>
-                )}
-              </div>
-
-              <div style={{ display: "flex", gap: 16, alignItems: "flex-start", flexWrap: "wrap" }}>
-                {/* Gráfico SVG */}
-                <div style={{ flex: "1 1 500px", minWidth: 320 }}>
-                  <svg viewBox={`0 0 ${SVG_W} ${SVG_H}`} style={{ width: "100%", height: "auto", maxHeight: 260 }}>
-                    {/* Grid horizontal (ticks Y) */}
-                    {yTicks.map((tick, i) => (
-                      <g key={`yt-${i}`}>
-                        <line
-                          x1={PAD_LEFT}
-                          y1={yCoord(tick)}
-                          x2={SVG_W - PAD_RIGHT}
-                          y2={yCoord(tick)}
-                          stroke={C.border}
-                          strokeWidth="1"
-                          strokeDasharray="2,4"
-                        />
-                        <text
-                          x={PAD_LEFT - 8}
-                          y={yCoord(tick) + 4}
-                          textAnchor="end"
-                          fontSize="10"
-                          fill={C.dim}
-                          fontFamily="'Roboto Mono', monospace"
-                        >
-                          ${tick.toFixed(0)}
-                        </text>
-                      </g>
-                    ))}
-
-                    {/* Curva teórica (punteada gris) */}
-                    <path
-                      d={pathTheoric}
-                      fill="none"
-                      stroke={C.muted}
-                      strokeWidth="1.5"
-                      strokeDasharray="5,4"
-                      opacity="0.6"
-                    />
-
-                    {/* Curva real (línea continua) */}
-                    <path
-                      d={pathReal}
-                      fill="none"
-                      stroke={C.accent}
-                      strokeWidth="2"
-                    />
-
-                    {/* Puntos coloreados por status */}
-                    {dlrCurve.points.map((p) => {
-                      const cx = xCoord(p.expiryDays);
-                      const cy = yCoord(p.price);
-                      const fill = colorForStatus(p.status);
-                      return (
-                        <g key={`pt-${p.ticker}`}>
-                          <circle cx={cx} cy={cy} r={5} fill={fill} stroke={C.bg || "#0a0e1a"} strokeWidth="2">
-                            <title>
-                              {p.ticker}: ${p.price.toFixed(2)} (teórico ${p.priceTheoric.toFixed(2)}, basis {p.basisPct >= 0 ? "+" : ""}{p.basisPct.toFixed(2)}%)
-                            </title>
-                          </circle>
-                          {/* Etiqueta debajo */}
-                          <text
-                            x={cx}
-                            y={SVG_H - PAD_BOTTOM + 14}
-                            textAnchor="middle"
-                            fontSize="9.5"
-                            fill={C.dim}
-                            fontFamily="'Roboto Mono', monospace"
-                          >
-                            {p.shortTicker}
-                          </text>
-                          <text
-                            x={cx}
-                            y={SVG_H - PAD_BOTTOM + 26}
-                            textAnchor="middle"
-                            fontSize="9"
-                            fill={fill}
-                            fontFamily="'Roboto Mono', monospace"
-                            fontWeight="600"
-                          >
-                            {p.status === "ancla" ? "⚓" : (p.basisPct >= 0 ? "+" : "") + p.basisPct.toFixed(1) + "%"}
-                          </text>
-                        </g>
-                      );
-                    })}
-
-                    {/* Leyenda inline arriba a la derecha */}
-                    <g transform={`translate(${SVG_W - PAD_RIGHT - 130}, ${PAD_TOP + 4})`}>
-                      <line x1="0" y1="6" x2="18" y2="6" stroke={C.accent} strokeWidth="2"/>
-                      <text x="22" y="9" fontSize="9" fill={C.muted}>Precio real</text>
-                      <line x1="0" y1="20" x2="18" y2="20" stroke={C.muted} strokeWidth="1.5" strokeDasharray="3,3" opacity="0.6"/>
-                      <text x="22" y="23" fontSize="9" fill={C.muted}>Curva lisa teórica</text>
-                    </g>
-                  </svg>
-                </div>
-
-                {/* Tabla compacta de basis */}
-                <div style={{ flex: "1 1 280px", minWidth: 240, maxWidth: 360 }}>
-                  <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11, fontVariantNumeric: "tabular-nums" }}>
-                    <thead>
-                      <tr>
-                        <th style={{ textAlign: "left", padding: "4px 6px", color: C.dim, fontSize: 9.5, letterSpacing: "0.06em", textTransform: "uppercase", fontWeight: 500, borderBottom: `1px solid ${C.border}` }}>DLR</th>
-                        <th style={{ textAlign: "right", padding: "4px 6px", color: C.dim, fontSize: 9.5, letterSpacing: "0.06em", textTransform: "uppercase", fontWeight: 500, borderBottom: `1px solid ${C.border}` }}>Real</th>
-                        <th style={{ textAlign: "right", padding: "4px 6px", color: C.dim, fontSize: 9.5, letterSpacing: "0.06em", textTransform: "uppercase", fontWeight: 500, borderBottom: `1px solid ${C.border}` }}>Teórico</th>
-                        <th style={{ textAlign: "right", padding: "4px 6px", color: C.dim, fontSize: 9.5, letterSpacing: "0.06em", textTransform: "uppercase", fontWeight: 500, borderBottom: `1px solid ${C.border}` }}>Basis</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {dlrCurve.points.map((p) => (
-                        <tr key={`tbl-${p.ticker}`} style={{ borderBottom: `1px solid ${C.border}` }}>
-                          <td style={{ padding: "4px 6px", color: C.text, fontWeight: 500 }}>
-                            <span style={{ color: colorForStatus(p.status), marginRight: 4 }}>●</span>
-                            {p.shortTicker}
-                          </td>
-                          <td style={{ padding: "4px 6px", textAlign: "right", color: C.text, fontFamily: "'Roboto Mono', monospace" }}>
-                            {p.price.toFixed(2)}
-                          </td>
-                          <td style={{ padding: "4px 6px", textAlign: "right", color: C.muted, fontFamily: "'Roboto Mono', monospace" }}>
-                            {p.priceTheoric.toFixed(2)}
-                          </td>
-                          <td style={{ padding: "4px 6px", textAlign: "right", color: colorForStatus(p.status), fontWeight: 600, fontFamily: "'Roboto Mono', monospace" }}>
-                            {p.status === "ancla" ? "ancla" : `${p.basisPct >= 0 ? "+" : ""}${p.basisPct.toFixed(2)}%`}
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
-
-              {/* Nota explicativa al pie */}
-              <div style={{ marginTop: 10, padding: "8px 12px", background: "rgba(91, 141, 214, 0.06)", borderLeft: `2px solid ${C.accentBorder}`, fontSize: 10.5, color: C.muted, lineHeight: 1.55 }}>
-                <strong style={{ color: C.text }}>Lectura:</strong> la <strong style={{ color: C.text }}>curva lisa teórica</strong> asume devaluación mensual constante entre el primer y último DLR. Si un DLR cotiza <strong style={{ color: C.green }}>debajo</strong> de esa curva (basis &lt; -0.3%), está <strong style={{ color: C.green }}>barato</strong> — hedgear con él captura un alfa extra vs la curva lisa. Si cotiza <strong style={{ color: C.red }}>encima</strong> (basis &gt; +0.3%), está <strong style={{ color: C.red }}>caro</strong> — evitar como hedge si tenés alternativa. Las <strong style={{ color: C.accent }}>anclas</strong> (primer y último DLR) definen la curva lisa por construcción.
-              </div>
-            </div>
-          );
-        })()}
-
         {/* Tabla Single hedge */}
         <div style={{ padding: "16px 22px" }}>
           <div style={{ display: "flex", alignItems: "baseline", gap: 10, marginBottom: 8 }}>
@@ -22976,6 +23011,7 @@ function BondDetailModal({ row, spotMayorista, spotMep, futuresLive, curveData, 
                       {sh ? (
                         <>
                           <span style={{ color: C.text }}>{sh.ticker.replace("DLR", "")}</span>
+                          {basisBadge(sh.ticker)}
                           <span style={{ color: C.dim, fontSize: 9.5, marginLeft: 3 }}>({sh.expiryDays}d)</span>
                           {sh.isApprox && <span style={{ color: C.cat.violet, marginLeft: 2 }}>⚠</span>}
                         </>
