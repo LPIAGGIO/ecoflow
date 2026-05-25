@@ -22724,7 +22724,7 @@ function BondDetailModal({ row, spotMayorista, spotMep, futuresLive, curveData, 
       { id: "curva", label: "Curva implícita", subLabel: `MEP al expiry: $${(MEP_hoy * F_hedge / Spot_may).toFixed(2)}`, MEP_exp: MEP_hoy * (F_hedge / Spot_may) },
       { id: "stress", label: "Devaluación +15%", subLabel: `MEP al expiry: $${(MEP_hoy * 1.15).toFixed(2)}`, MEP_exp: MEP_hoy * 1.15 },
       { id: "baja", label: "Dólar baja -5%", subLabel: `MEP al expiry: $${(MEP_hoy * 0.95).toFixed(2)}`, MEP_exp: MEP_hoy * 0.95 },
-      { id: "custom", label: `Slider: +${customDevPercent.toFixed(2)}%`, subLabel: `MEP al expiry: $${(MEP_hoy * (1 + customDevPercent / 100)).toFixed(2)}`, MEP_exp: MEP_hoy * (1 + customDevPercent / 100) },
+      { id: "custom", label: `Custom: ${customDevPercent >= 0 ? "+" : ""}${customDevPercent.toFixed(2)}%`, subLabel: `MEP al expiry: $${(MEP_hoy * (1 + customDevPercent / 100)).toFixed(2)}`, MEP_exp: MEP_hoy * (1 + customDevPercent / 100) },
     ];
 
     // Calcular celdas
@@ -23499,29 +23499,34 @@ function BondDetailModal({ row, spotMayorista, spotMep, futuresLive, curveData, 
                   </span>
                 )}
               </div>
-              <div style={{ display: "flex", alignItems: "center", gap: 8, flex: 1, minWidth: 250 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                 <span style={{ fontSize: 10, color: C.dim, letterSpacing: "0.1em", textTransform: "uppercase", fontWeight: 600 }}>
-                  Slider devaluación
+                  Devaluación
                 </span>
                 <input
-                  type="range"
-                  min={0}
-                  max={5}
-                  step={0.01}
+                  type="number"
                   value={customDevPercent}
                   onChange={(e) => setCustomDevPercent(Number(e.target.value))}
-                  style={{ flex: 1, accentColor: C.accent }}
+                  step="0.25"
+                  style={{
+                    width: 78,
+                    padding: "4px 8px",
+                    background: "transparent",
+                    border: `1px solid ${C.accentBorder}`,
+                    color: C.text,
+                    fontSize: 12,
+                    fontWeight: 600,
+                    textAlign: "right",
+                    fontVariantNumeric: "tabular-nums",
+                    fontFamily: "'Roboto Mono', monospace",
+                  }}
                 />
-                <span style={{
-                  minWidth: 56,
-                  textAlign: "right",
-                  fontSize: 12,
-                  fontWeight: 600,
-                  color: C.text,
-                  fontVariantNumeric: "tabular-nums",
-                }}>
-                  +{customDevPercent.toFixed(2)}%
-                </span>
+                <span style={{ fontSize: 10, color: C.dim }}>%</span>
+                {Number.isFinite(customDevPercent) && spotMep > 0 && (
+                  <span style={{ fontSize: 10, color: C.muted, fontStyle: "italic" }}>
+                    → MEP $ {(spotMep * (1 + customDevPercent / 100)).toFixed(2)}
+                  </span>
+                )}
               </div>
             </div>
 
