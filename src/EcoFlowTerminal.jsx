@@ -22362,12 +22362,22 @@ TIR_USD    = USD_factor^(365/T) − 1`}
                     );
                   })}
 
-                  {/* Leyenda */}
-                  <g transform={`translate(${SVG_W - PAD_RIGHT - 175}, ${PAD_TOP + 4})`}>
-                    <line x1="0" y1="6" x2="24" y2="6" stroke={C.accent} strokeWidth="2.5"/>
-                    <text x="30" y="10" fontSize="11" fill={C.muted}>Precio real</text>
-                    <line x1="0" y1="24" x2="24" y2="24" stroke={C.muted} strokeWidth="1.8" strokeDasharray="4,3" opacity="0.65"/>
-                    <text x="30" y="28" fontSize="11" fill={C.muted}>Curva lisa teórica</text>
+                  {/* Leyenda con cuadro de fondo, borde y fuentes más
+                      legibles. Posicionada arriba a la izquierda para no
+                      interferir con la curva (que avanza hacia abajo-derecha). */}
+                  <g transform={`translate(${PAD_LEFT + 14}, ${PAD_TOP + 4})`}>
+                    <rect
+                      x="0" y="0" width="195" height="56"
+                      fill="rgba(15, 21, 36, 0.85)"
+                      stroke={C.border}
+                      strokeWidth="1"
+                      rx="3"
+                    />
+                    <line x1="12" y1="18" x2="38" y2="18" stroke={C.accent} strokeWidth="3"/>
+                    <circle cx="25" cy="18" r="4" fill={C.accent} stroke="#0a0e1a" strokeWidth="1.5"/>
+                    <text x="46" y="22" fontSize="12" fill={C.text} fontWeight="500">Precio real DLR</text>
+                    <line x1="12" y1="40" x2="38" y2="40" stroke={C.muted} strokeWidth="2" strokeDasharray="5,3" opacity="0.75"/>
+                    <text x="46" y="44" fontSize="12" fill={C.text} fontWeight="500">Curva lisa teórica</text>
                   </g>
                 </svg>
               </div>
@@ -22480,6 +22490,12 @@ function BondDetailModal({ row, spotMayorista, spotMep, futuresLive, curveData, 
   const [simStrategy, setSimStrategy] = useState(selectedStrategy || "rolling");
   const [simHorizon, setSimHorizon] = useState(selectedHorizon || "vto");
   const [simModel, setSimModel] = useState("const");
+  // Override manual del DLR usado en Single Hedge. null = AUTO (mejor DLR
+  // automático según horizonte). String ticker = forzar ese DLR específico.
+  // Útil para basis trading: el usuario ve la curva DLR, identifica un DLR
+  // barato (basis verde), y lo selecciona acá para simular con ese hedge.
+  // Solo aplica a Single Hedge (Rolling cambia DLR mes a mes).
+  const [simSingleDlrOverride, setSimSingleDlrOverride] = useState(null);
 
   // State de la tabla comparativa de estrategias (nueva). Permite al usuario:
   //   - Ajustar la tasa de caución en TNA (default = TNA derivada del bono
@@ -22570,10 +22586,28 @@ function BondDetailModal({ row, spotMayorista, spotMep, futuresLive, curveData, 
         dlrInfo = { type: "rolling", path: r.dlrPath, isApprox: r.isApprox };
       }
     } else {
-      const best = findBestSingleHedgeForHorizon(futuresLive, effH);
-      if (best && Number.isFinite(best.price) && best.price > 0) {
-        fxEffective = best.price;
-        dlrInfo = { type: "single", ticker: best.ticker, price: best.price, expiryDays: best.expiryDays, isApprox: best.isApprox };
+      // Single Hedge. Si hay override manual, usar ese DLR específico.
+      // Si no, usar el "best automatic" (DLR más cercano al horizonte).
+      let chosen = null;
+      if (simSingleDlrOverride) {
+        const manual = futuresLive.find((f) => f.ticker === simSingleDlrOverride);
+        if (manual && Number.isFinite(manual.price) && manual.price > 0) {
+          // Marcamos isApprox si el DLR vence ANTES del horizonte efectivo
+          // (LP eligió un DLR que no cubre todo el plazo del bono — el
+          // cálculo igual usa ese precio pero la cobertura es parcial).
+          const isApprox = manual.expiryDays < effH;
+          chosen = { ticker: manual.ticker, price: manual.price, expiryDays: manual.expiryDays, isApprox, isManual: true };
+        }
+      }
+      if (!chosen) {
+        const best = findBestSingleHedgeForHorizon(futuresLive, effH);
+        if (best && Number.isFinite(best.price) && best.price > 0) {
+          chosen = { ...best, isManual: false };
+        }
+      }
+      if (chosen) {
+        fxEffective = chosen.price;
+        dlrInfo = { type: "single", ticker: chosen.ticker, price: chosen.price, expiryDays: chosen.expiryDays, isApprox: chosen.isApprox, isManual: chosen.isManual };
       }
     }
     if (!Number.isFinite(fxEffective) || fxEffective <= 0) return null;
@@ -22639,7 +22673,7 @@ function BondDetailModal({ row, spotMayorista, spotMep, futuresLive, curveData, 
       effH, daysRemaining, tirArsUsed,
       modelLabel: simModel === "curve" ? "curva" : "const",
     };
-  }, [simInputAmount, simInputCurrency, simStrategy, simHorizon, simModel, row, spotMayorista, spotMep, futuresLive, curveData]);
+  }, [simInputAmount, simInputCurrency, simStrategy, simHorizon, simModel, simSingleDlrOverride, row, spotMayorista, spotMep, futuresLive, curveData]);
 
   // ─── Comparativa de estrategias (nueva sección) ──────────
   // [...] La comparativa REUTILIZA el ARS al horizonte H que ya calculó
@@ -23179,6 +23213,53 @@ function BondDetailModal({ row, spotMayorista, spotMep, futuresLive, curveData, 
               <button onClick={() => setSimModel("const")} style={simToggleBtn(simModel === "const")}>Const</button>
               <button onClick={() => setSimModel("curve")} style={simToggleBtn(simModel === "curve")}>Curva</button>
             </div>
+            {/* Dropdown DLR para override manual (solo aplica a Single Hedge).
+                Sirve para basis trading: ves la curva DLR, identificás un DLR
+                barato (verde), y lo elegís acá para simular con ese hedge.
+                IMPORTANTE: el precio del DLR afecta DIRECTAMENTE el USD final
+                (USD = ARS_final / F_hedge). Un DLR con precio más bajo da MÁS
+                USD final pero puede no cubrir el horizonte (expira antes).
+                El basis (verde/rojo) indica posición vs curva lisa, no precio
+                absoluto — útil para detectar dónde está alineado el mercado. */}
+            {simStrategy === "single" && (
+              <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                <span style={{ fontSize: 10, color: C.dim, letterSpacing: "0.1em", textTransform: "uppercase", fontWeight: 600 }}>DLR</span>
+                <select
+                  value={simSingleDlrOverride || "AUTO"}
+                  onChange={(e) => setSimSingleDlrOverride(e.target.value === "AUTO" ? null : e.target.value)}
+                  style={{
+                    padding: "3px 8px",
+                    background: simSingleDlrOverride ? "rgba(91, 141, 214, 0.10)" : "transparent",
+                    border: `1px solid ${simSingleDlrOverride ? C.accentBorder : C.border}`,
+                    color: simSingleDlrOverride ? C.text : C.muted,
+                    fontSize: 11,
+                    fontWeight: simSingleDlrOverride ? 600 : 500,
+                    letterSpacing: "0.02em",
+                    cursor: "pointer",
+                    fontFamily: "'Roboto Mono', monospace",
+                  }}
+                  title="Cambiá el DLR del hedge para simular distintas coberturas. El precio del DLR afecta directamente el USD final: más bajo = más USD, más alto = menos USD."
+                >
+                  <option value="AUTO">AUTO (por horizonte)</option>
+                  {futuresLive
+                    .filter((f) => Number.isFinite(f.price) && f.price > 0)
+                    .map((f) => {
+                      const cp = dlrCurve && dlrCurve.byTicker ? dlrCurve.byTicker.get(f.ticker) : null;
+                      const tag = cp
+                        ? (cp.status === "barato" ? " ●barato"
+                          : cp.status === "caro" ? " ●caro"
+                          : cp.status === "ancla" ? " ⚓"
+                          : "")
+                        : "";
+                      return (
+                        <option key={f.ticker} value={f.ticker}>
+                          {f.ticker.replace("DLR", "")} ({f.expiryDays}d) — ${f.price.toFixed(2)}{tag}
+                        </option>
+                      );
+                    })}
+                </select>
+              </div>
+            )}
           </div>
 
           {/* Resultado del simulador */}
@@ -23214,8 +23295,19 @@ function BondDetailModal({ row, spotMayorista, spotMep, futuresLive, curveData, 
                 {sim.dlrInfo?.type === "single" && (
                   <div style={{ color: C.muted, marginBottom: 2 }}>
                     <span style={{ color: C.dim, marginRight: 8, fontSize: 10 }}>3.</span>
-                    Hedgeás con futuro <strong style={{ color: C.text }}>{sim.dlrInfo.ticker.replace("DLR", "DLR/")}</strong> a <strong style={{ color: C.text }}>$ {fmtARS(sim.dlrInfo.price)}</strong>.
-                    {sim.dlrInfo.isApprox && <span style={{ color: C.cat.violet, marginLeft: 4 }}>⚠ cobertura aprox</span>}
+                    Hedgeás con futuro <strong style={{ color: C.text }}>{sim.dlrInfo.ticker.replace("DLR", "DLR/")}</strong> a <strong style={{ color: C.text }}>$ {fmtARS(sim.dlrInfo.price)}</strong>
+                    {basisBadge(sim.dlrInfo.ticker)}
+                    {sim.dlrInfo.isManual && (
+                      <span style={{ color: C.accent, marginLeft: 6, fontSize: 10.5, fontStyle: "italic" }}>
+                        (manual)
+                      </span>
+                    )}
+                    {sim.dlrInfo.isApprox && (
+                      <span style={{ color: "#eab308", marginLeft: 6, fontSize: 10.5 }}>
+                        ⚠ DLR vence en {sim.dlrInfo.expiryDays}d, ANTES del horizonte ({sim.effH}d) — cobertura parcial
+                      </span>
+                    )}
+                    .
                   </div>
                 )}
                 {sim.dlrInfo?.type === "rolling" && (
