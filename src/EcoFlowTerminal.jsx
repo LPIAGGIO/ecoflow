@@ -1154,6 +1154,24 @@ const fmtARS = (n) =>
 const fmtPct = (n) =>
   n == null ? "—" : `${n >= 0 ? "+" : ""}${n.toFixed(2)}%`;
 
+// TEA cap: cuando un retorno corto se anualiza, puede dar números absurdos
+// (ej: S29Y6 a 4 días con +2,1% absoluto = +573% TEA).
+// Para evitar confusión visual, capeamos al ±99,9% con marca > o < y
+// emoji de advertencia. El tooltip explica que la TEA no es realizable
+// para horizontes cortos (necesitaría rolear infinitamente).
+const TEA_CAP_THRESHOLD = 0.999; // 99,9%
+function formatTeaWithCap(tea, opts = {}) {
+  if (tea == null || !Number.isFinite(tea)) return { text: "—", isCapped: false, raw: null };
+  const pct = tea * 100;
+  if (tea > TEA_CAP_THRESHOLD) {
+    return { text: ">+99%", isCapped: true, raw: pct, sign: 1 };
+  }
+  if (tea < -TEA_CAP_THRESHOLD) {
+    return { text: "<-99%", isCapped: true, raw: pct, sign: -1 };
+  }
+  return { text: `${pct >= 0 ? "+" : ""}${pct.toFixed(2)}%`, isCapped: false, raw: pct };
+}
+
 function timeAgo(date, now) {
   if (!date) return "—";
   const seconds = Math.floor((now - date) / 1000);
@@ -21897,19 +21915,30 @@ TIR_USD    = USD_factor^(365/T) − 1`}
                       if (!Number.isFinite(tirHere)) {
                         return <span style={{ color: C.dim, fontWeight: 400 }}>—</span>;
                       }
+                      const formatted = formatTeaWithCap(tirHere);
                       if (row.isBontamAbovePremium) {
                         return (
                           <span
                             style={{ color: C.muted, fontWeight: 500, cursor: "help" }}
                             title="El mercado paga prima sobre el piso de tasa fija. La TIR USD mostrada es la del peor caso — el sintético real probablemente rinda más si TAMAR queda arriba."
                           >
-                            {tirHere >= 0 ? "+" : ""}{fmtPct(tirHere * 100)}
+                            {formatted.text}
+                          </span>
+                        );
+                      }
+                      if (formatted.isCapped) {
+                        return (
+                          <span
+                            style={{ color: tirHere > 0 ? C.green : C.red, cursor: "help" }}
+                            title={`TEA real ≈ ${formatted.raw.toFixed(2)}%. Capeada visualmente: al anualizar un retorno corto da números irrealizables (necesitarías rolear ese ritmo todo el año). Mirá el % del período en el detalle del bono para la decisión real.`}
+                          >
+                            {formatted.text}
                           </span>
                         );
                       }
                       return (
                         <span style={{ color: tirHere > 0 ? C.green : C.red }}>
-                          {tirHere >= 0 ? "+" : ""}{fmtPct(tirHere * 100)}
+                          {formatted.text}
                         </span>
                       );
                     })()}
@@ -21919,19 +21948,28 @@ TIR_USD    = USD_factor^(365/T) − 1`}
                       // Peak: horizonte óptimo y TIR pico del bono bajo la
                       // estrategia seleccionada (modelo const). Lectura tipo
                       // "este bono rinde mejor en 90d que aguantado al vto".
+                      // Mostramos ADEMÁS el % absoluto del período para que el
+                      // usuario entienda que TEA grande con horizonte chico
+                      // ≠ más USD reales. Ej: T30A7 Rolling Peak 30d +31.90%
+                      // suena más jugoso que Vto +14.03%, pero en USD absolutos
+                      // aguantar al vto da MÁS dinero.
                       const peak = row.peakConst;
                       if (!peak || !Number.isFinite(peak.tir)) {
                         return <span style={{ color: C.dim }}>—</span>;
                       }
                       const isCurrentBest = peak.horizon === selectedHorizon;
                       const horizonLabel = peak.horizon === "vto" ? "vto" : `${peak.horizon}d`;
+                      const peakFormatted = formatTeaWithCap(peak.tir);
+                      // % absoluto del período del peak: (1 + tea)^(días/365) - 1
+                      const peakDays = peak.horizon === "vto" ? row.days : Number(peak.horizon);
+                      const pctPeriod = Number.isFinite(peakDays) && peakDays > 0 && Number.isFinite(peak.tir)
+                        ? Math.pow(1 + peak.tir, peakDays / 365) - 1
+                        : null;
+                      const tooltip = isCurrentBest
+                        ? `El horizonte seleccionado YA es el pico para este bono.`
+                        : `Mejor TEA anualizada saliendo a ${horizonLabel}. OJO: la TEA alta de un horizonte corto NO significa más USD absolutos. Mirá el detalle del bono para comparar resultados realmente comparables.`;
                       return (
-                        <span
-                          title={isCurrentBest
-                            ? `El horizonte seleccionado YA es el pico para este bono.`
-                            : `El mejor rendimiento de este bono en USD se da saliendo a ${horizonLabel}, no al horizonte que estás mirando ahora.`}
-                          style={{ cursor: "help" }}
-                        >
+                        <span title={tooltip} style={{ cursor: "help" }}>
                           <span style={{ fontSize: 10.5, color: C.dim, marginRight: 5, letterSpacing: "0.04em" }}>
                             {horizonLabel}
                           </span>
@@ -21939,8 +21977,19 @@ TIR_USD    = USD_factor^(365/T) − 1`}
                             color: row.isBontamAbovePremium ? C.muted : (peak.tir > 0 ? C.green : C.red),
                             fontWeight: 600,
                           }}>
-                            {peak.tir >= 0 ? "+" : ""}{fmtPct(peak.tir * 100)}
+                            {peakFormatted.text}
                           </span>
+                          {pctPeriod != null && !row.isBontamAbovePremium && (
+                            <span style={{
+                              color: C.dim,
+                              fontSize: 9.5,
+                              marginLeft: 5,
+                              fontWeight: 400,
+                              fontStyle: "italic",
+                            }}>
+                              ({pctPeriod >= 0 ? "+" : ""}{(pctPeriod * 100).toFixed(2)}% real)
+                            </span>
+                          )}
                         </span>
                       );
                     })()}
@@ -22293,21 +22342,30 @@ function BondDetailModal({ row, spotMayorista, spotMep, futuresLive, curveData, 
   }, [scenarios]);
 
   // ─── Helpers de render ──────────────────────────────────
+  // Renderer de TEA con cap visual a ±99,9% y tooltip explicativo cuando
+  // el horizonte corto la hace explotar (ej: S29Y6 a 4d con +2.1% absoluto
+  // = +573% TEA anualizada — matematicamente correcto, operativamente irrealizable).
   const renderTirCell = (v) => {
     if (!Number.isFinite(v)) {
       return <span style={{ color: C.dim }}>—</span>;
     }
-    if (row.isBontamAbovePremium) {
+    const formatted = formatTeaWithCap(v);
+    const color = row.isBontamAbovePremium
+      ? C.muted
+      : (v > 0 ? C.green : C.red);
+    const fontWeight = row.isBontamAbovePremium ? 500 : 600;
+    if (formatted.isCapped) {
       return (
-        <span style={{ color: C.muted, fontWeight: 500 }}>
-          {v >= 0 ? "+" : ""}{fmtPct(v * 100)}
+        <span
+          style={{ color, fontWeight, cursor: "help" }}
+          title={`TEA real ≈ ${formatted.raw.toFixed(2)}%. Capeada visualmente porque al anualizar un retorno corto da números irrealizables. Mirá el % absoluto del período para la decisión real.`}
+        >
+          {formatted.text}
         </span>
       );
     }
     return (
-      <span style={{ color: v > 0 ? C.green : C.red, fontWeight: 600 }}>
-        {v >= 0 ? "+" : ""}{fmtPct(v * 100)}
-      </span>
+      <span style={{ color, fontWeight }}>{formatted.text}</span>
     );
   };
   const renderRollingPath = (h) => {
@@ -22764,9 +22822,25 @@ function BondDetailModal({ row, spotMayorista, spotMep, futuresLive, curveData, 
                   <div style={{ fontSize: 9.5, color: C.dim, letterSpacing: "0.1em", textTransform: "uppercase", fontWeight: 600 }}>
                     TIR USD anualizada
                   </div>
-                  <div style={{ fontSize: 17, fontWeight: 700, color: sim.tirUsdAnnualized > 0 ? C.green : C.red, marginTop: 2 }}>
-                    {sim.tirUsdAnnualized >= 0 ? "+" : ""}{fmtPct((sim.tirUsdAnnualized || 0) * 100)}
-                  </div>
+                  {(() => {
+                    const teaFmt = formatTeaWithCap(sim.tirUsdAnnualized);
+                    return (
+                      <div
+                        style={{
+                          fontSize: 17,
+                          fontWeight: 700,
+                          color: sim.tirUsdAnnualized > 0 ? C.green : C.red,
+                          marginTop: 2,
+                          cursor: teaFmt.isCapped ? "help" : "default",
+                        }}
+                        title={teaFmt.isCapped
+                          ? `TEA real ≈ ${teaFmt.raw.toFixed(2)}%. Capeada por horizonte corto. Para entender la ganancia real mirá los USD ganados/perdidos en absoluto.`
+                          : undefined}
+                      >
+                        {teaFmt.text}
+                      </div>
+                    );
+                  })()}
                   <div style={{ fontSize: 11, color: C.muted, marginTop: 1 }}>
                     USD final: <strong style={{ color: C.text }}>{fmtARS(sim.usdFinal)}</strong>
                   </div>
@@ -22878,16 +22952,23 @@ function BondDetailModal({ row, spotMayorista, spotMep, futuresLive, curveData, 
                       {scenarios.rows.map((r) => {
                         const cell = r.cells[strat.key];
                         const isWinner = r.winner === strat.key;
+                        const teaFormatted = cell ? formatTeaWithCap(cell.tea) : null;
                         return (
                           <td key={`${strat.key}-${r.scenario.id}`} style={scenarioCellStyle(isWinner)}>
                             {cell ? (
                               <>
-                                <div style={{
-                                  fontSize: 12,
-                                  fontWeight: 600,
-                                  color: cell.tea >= 0 ? (isWinner ? C.green : C.text) : C.red,
-                                }}>
-                                  {cell.tea >= 0 ? "+" : ""}{(cell.tea * 100).toFixed(2)}%
+                                <div
+                                  style={{
+                                    fontSize: 12,
+                                    fontWeight: 600,
+                                    color: cell.tea >= 0 ? (isWinner ? C.green : C.text) : C.red,
+                                    cursor: teaFormatted.isCapped ? "help" : "default",
+                                  }}
+                                  title={teaFormatted.isCapped
+                                    ? `TEA real ≈ ${teaFormatted.raw.toFixed(2)}%. Capeada porque al anualizar un retorno extremo de un horizonte corto da números irrealizables. Mirá el % del período abajo para la decisión real.`
+                                    : undefined}
+                                >
+                                  {teaFormatted.text}
                                 </div>
                                 <div style={{
                                   fontSize: 9,
