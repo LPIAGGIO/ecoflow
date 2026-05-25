@@ -1171,17 +1171,30 @@ const fmtARS = (n) =>
 function formatAmountInput(raw) {
   if (raw == null) return "";
   let s = String(raw);
-  // Heurística "punto al final" o "1 punto + <3 dígitos después + sin coma"
-  // → es intento de decimal → convertir ese punto a coma. Los demás puntos
-  // se asumen separadores de miles y se eliminan abajo.
-  const dotCount = (s.match(/\./g) || []).length;
-  if (dotCount === 1 && !s.includes(",")) {
+  // Heurística: si NO hay coma todavía y el ÚLTIMO punto tiene menos
+  // de 3 dígitos después (incluyendo 0 dígitos = punto al final), es
+  // intento de decimal. Convertimos ese último "." a ",". Los demás
+  // puntos (si los hay) se eliminan abajo como separadores de miles.
+  //
+  // Casos manejados:
+  //   "1500"            → sin punto, sin coma → no cambio
+  //   "1500."           → último punto, 0 dígitos después → decimal
+  //   "1500.5"          → último punto, 1 dígito (formato US) → decimal
+  //   "1.500"           → último punto, 3 dígitos → AMBIGUO, asumir miles
+  //   "1.500."          → último punto, 0 dígitos → decimal (el otro "." es miles)
+  //   "100.000."        → último punto, 0 dígitos → decimal (los otros son miles)
+  //   "1.500.000"       → último punto, 3 dígitos → miles
+  //   "1.234,56"        → hay coma → ignorar puntos (todos son miles)
+  if (!s.includes(",")) {
     const lastDot = s.lastIndexOf(".");
-    const after = s.slice(lastDot + 1);
-    // Si después del punto hay <3 dígitos (incluyendo 0), es decimal.
-    // Si hay exactamente 3 dígitos, es separador de miles (no convertir).
-    if (after.length < 3) {
-      s = s.slice(0, lastDot) + "," + after;
+    if (lastDot !== -1) {
+      const after = s.slice(lastDot + 1);
+      // 0, 1 o 2 dígitos después del último punto = intento de decimal
+      if (after.length < 3) {
+        s = s.slice(0, lastDot) + "," + after;
+      }
+      // 3 dígitos = ambiguo, asumir separador de miles (no convertir)
+      // 4+ dígitos = separador de miles raro, no convertir
     }
   }
   // Quitar puntos (separadores de miles que se recrearán al final)
