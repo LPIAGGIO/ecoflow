@@ -22278,11 +22278,11 @@ function BondDetailModal({ row, spotMayorista, spotMep, futuresLive, curveData, 
 
     // Definición de los escenarios de MEP_expiry
     const scenarioDefs = [
-      { id: "plano", label: "Dólar plano", subLabel: "MEP = hoy", MEP_exp: MEP_hoy },
-      { id: "curva", label: "Curva implícita", subLabel: `MEP = ${(MEP_hoy * F_hedge / Spot_may).toFixed(2)}`, MEP_exp: MEP_hoy * (F_hedge / Spot_may) },
-      { id: "stress", label: "Devaluación +15%", subLabel: `MEP = ${(MEP_hoy * 1.15).toFixed(2)}`, MEP_exp: MEP_hoy * 1.15 },
-      { id: "baja", label: "Dólar baja -5%", subLabel: `MEP = ${(MEP_hoy * 0.95).toFixed(2)}`, MEP_exp: MEP_hoy * 0.95 },
-      { id: "custom", label: `Slider: +${customDevPercent.toFixed(2)}%`, subLabel: `MEP = ${(MEP_hoy * (1 + customDevPercent / 100)).toFixed(2)}`, MEP_exp: MEP_hoy * (1 + customDevPercent / 100) },
+      { id: "plano", label: "Dólar plano", subLabel: "MEP al expiry = hoy", MEP_exp: MEP_hoy },
+      { id: "curva", label: "Curva implícita", subLabel: `MEP al expiry: $${(MEP_hoy * F_hedge / Spot_may).toFixed(2)}`, MEP_exp: MEP_hoy * (F_hedge / Spot_may) },
+      { id: "stress", label: "Devaluación +15%", subLabel: `MEP al expiry: $${(MEP_hoy * 1.15).toFixed(2)}`, MEP_exp: MEP_hoy * 1.15 },
+      { id: "baja", label: "Dólar baja -5%", subLabel: `MEP al expiry: $${(MEP_hoy * 0.95).toFixed(2)}`, MEP_exp: MEP_hoy * 0.95 },
+      { id: "custom", label: `Slider: +${customDevPercent.toFixed(2)}%`, subLabel: `MEP al expiry: $${(MEP_hoy * (1 + customDevPercent / 100)).toFixed(2)}`, MEP_exp: MEP_hoy * (1 + customDevPercent / 100) },
     ];
 
     // Calcular celdas
@@ -22836,7 +22836,7 @@ function BondDetailModal({ row, spotMayorista, spotMep, futuresLive, curveData, 
                     {sim.usdProfit >= 0 ? "+" : ""}USD {fmtARS(sim.usdProfit)}
                   </div>
                   <div style={{ fontSize: 11, color: C.muted, marginTop: 1 }}>
-                    {sim.usdPct >= 0 ? "+" : ""}{fmtPct(sim.usdPct * 100)} en USD MEP
+                    {sim.usdPct >= 0 ? "+" : ""}{fmtPct(sim.usdPct * 100)} sobre tu USD inicial
                   </div>
                 </div>
                 {/* Columna TIR */}
@@ -22868,6 +22868,52 @@ function BondDetailModal({ row, spotMayorista, spotMep, futuresLive, curveData, 
                   </div>
                 </div>
               </div>
+
+              {/* Descomposición educativa del USD profit:
+                  alfa del bono (TIR ARS / MEP) + alfa del gap MEP↔F_hedge.
+                  Le explica al usuario por qué el USD profit NO es simplemente
+                  el ARS profit dividido por un FX. Hay dos componentes. */}
+              {(() => {
+                const arsProfit = sim.arsProfit;
+                const MEP = sim.fxEntry;
+                const F = sim.fxEffective;
+                const arsFromBond = sim.arsFromBond;
+                if (!Number.isFinite(arsProfit) || !Number.isFinite(MEP) || !Number.isFinite(F) || !Number.isFinite(arsFromBond)) return null;
+                // Componente 1: ARS profit valuado al MEP entrada (rendimiento puro del bono en USD).
+                const usdAlfaBono = arsProfit / MEP;
+                // Componente 2: alfa del gap MEP vs F_hedge.
+                //   arsFromBond / F_hedge - arsFromBond / MEP = arsFromBond × (MEP - F) / (MEP × F)
+                const usdAlfaGap = arsFromBond * (MEP - F) / (MEP * F);
+                const totalCheck = usdAlfaBono + usdAlfaGap;
+                const gapSign = F < MEP ? "favorable" : (F > MEP ? "negativo" : "nulo");
+                const gapColor = F < MEP ? C.green : (F > MEP ? C.red : C.muted);
+                return (
+                  <div style={{
+                    marginTop: 14,
+                    padding: "10px 14px",
+                    background: "rgba(91, 141, 214, 0.06)",
+                    borderLeft: `2px solid ${C.accentBorder}`,
+                    fontSize: 11,
+                    color: C.muted,
+                    lineHeight: 1.6,
+                  }}>
+                    <div style={{ fontSize: 10, color: C.dim, letterSpacing: "0.1em", textTransform: "uppercase", fontWeight: 600, marginBottom: 5 }}>
+                      ¿De dónde salen los USD {fmtARS(sim.usdProfit)}?
+                    </div>
+                    <div>
+                      <span style={{ color: C.text, fontWeight: 600 }}>1) Rendimiento del bono en USD:</span> ARS profit ($ {fmtARS(arsProfit)}) ÷ MEP entrada ($ {fmtARS(MEP)}) = <strong style={{ color: C.text }}>USD {fmtARS(usdAlfaBono)}</strong>
+                    </div>
+                    <div>
+                      <span style={{ color: C.text, fontWeight: 600 }}>2) Alfa del gap MEP vs F_hedge</span> <span style={{ color: gapColor }}>({gapSign})</span>:
+                      el F_hedge ($ {fmtARS(F)}) está {F < MEP ? "más BARATO" : (F > MEP ? "más CARO" : "igual")} que el MEP de hoy ($ {fmtARS(MEP)}), gap de $ {(MEP - F).toFixed(2)}.
+                      Eso suma <strong style={{ color: gapColor }}>{usdAlfaGap >= 0 ? "+" : ""}USD {fmtARS(usdAlfaGap)}</strong> al armado.
+                    </div>
+                    <div style={{ marginTop: 4, paddingTop: 4, borderTop: `1px solid ${C.border}` }}>
+                      <strong style={{ color: C.text }}>Total:</strong> USD {fmtARS(usdAlfaBono)} + USD {fmtARS(usdAlfaGap)} = <strong style={{ color: sim.usdProfit >= 0 ? C.green : C.red }}>{sim.usdProfit >= 0 ? "+" : ""}USD {fmtARS(sim.usdProfit)}</strong>
+                    </div>
+                  </div>
+                );
+              })()}
             </div>
           ) : (
             <div style={{ padding: "14px 18px", background: C.panel, border: `1px solid ${C.border}`, fontSize: 12, color: C.muted }}>
@@ -22961,7 +23007,7 @@ function BondDetailModal({ row, spotMayorista, spotMep, futuresLive, curveData, 
                 </thead>
                 <tbody>
                   {[
-                    { key: "sintetico", label: "S. DLR (con MEP)", sublabel: "hedge cubre dólar" },
+                    { key: "sintetico", label: "Sintético DLR", sublabel: "bono peso + Fut DLR" },
                     { key: "bonoSolo", label: "Bono peso", sublabel: "sin hedge" },
                     { key: "usd", label: "Quedarte en USD", sublabel: "no hacer nada" },
                     { key: "caucion", label: "Caución ARS", sublabel: `${(scenarios.caucionTNA * 100).toFixed(1)}% TNA` },
