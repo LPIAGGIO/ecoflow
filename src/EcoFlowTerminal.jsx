@@ -21961,9 +21961,17 @@ TIR_USD    = USD_factor^(365/T) − 1`}
                       const horizonLabel = peak.horizon === "vto" ? "vto" : `${peak.horizon}d`;
                       const peakFormatted = formatTeaWithCap(peak.tir);
                       // % absoluto del período del peak: (1 + tea)^(días/365) - 1
-                      const peakDays = peak.horizon === "vto" ? row.days : Number(peak.horizon);
-                      const pctPeriod = Number.isFinite(peakDays) && peakDays > 0 && Number.isFinite(peak.tir)
-                        ? Math.pow(1 + peak.tir, peakDays / 365) - 1
+                      // OJO: usamos efDays = min(horizonteSolicitado, díasAlVto).
+                      // Si el horizonte solicitado supera el vto del bono (ej:
+                      // Peak "30d" en S29Y6 que vence a 4d), el bono ya está
+                      // vencido, así que efDays = 4. Antes calculábamos con
+                      // peakDays directo y daba % período irrealmente altos.
+                      const peakHorizonReq = peak.horizon === "vto" ? row.days : Number(peak.horizon);
+                      const effDays = (Number.isFinite(peakHorizonReq) && Number.isFinite(row.days))
+                        ? Math.min(peakHorizonReq, row.days)
+                        : null;
+                      const pctPeriod = (Number.isFinite(effDays) && effDays > 0 && Number.isFinite(peak.tir))
+                        ? Math.pow(1 + peak.tir, effDays / 365) - 1
                         : null;
                       const tooltip = isCurrentBest
                         ? `El horizonte seleccionado YA es el pico para este bono.`
@@ -22208,27 +22216,13 @@ function BondDetailModal({ row, spotMayorista, spotMep, futuresLive, curveData, 
   }, [simInputAmount, simInputCurrency, simStrategy, simHorizon, simModel, row, spotMayorista, spotMep, futuresLive, curveData]);
 
   // ─── Comparativa de estrategias (nueva sección) ──────────
-  // Para una persona no-economista: tabla con 4 estrategias × 5
-  // escenarios de evolución del dólar, para decidir qué le conviene.
-  //
-  // Estrategias:
-  //   1) Sintético DLR con MEP (entrada con MEP, salida al FX hedge,
-  //      asumiendo convergencia mayorista=MEP al expiry).
-  //   2) Bono peso sin hedge (entrada MEP, salida MEP del momento).
-  //   3) Quedarte en USD (no hacer nada).
-  //   4) Caución ARS (entra MEP, capitaliza a tasa, sale MEP del momento).
-  //
-  // Escenarios de evolución del dólar (afectan MEP_expiry):
-  //   - Plano: MEP_expiry = MEP_hoy.
-  //   - Curva implícita: MEP_expiry = MEP_hoy × (F_hedge / Spot_mayorista_hoy).
-  //   - +15%: MEP_expiry = MEP_hoy × 1.15.
-  //   - -5%: MEP_expiry = MEP_hoy × 0.95.
-  //   - Custom slider: MEP_expiry = MEP_hoy × (1 + customDevPercent/100).
-  //
-  // Para el Sintético DLR: la fórmula NO depende del escenario porque
-  // está hedgeado (asumimos convergencia MEP_expiry = F_hedge). Por eso
-  // la columna del Sintético es PLANA — esa es la magia visual que le
-  // explica al usuario qué hace el hedge.
+  // [...] La comparativa REUTILIZA el ARS al horizonte H que ya calculó
+  // el simulador (sim.arsFromBond), porque ese número considera el precio
+  // del bono al horizonte (interpolado con el modelo elegido), NO el M
+  // del vto. Si la comparativa usara M directo, sobreestimaría el
+  // rendimiento cuando LP elige horizonte != vto (bug detectado en
+  // captura de Rolling 30d donde simulador daba +31.50% pero comparativa
+  // daba +37.99% por usar M en lugar de priceAtH).
   const scenarios = useMemo(() => {
     if (!sim) return null;
     const amount = Number(simInputAmount);
@@ -22237,20 +22231,13 @@ function BondDetailModal({ row, spotMayorista, spotMep, futuresLive, curveData, 
     if (!Number.isFinite(MEP_hoy) || MEP_hoy <= 0) return null;
     const Spot_may = spotMayorista;
     const F_hedge = sim.fxEffective;
-    const bondPrice = row.bondPrice;
-    const M = row.maturityPayment;
     const days = sim.effH; // horizonte efectivo del simulador
-    if (!Number.isFinite(F_hedge) || F_hedge <= 0 || !Number.isFinite(M) || M <= 0 || !Number.isFinite(bondPrice) || bondPrice <= 0 || days <= 0) return null;
+    if (!Number.isFinite(F_hedge) || F_hedge <= 0 || days <= 0) return null;
 
-    // Capital inicial (común para todas las estrategias)
-    let usdIn, arsIn;
-    if (simInputCurrency === "USD") {
-      usdIn = amount;
-      arsIn = amount * MEP_hoy;
-    } else {
-      arsIn = amount;
-      usdIn = amount / MEP_hoy;
-    }
+    // Capital inicial (común para todas las estrategias). Reutilizamos
+    // los números del simulador para evitar inconsistencias.
+    const usdIn = sim.usdEquivalentEntry;
+    const arsIn = sim.arsCapital;
     if (!Number.isFinite(usdIn) || usdIn <= 0) return null;
 
     // Tasa de caución (input en TNA decimal). Default desde defaultCaucionTNA.
@@ -22259,9 +22246,10 @@ function BondDetailModal({ row, spotMayorista, spotMep, futuresLive, curveData, 
     // TEA derivada (capitalización diaria), para mostrar como info.
     const caucionTEA = Math.pow(1 + caucionTNAvalid / 365, 365) - 1;
 
-    // ARS al horizonte H para cada estrategia
-    const factorBono = M / bondPrice;
-    const ARS_at_H_bono = arsIn * factorBono;
+    // ARS al horizonte H para el bono = lo que ya calculó el simulador
+    // (precio interpolado al horizonte, según modelo elegido). NO usar
+    // M directo porque se rompe cuando horizonte != vto.
+    const ARS_at_H_bono = sim.arsFromBond;
     // Caución: capitalización diaria sobre N días.
     //   factor = (1 + TNA/365)^N
     // (Asume rolear todos los días, que es lo típico de la caución bursátil
