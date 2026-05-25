@@ -1151,6 +1151,69 @@ const fmtARS = (n) =>
         maximumFractionDigits: 2,
       });
 
+// Helpers de máscara para inputs de monto en formato AR.
+// Acepta dígitos + UNA coma decimal. Separadores de miles "." se insertan
+// automáticamente. Si el usuario tipea "." con intención de decimal, lo
+// convertimos a "," (heurística: 1 punto, sin coma, menos de 3 dígitos después).
+//
+// Casos típicos:
+//   "1000000"     → "1.000.000"
+//   "1500,5"      → "1.500,5"
+//   "1500."       → "1.500,"        (punto al final = decimal, lo convertimos)
+//   "1500.5"      → "1.500,5"       (formato US, 1 punto + 1 dígito = decimal)
+//   "1.500"       → "1.500"         (3 dígitos después = separador miles, se mantiene)
+//   "1.500.000"   → "1.500.000"     (2+ puntos = separadores miles)
+//   "1.234,56"    → "1.234,56"      (paste de formato AR completo)
+//
+// Uso:
+//   <input value={simInputAmount} onChange={(e) => setSimInputAmount(formatAmountInput(e.target.value))} />
+//   const amount = parseAmountString(simInputAmount);
+function formatAmountInput(raw) {
+  if (raw == null) return "";
+  let s = String(raw);
+  // Heurística "punto al final" o "1 punto + <3 dígitos después + sin coma"
+  // → es intento de decimal → convertir ese punto a coma. Los demás puntos
+  // se asumen separadores de miles y se eliminan abajo.
+  const dotCount = (s.match(/\./g) || []).length;
+  if (dotCount === 1 && !s.includes(",")) {
+    const lastDot = s.lastIndexOf(".");
+    const after = s.slice(lastDot + 1);
+    // Si después del punto hay <3 dígitos (incluyendo 0), es decimal.
+    // Si hay exactamente 3 dígitos, es separador de miles (no convertir).
+    if (after.length < 3) {
+      s = s.slice(0, lastDot) + "," + after;
+    }
+  }
+  // Quitar puntos (separadores de miles que se recrearán al final)
+  s = s.replace(/\./g, "");
+  // Solo dígitos y comas
+  s = s.replace(/[^\d,]/g, "");
+  // Permitir SOLO UNA coma (la primera)
+  const firstComma = s.indexOf(",");
+  if (firstComma !== -1) {
+    s = s.slice(0, firstComma + 1) + s.slice(firstComma + 1).replace(/,/g, "");
+  }
+  // Parte entera vs decimal
+  const [intPartRaw = "", decPart = null] = s.split(",");
+  // Quitar ceros leading (excepto si toda la cadena es "0")
+  let intPart = intPartRaw.replace(/^0+/, "");
+  if (intPart === "" && intPartRaw.length > 0) intPart = "0";
+  // Aplicar separadores de miles
+  intPart = intPart.replace(/\B(?=(\d{3})+(?!\d))/g, ".");
+  // Limitar decimales a 2
+  const dec = decPart != null ? decPart.slice(0, 2) : null;
+  if (decPart !== null) return `${intPart || "0"},${dec}`;
+  return intPart;
+}
+
+function parseAmountString(str) {
+  if (str == null || str === "") return 0;
+  // "1.000.000,50" → quitar puntos (miles) → "1000000,50" → coma a punto → 1000000.50
+  const cleaned = String(str).replace(/\./g, "").replace(",", ".");
+  const n = parseFloat(cleaned);
+  return Number.isFinite(n) ? n : 0;
+}
+
 const fmtPct = (n) =>
   n == null ? "—" : `${n >= 0 ? "+" : ""}${n.toFixed(2)}%`;
 
@@ -22067,8 +22130,10 @@ function BondDetailModal({ row, spotMayorista, spotMep, futuresLive, curveData, 
   // real (los bonos peso se compran con pesos; si tenes USD, primero los
   // vendes a MEP y despues comprás). USD queda como opcion para
   // simulaciones tipo "que pasa si entro hoy con X USD".
+  // State del simulador. simInputAmount es STRING con formato AR (ej:
+  // "1.000.000,00"). Se parsea con parseAmountString() para cálculos.
   const [simInputCurrency, setSimInputCurrency] = useState("ARS");
-  const [simInputAmount, setSimInputAmount] = useState(1000000);
+  const [simInputAmount, setSimInputAmount] = useState("1.000.000");
   const [simStrategy, setSimStrategy] = useState(selectedStrategy || "rolling");
   const [simHorizon, setSimHorizon] = useState(selectedHorizon || "vto");
   const [simModel, setSimModel] = useState("const");
@@ -22136,7 +22201,7 @@ function BondDetailModal({ row, spotMayorista, spotMep, futuresLive, curveData, 
   // entrada / F_hedge salida) y con la columna "S. DLR (con MEP)" de
   // la comparativa de estrategias.
   const sim = useMemo(() => {
-    const amount = Number(simInputAmount);
+    const amount = parseAmountString(simInputAmount);
     if (!Number.isFinite(amount) || amount <= 0) return null;
     if (!Number.isFinite(spotMayorista) || spotMayorista <= 0) return null;
     if (!Number.isFinite(row.bondPrice) || row.bondPrice <= 0) return null;
@@ -22243,7 +22308,7 @@ function BondDetailModal({ row, spotMayorista, spotMep, futuresLive, curveData, 
   // daba +37.99% por usar M en lugar de priceAtH).
   const scenarios = useMemo(() => {
     if (!sim) return null;
-    const amount = Number(simInputAmount);
+    const amount = parseAmountString(simInputAmount);
     if (!Number.isFinite(amount) || amount <= 0) return null;
     const MEP_hoy = (Number.isFinite(spotMep) && spotMep > 0) ? spotMep : spotMayorista;
     if (!Number.isFinite(MEP_hoy) || MEP_hoy <= 0) return null;
@@ -22660,7 +22725,8 @@ function BondDetailModal({ row, spotMayorista, spotMep, futuresLive, curveData, 
                   onClick={() => {
                     if (simInputCurrency === "USD") {
                       const fx = spotMayorista || 1;
-                      setSimInputAmount(Math.round(Number(simInputAmount) * fx));
+                      const amountNum = parseAmountString(simInputAmount);
+                      setSimInputAmount(formatAmountInput(String(Math.round(amountNum * fx))));
                     }
                     setSimInputCurrency("ARS");
                   }}
@@ -22682,7 +22748,10 @@ function BondDetailModal({ row, spotMayorista, spotMep, futuresLive, curveData, 
                   onClick={() => {
                     if (simInputCurrency === "ARS") {
                       const fx = spotMayorista || 1;
-                      setSimInputAmount(Math.round((Number(simInputAmount) / fx) * 100) / 100);
+                      const amountNum = parseAmountString(simInputAmount);
+                      // Convertir y formatear con 2 decimales (USD usa decimales)
+                      const usdValue = (amountNum / fx).toFixed(2).replace(".", ",");
+                      setSimInputAmount(formatAmountInput(usdValue));
                     }
                     setSimInputCurrency("USD");
                   }}
@@ -22702,11 +22771,10 @@ function BondDetailModal({ row, spotMayorista, spotMep, futuresLive, curveData, 
                 </button>
               </div>
               <input
-                type="number"
+                type="text"
+                inputMode="decimal"
                 value={simInputAmount}
-                onChange={(e) => setSimInputAmount(e.target.value)}
-                min="0"
-                step={simInputCurrency === "ARS" ? "10000" : "100"}
+                onChange={(e) => setSimInputAmount(formatAmountInput(e.target.value))}
                 style={{
                   width: simInputCurrency === "ARS" ? 160 : 120,
                   padding: "5px 10px",
