@@ -23228,15 +23228,17 @@ function BondDetailModal({ row, spotMayorista, spotMep, futuresLive, curveData, 
                   value={simSingleDlrOverride || "AUTO"}
                   onChange={(e) => setSimSingleDlrOverride(e.target.value === "AUTO" ? null : e.target.value)}
                   style={{
-                    padding: "3px 8px",
-                    background: simSingleDlrOverride ? "rgba(91, 141, 214, 0.10)" : "transparent",
-                    border: `1px solid ${simSingleDlrOverride ? C.accentBorder : C.border}`,
-                    color: simSingleDlrOverride ? C.text : C.muted,
-                    fontSize: 11,
-                    fontWeight: simSingleDlrOverride ? 600 : 500,
+                    backgroundColor: C.deep,
+                    border: `1px solid ${simSingleDlrOverride ? C.accent : C.border}`,
+                    color: C.text,
+                    padding: "5px 10px",
+                    fontSize: 11.5,
+                    fontWeight: 500,
                     letterSpacing: "0.02em",
                     cursor: "pointer",
+                    outline: "none",
                     fontFamily: "'Roboto Mono', monospace",
+                    minWidth: 200,
                   }}
                   title="Cambiá el DLR del hedge para simular distintas coberturas. El precio del DLR afecta directamente el USD final: más bajo = más USD, más alto = menos USD."
                 >
