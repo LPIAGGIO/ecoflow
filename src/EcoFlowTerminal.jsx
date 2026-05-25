@@ -20474,13 +20474,25 @@ function computeBondTirTea(maturityPayment, price, days) {
  * @param {number} spot       Spot mayorista hoy (ARS por USD)
  * @param {number} future     Precio DLR futuro matcheado (ARS por USD)
  * @returns {number|null}     TIR USD anualizada TEA (decimal: 0.05 = 5%)
+ *
+ * MODELO DE CÁLCULO (operativa retail argentina):
+ *   - USD inicial: el inversor vendió USD a MEP para entrar (operativa real).
+ *   - USD final: al expiry, asumimos convergencia MEP ≈ mayorista ≈ futuro DLR.
+ *     El usuario recompra MEP del momento, pero el sintético DLR le garantiza
+ *     ese precio al expiry vía el hedge con futuros.
+ *   - usdFactor = arsFactor × MEP / future
+ *   - TIR = usdFactor^(365/days) - 1
+ *
+ * Si "spotMep" no está disponible (caso edge: feed dolarapi cae), se cae al
+ * spot mayorista. En ese caso pierdes el "alfa del gap MEP/mayorista" en el
+ * cálculo, lo cual subestima el rendimiento real del inversor retail.
  */
-function computeSyntheticUsdReturn(arsFactor, days, spot, future) {
+function computeSyntheticUsdReturn(arsFactor, days, spotMep, future) {
   if (!Number.isFinite(arsFactor) || arsFactor <= 0) return null;
   if (!Number.isFinite(days) || days <= 0) return null;
-  if (!Number.isFinite(spot) || spot <= 0) return null;
+  if (!Number.isFinite(spotMep) || spotMep <= 0) return null;
   if (!Number.isFinite(future) || future <= 0) return null;
-  const usdFactor = arsFactor * spot / future;
+  const usdFactor = arsFactor * spotMep / future;
   return Math.pow(usdFactor, 365 / days) - 1;
 }
 
@@ -20645,7 +20657,7 @@ function findBestSingleHedgeForHorizon(futuresList, horizonDays) {
  *                     rollingPaths: { horizonKey: {dlrPath, isApprox} } }
  */
 function computeMultiHorizonTirUsd(ctx) {
-  const { daysToBondMaturity, maturityPayment, bondPrice, tirArsToday, spot,
+  const { daysToBondMaturity, maturityPayment, bondPrice, tirArsToday, spot, spotMep,
           curveData, futuresList } = ctx;
   const HORIZONS = [30, 60, 90, 180, daysToBondMaturity];
   const result = {
@@ -20661,6 +20673,11 @@ function computeMultiHorizonTirUsd(ctx) {
       !Number.isFinite(daysToBondMaturity) || daysToBondMaturity <= 0) {
     return result;
   }
+
+  // El "spot" para el cálculo del USD inicial es el MEP (operativa retail).
+  // Si no tenemos MEP por algún motivo, caemos al mayorista (subestima
+  // el rendimiento real del inversor retail, pero es mejor que nada).
+  const fxEntry = (Number.isFinite(spotMep) && spotMep > 0) ? spotMep : spot;
 
   for (const h of HORIZONS) {
     if (!Number.isFinite(h) || h <= 0) continue;
@@ -20686,15 +20703,16 @@ function computeMultiHorizonTirUsd(ctx) {
     const arsFactor_curve = priceAtH_curve ? priceAtH_curve / bondPrice : null;
 
     // ─── Single hedge ───
-    // Usa el DLR mas cercano a H (NO el que cubre el vto del bono). Si no
-    // hay DLR que cubra H, usa el ultimo (aprox).
+    // El DLR rolling sigue usando "spot" (mayorista) porque los futuros
+    // convergen al mayorista, no al MEP. Pero el USD inicial se calcula
+    // con MEP (fxEntry) para reflejar la operativa retail real.
     const bestSingle = findBestSingleHedgeForHorizon(futuresList, effH);
     if (bestSingle && Number.isFinite(bestSingle.price) && bestSingle.price > 0) {
       result.single.const[horizonKey] = arsFactor_const
-        ? computeSyntheticUsdReturn(arsFactor_const, effH, spot, bestSingle.price)
+        ? computeSyntheticUsdReturn(arsFactor_const, effH, fxEntry, bestSingle.price)
         : null;
       result.single.curve[horizonKey] = arsFactor_curve
-        ? computeSyntheticUsdReturn(arsFactor_curve, effH, spot, bestSingle.price)
+        ? computeSyntheticUsdReturn(arsFactor_curve, effH, fxEntry, bestSingle.price)
         : null;
       result.singleHedges[horizonKey] = bestSingle;
     } else {
@@ -20707,10 +20725,10 @@ function computeMultiHorizonTirUsd(ctx) {
     const rolling = computeRollingFxOut(spot, futuresList, effH);
     if (rolling && Number.isFinite(rolling.fxEffective) && rolling.fxEffective > 0) {
       result.rolling.const[horizonKey] = arsFactor_const
-        ? computeSyntheticUsdReturn(arsFactor_const, effH, spot, rolling.fxEffective)
+        ? computeSyntheticUsdReturn(arsFactor_const, effH, fxEntry, rolling.fxEffective)
         : null;
       result.rolling.curve[horizonKey] = arsFactor_curve
-        ? computeSyntheticUsdReturn(arsFactor_curve, effH, spot, rolling.fxEffective)
+        ? computeSyntheticUsdReturn(arsFactor_curve, effH, fxEntry, rolling.fxEffective)
         : null;
       result.rollingPaths[horizonKey] = rolling;
     } else {
@@ -21136,7 +21154,11 @@ function SinteticoDolarModule() {
         }
       }
 
-      const tirUsd = computeSyntheticUsdReturn(arsFactor, days, spotMayorista, futurePrice);
+      // TIR USD coherente con la operativa retail real:
+      // USD entra al MEP (no al mayorista, retail no puede acceder),
+      // USD sale al FX del futuro (≈ mayorista al expiry por convergencia).
+      const fxEntry = (Number.isFinite(spotMep) && spotMep > 0) ? spotMep : spotMayorista;
+      const tirUsd = computeSyntheticUsdReturn(arsFactor, days, fxEntry, futurePrice);
 
       const isBontamAbovePremium = isBontam &&
         Number.isFinite(bondPrice) && Number.isFinite(maturityPayment) &&
@@ -21197,6 +21219,7 @@ function SinteticoDolarModule() {
         bondPrice: r.bondPrice,
         tirArsToday: r.tirArs,
         spot: spotMayorista,
+        spotMep,
         curveData,
         futuresList: futuresLive,
       });
@@ -22019,26 +22042,24 @@ function BondDetailModal({ row, spotMayorista, spotMep, futuresLive, curveData, 
   ];
 
   // ─── Cálculo del simulador ──────────────────────────────
-  // CRITERIO DE COHERENCIA (este modelo es el que usa la tabla principal):
-  //   USD_inicial = ARS_capital / SPOT_MAYORISTA_HOY
-  //   USD_final   = ARS_final   / FUTURO_DLR_DEL_HEDGE
+  // MODELO: operativa retail real argentina.
+  //   - Día 0: el inversor vende USD a MEP (no al mayorista, retail no
+  //     puede acceder). Si entra con ARS directamente, ya tiene los
+  //     pesos. Capital ARS = arsCapital.
+  //   - Día 0: compra bono peso + futuro DLR (bono en garantía).
+  //   - Día H: vende el bono → ARS final. Cierra futuro → P&L embebido
+  //     en el F_hedge efectivo.
+  //   - Día H: con esos pesos compra MEP de nuevo. Asumimos convergencia
+  //     MEP_expiry ≈ F_hedge (que ≈ mayorista_expiry por convergencia
+  //     del futuro). Eso da: USD_final = ARS_final / F_hedge.
   //
-  // ¿Por qué es coherente?
-  //   Mayorista_hoy y Futuro_hoy son DOS SNAPSHOTS del MISMO INSTRUMENTO
-  //   (dólar mayorista) en DOS MOMENTOS DEL TIEMPO (spot vs expiry del
-  //   futuro). El sintético captura la diferencia entre el rendimiento
-  //   en pesos del bono y el carry implícito del futuro contra el spot.
+  // El número resultante refleja el rendimiento que efectivamente
+  // captura un inversor retail argentino, incluyendo el alfa del gap
+  // MEP/mayorista del lado de entrada. Es la TIR USD operativamente real.
   //
-  // Lo que NO sería coherente (y rompía la lógica antes):
-  //   - Mezclar MEP_hoy con Futuro_hoy → son instrumentos distintos
-  //     (bolsa vs mayorista futuro). Generaría un "alfa del gap" como
-  //     ruido artificial.
-  //   - Usar el mismo FX para entrada y salida → daría TIR USD = TIR ARS
-  //     y "borraría" el efecto del hedge en el número.
-  //
-  // El MEP de hoy se sigue mostrando como referencia informativa en el
-  // paso 1 (lo que un retail pagaría hoy por hacer la conversión USD↔ARS),
-  // pero no entra en el cálculo de la TIR.
+  // Coincide con la TIR USD de la tabla principal (que también usa MEP
+  // entrada / F_hedge salida) y con la columna "S. DLR (con MEP)" de
+  // la comparativa de estrategias.
   const sim = useMemo(() => {
     const amount = Number(simInputAmount);
     if (!Number.isFinite(amount) || amount <= 0) return null;
@@ -22046,12 +22067,17 @@ function BondDetailModal({ row, spotMayorista, spotMep, futuresLive, curveData, 
     if (!Number.isFinite(row.bondPrice) || row.bondPrice <= 0) return null;
     if (!Number.isFinite(row.maturityPayment) || row.maturityPayment <= 0) return null;
 
+    // FX de entrada: MEP (operativa retail). Fallback al mayorista si
+    // el feed dolarapi no responde.
+    const fxEntry = (Number.isFinite(spotMep) && spotMep > 0) ? spotMep : spotMayorista;
+    const mepIsFallback = !(Number.isFinite(spotMep) && spotMep > 0);
+
     // Horizonte efectivo (cap al vto del bono)
     const horizonValue = simHorizon === "vto" ? row.days : Number(simHorizon);
     const effH = Math.min(horizonValue, row.days);
     const daysRemaining = row.days - effH;
 
-    // FX efectivo del hedge (necesario para el USD final).
+    // FX efectivo del hedge.
     let fxEffective = null;
     let dlrInfo = null;
     if (simStrategy === "rolling") {
@@ -22072,17 +22098,16 @@ function BondDetailModal({ row, spotMayorista, spotMep, futuresLive, curveData, 
     // Day 0: capital inicial.
     let arsCapital, usdOriginal;
     if (simInputCurrency === "USD") {
-      // Entra con USD nominales, los valuamos en pesos al spot mayorista
-      // (coherente con el modelo: la base USD es el mayorista-hoy).
+      // Entra con USD nominales, los vende al MEP (operativa real retail).
       usdOriginal = amount;
-      arsCapital = amount * spotMayorista;
+      arsCapital = amount * fxEntry;
     } else {
       arsCapital = amount;
       usdOriginal = null;
     }
 
-    // USD equivalente del capital inicial AL SPOT MAYORISTA (base del modelo).
-    const usdEquivalentEntry = arsCapital / spotMayorista;
+    // USD equivalente del capital inicial al MEP.
+    const usdEquivalentEntry = arsCapital / fxEntry;
 
     // VN del bono comprado
     const bondVN = (arsCapital * 100) / row.bondPrice;
@@ -22103,10 +22128,10 @@ function BondDetailModal({ row, spotMayorista, spotMep, futuresLive, curveData, 
     // ARS recibidos al vender el bono al día H
     const arsFromBond = (bondVN * priceAtH) / 100;
 
-    // USD final al FX del hedge (= mayorista al expiry por convergencia del futuro).
+    // USD final al FX del hedge (asumimos convergencia MEP_expiry ≈ F_hedge).
     const usdFinal = arsFromBond / fxEffective;
 
-    // Profit USD: rendimiento puro del armado sintético.
+    // Profit USD: rendimiento operativamente real para retail.
     const usdProfit = usdFinal - usdEquivalentEntry;
     const usdPct = usdEquivalentEntry !== 0 ? usdProfit / usdEquivalentEntry : 0;
 
@@ -22114,22 +22139,15 @@ function BondDetailModal({ row, spotMayorista, spotMep, futuresLive, curveData, 
     const arsProfit = arsFromBond - arsCapital;
     const arsPct = arsCapital !== 0 ? arsProfit / arsCapital : 0;
 
-    // TIR USD anualizada (coincide con la tabla principal, fórmula:
-    //   arsFactor × spot / future, anualizado).
+    // TIR USD anualizada (coincide con la tabla principal y la comparativa).
     const tirUsdAnnualized = effH > 0
       ? Math.pow(usdFinal / usdEquivalentEntry, 365 / effH) - 1
-      : null;
-
-    // Info MEP: cuántos USD recibiría el retail si vendiera al MEP de hoy
-    // (referencia, no entra en la TIR).
-    const usdAtMepToday = (Number.isFinite(spotMep) && spotMep > 0)
-      ? arsCapital / spotMep
       : null;
 
     return {
       simInputCurrency, amount,
       arsCapital, usdEquivalentEntry, usdOriginal,
-      usdAtMepToday, spotMep, spotMayorista,
+      fxEntry, mepIsFallback, spotMep, spotMayorista,
       bondVN, priceAtH, arsFromBond,
       fxEffective, dlrInfo,
       usdFinal, usdProfit, usdPct,
@@ -22651,20 +22669,20 @@ function BondDetailModal({ row, spotMayorista, spotMep, futuresLive, curveData, 
                 {sim.simInputCurrency === "USD" ? (
                   <div style={{ color: C.muted, marginBottom: 2 }}>
                     <span style={{ color: C.dim, marginRight: 8, fontSize: 10 }}>1.</span>
-                    Entrás con <strong style={{ color: C.text }}>USD {fmtARS(sim.amount)}</strong> valuados al spot mayorista (<strong style={{ color: C.text }}>$ {fmtARS(sim.spotMayorista)}</strong>) → equivalen a <strong style={{ color: C.text }}>$ {fmtARS(sim.arsCapital)} ARS</strong>.
-                    {Number.isFinite(sim.spotMep) && sim.spotMep > 0 && (
-                      <span style={{ color: C.dim, fontSize: 10.5 }}>
-                        {" "}<span style={{ marginLeft: 4 }}>·</span> Si vendieras a MEP retail hoy ($ {fmtARS(sim.spotMep)}): $ {fmtARS(sim.amount * sim.spotMep)} <em style={{ fontStyle: "italic" }}>(info, no entra en el cálculo)</em>
+                    Entrás con <strong style={{ color: C.text }}>USD {fmtARS(sim.amount)}</strong>, los vendés al <strong style={{ color: C.text }}>MEP ($ {fmtARS(sim.fxEntry)})</strong> → recibís <strong style={{ color: C.text }}>$ {fmtARS(sim.arsCapital)}</strong>.
+                    {sim.mepIsFallback && (
+                      <span style={{ color: "#eab308", fontSize: 10.5, fontStyle: "italic" }}>
+                        {" "}⚠ MEP no disponible, usando mayorista (subestima el resultado).
                       </span>
                     )}
                   </div>
                 ) : (
                   <div style={{ color: C.muted, marginBottom: 2 }}>
                     <span style={{ color: C.dim, marginRight: 8, fontSize: 10 }}>1.</span>
-                    Entrás con <strong style={{ color: C.text }}>$ {fmtARS(sim.arsCapital)} ARS</strong>. Equivalen a <strong style={{ color: C.text }}>USD {fmtARS(sim.usdEquivalentEntry)}</strong> al spot mayorista ($ {fmtARS(sim.spotMayorista)}).
-                    {Number.isFinite(sim.usdAtMepToday) && (
-                      <span style={{ color: C.dim, fontSize: 10.5 }}>
-                        {" "}<span style={{ marginLeft: 4 }}>·</span> Si vendieras al MEP retail hoy ($ {fmtARS(sim.spotMep)}) recibirías USD {fmtARS(sim.usdAtMepToday)} <em style={{ fontStyle: "italic" }}>(info, no entra en el cálculo)</em>
+                    Entrás con <strong style={{ color: C.text }}>$ {fmtARS(sim.arsCapital)} ARS</strong>. Equivalen a <strong style={{ color: C.text }}>USD {fmtARS(sim.usdEquivalentEntry)}</strong> al MEP de hoy ($ {fmtARS(sim.fxEntry)}).
+                    {sim.mepIsFallback && (
+                      <span style={{ color: "#eab308", fontSize: 10.5, fontStyle: "italic" }}>
+                        {" "}⚠ MEP no disponible, usando mayorista (subestima el resultado).
                       </span>
                     )}
                   </div>
@@ -22936,7 +22954,7 @@ function BondDetailModal({ row, spotMayorista, spotMep, futuresLive, curveData, 
           <br />
           <strong style={{ color: C.text }}>Rolling V1:</strong> asume cada DLR mantiene su precio actual hasta expirar. La Fase 2 va a refinar esto modelando la curva DLR completa y los roll costs reales.
           <br />
-          <strong style={{ color: C.text }}>Cálculo coherente:</strong> USD inicial al spot mayorista de hoy, USD final al FX del hedge (≈ mayorista al expiry por convergencia del futuro). Son dos snapshots del MISMO instrumento (mayorista) en dos momentos del tiempo, lo que hace el cálculo internamente coherente y matchea la TIR USD de la tabla principal. El MEP de hoy se muestra solo como referencia retail.
+          <strong style={{ color: C.text }}>Cálculo operativo retail:</strong> USD inicial al MEP de hoy (operativa real, ya que retail no puede acceder al mayorista), USD final al FX del hedge (≈ mayorista al expiry por convergencia del futuro). Asumimos MEP_expiry ≈ mayorista_expiry — riesgo residual de ±1-3 puntos por movimientos del gap. Coincide con la TIR USD de la tabla principal y con la columna "S. DLR (con MEP)" de la comparativa.
 
           <div style={{ marginTop: 14, marginBottom: 6, fontWeight: 600, color: C.text, textTransform: "uppercase", letterSpacing: "0.05em", fontSize: 10 }}>
             Glosario rápido
