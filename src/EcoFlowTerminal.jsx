@@ -925,6 +925,36 @@ function PrivacyToggleButton() {
   );
 }
 
+// Variante inline para poner al lado de un monto. Más chico, sin
+// fondo, alineado verticalmente con el texto. Sincronizado con el
+// PrivacyToggleButton del TopBar — ambos toggetean el mismo estado.
+function InlinePrivacyEye({ size = 16 }) {
+  const { hidden, toggle } = usePrivacy();
+  return (
+    <button
+      onClick={toggle}
+      title={hidden ? "Mostrar montos" : "Ocultar montos"}
+      aria-label={hidden ? "Mostrar montos" : "Ocultar montos"}
+      style={{
+        background: "transparent",
+        border: "none",
+        padding: 0,
+        margin: 0,
+        cursor: "pointer",
+        color: C.muted,
+        display: "inline-flex",
+        alignItems: "center",
+        verticalAlign: "middle",
+        transition: "color 0.15s ease",
+      }}
+      onMouseEnter={(e) => { e.currentTarget.style.color = C.text; }}
+      onMouseLeave={(e) => { e.currentTarget.style.color = C.muted; }}
+    >
+      {hidden ? <EyeOff size={size} strokeWidth={1.6} /> : <Eye size={size} strokeWidth={1.6} />}
+    </button>
+  );
+}
+
 function Stat({ label, value, mono }) {
   return (
     <div className="flex flex-col items-center gap-1">
@@ -8366,7 +8396,7 @@ function TotalCard({ positions, fx, bondPrices, futurePrices, stockPrices, fciPr
         </span>
       </div>
 
-      <div className="flex items-baseline gap-3" style={{ marginBottom: 10 }}>
+      <div className="flex items-center gap-3" style={{ marginBottom: 10 }}>
         <span
           style={{
             fontSize: 28,
@@ -8380,6 +8410,7 @@ function TotalCard({ positions, fx, bondPrices, futurePrices, stockPrices, fciPr
             ? maskAmount(fmtCurrencyValue(totalWithCash, valuationCurrency === "ARS" ? "ARS" : "USD"), privHidden)
             : "—"}
         </span>
+        <InlinePrivacyEye size={18} />
       </div>
 
       {/* P&L: aparece solo si hay precio de mercado real para al menos
@@ -17573,8 +17604,9 @@ function PortfolioSummaryWidget({ expanded }) {
         <div style={{ fontSize: 10, color: C.dim, letterSpacing: "0.12em", textTransform: "uppercase", fontWeight: 600, marginBottom: 4 }}>
           Total · USD-MEP
         </div>
-        <div style={{ fontSize: expanded ? 28 : 22, color: C.text, fontWeight: 600, fontVariantNumeric: "tabular-nums" }}>
-          USD {maskAmount(fmtARS(totalUsd), privHidden)}
+        <div style={{ fontSize: expanded ? 28 : 22, color: C.text, fontWeight: 600, fontVariantNumeric: "tabular-nums", display: "flex", alignItems: "center", gap: 10 }}>
+          <span>USD {maskAmount(fmtARS(totalUsd), privHidden)}</span>
+          <InlinePrivacyEye size={expanded ? 18 : 15} />
         </div>
         {expanded && totalArs != null && (
           <div style={{ fontSize: 13, color: C.muted, marginTop: 4, fontVariantNumeric: "tabular-nums" }}>
