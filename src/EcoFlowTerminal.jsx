@@ -17476,17 +17476,26 @@ function processCarryBonds(bondsRaw) {
 
       const roiArs = valorFinal / priceArs - 1;
       const tirAnual = Math.pow(1 + roiArs, 365 / days) - 1;
-      const tem = Math.pow(1 + roiArs, 30 / days) - 1;
+      // TEM: tasa efectiva mensual. Usamos 365/12 = 30.4167 días/mes,
+      // que es la convención financiera correcta (un año tiene 365
+      // días divididos en 12 meses). Verificado contra lamacro.ar:
+      // T30A7 da TEM 2.04% con 365/12, vs 2.01% si usás "30 redondo".
+      const tem = Math.pow(1 + roiArs, (365 / 12) / days) - 1;
       const tea = Math.pow(1 + tem, 12) - 1;
-      // TNA: convención argentina estándar = tasa nominal anual
-      // capitalizable mensualmente = TEM × 12. Es la que aparece en
-      // publicidad de plazos fijos. Con esta definición, SIEMPRE
-      // TEA > TNA (porque TEA capitaliza, TNA no).
+      // TNA para bonos del Tesoro (LECAPs/BONCAPs):
+      //   TNA = ROI × (365/días)
       //
-      // NOTA: existe otra fórmula común ROI × 365/días = "tasa
-      // proporcional anualizada", pero NO es la TNA estándar AR.
-      // La usaba antes y daba el bug de TNA > TEA en plazos cortos.
-      const tna = tem * 12;
+      // Es la convención de BYMA / lamacro / IOL / Cocos para
+      // instrumentos del Tesoro. NO es la TNA bancaria (= TEM × 12).
+      //
+      // Verificado contra lamacro.ar/fija en may-2026 con varios
+      // bonos: T30A7, T31Y7, T30J7, S14G6, S31L6 — coincide exacto.
+      //
+      // Característica esperada: para plazos LARGOS (>365d) puede
+      // dar TNA > TEA, porque la TNA proporcional sigue creciendo
+      // linealmente mientras la TEA capitaliza. Si TEA siempre fuera
+      // > TNA, la convención sería TEM × 12 (la bancaria), que es OTRA.
+      const tna = roiArs * (365 / days);
 
       return {
         ticker, type: resolved.type, source: resolved.source,
