@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useCallback, useRef } from "react";
+import { useState, useEffect, useMemo, useCallback, useRef, createContext, useContext } from "react";
 import { useAuth } from "./auth/AuthContext.jsx";
 import { supabase } from "./lib/supabase.js";
 import { resolveBond, daysToMaturity, shouldIgnoreTicker, BOND_REGISTRY } from "./bondMaturities.js";
@@ -70,6 +70,8 @@ import {
   Wallet,
   Bitcoin,
   Layers,
+  Eye,
+  EyeOff,
 } from "lucide-react";
 import {
   ScatterChart,
@@ -238,6 +240,49 @@ const NAV = [
   },
 ];
 
+// ═══════════════════════════════════════════════════════════════════════
+// PrivacyContext: toggle global para ocultar montos en la UI.
+//
+// Cuando hidden=true:
+//   - Montos absolutos (totales, importes, P&L en moneda, cash) se
+//     reemplazan visualmente por "●●●●●".
+//   - Cantidades, precios de mercado y P&L % SIGUEN visibles (no son
+//     información sensible — son data pública del mercado o info no
+//     monetaria).
+//
+// El estado se persiste en localStorage key "midas_hide_balances" así
+// el toggle sobrevive recargas y nuevas sesiones del usuario.
+// ═══════════════════════════════════════════════════════════════════════
+const PrivacyContext = createContext({ hidden: false, toggle: () => {} });
+
+function PrivacyProvider({ children }) {
+  const [hidden, setHidden] = useState(() => {
+    try { return localStorage.getItem("midas_hide_balances") === "1"; } catch { return false; }
+  });
+
+  const toggle = useCallback(() => {
+    setHidden((prev) => {
+      const next = !prev;
+      try { localStorage.setItem("midas_hide_balances", next ? "1" : "0"); } catch {}
+      return next;
+    });
+  }, []);
+
+  const value = useMemo(() => ({ hidden, toggle }), [hidden, toggle]);
+  return <PrivacyContext.Provider value={value}>{children}</PrivacyContext.Provider>;
+}
+
+function usePrivacy() {
+  return useContext(PrivacyContext);
+}
+
+// Helper: reemplaza el string formateado por ●●● cuando hidden=true.
+// Mantiene el largo aproximado para no romper layouts.
+function maskAmount(formattedStr, hidden) {
+  if (!hidden) return formattedStr;
+  return "●●●●●";
+}
+
 export default function EcoFlowTerminal() {
   const [collapsed, setCollapsed] = useState(false);
   const [now, setNow] = useState(new Date());
@@ -336,6 +381,7 @@ export default function EcoFlowTerminal() {
   };
 
   return (
+    <PrivacyProvider>
     <div
       style={{
         fontFamily: "'Roboto', system-ui, sans-serif",
@@ -642,6 +688,7 @@ export default function EcoFlowTerminal() {
 
           {/* Botones de íconos + perfil */}
           <div className="flex items-stretch" style={{ borderLeft: `1px solid ${C.border}` }}>
+            <PrivacyToggleButton />
             <button className="eco-icon-btn" aria-label="Notificaciones">
               <Bell size={15} strokeWidth={1.6} />
             </button>
@@ -856,10 +903,27 @@ export default function EcoFlowTerminal() {
         </main>
       </div>
     </div>
+    </PrivacyProvider>
   );
 }
 
 /* ─────────── Subcomponentes ─────────── */
+
+// Toggle de privacidad: ojo abierto = mostrando, tachado = ocultando.
+// Vive en el TopBar al lado del Bell. Persiste en localStorage.
+function PrivacyToggleButton() {
+  const { hidden, toggle } = usePrivacy();
+  return (
+    <button
+      className="eco-icon-btn"
+      onClick={toggle}
+      title={hidden ? "Mostrar montos" : "Ocultar montos"}
+      aria-label={hidden ? "Mostrar montos" : "Ocultar montos"}
+    >
+      {hidden ? <EyeOff size={15} strokeWidth={1.6} /> : <Eye size={15} strokeWidth={1.6} />}
+    </button>
+  );
+}
 
 function Stat({ label, value, mono }) {
   return (
@@ -8193,6 +8257,7 @@ function ValuationToggle({ value, onChange }) {
 /* ─────────────── Card 1: Total de cartera ─────────────── */
 
 function TotalCard({ positions, fx, bondPrices, futurePrices, stockPrices, fciPrices, valuationCurrency, balanceByCurrency, futureAdjLookup, onIngresar, onRetirar }) {
+  const { hidden: privHidden } = usePrivacy();
   // V2: ahora usamos precios de mercado de data912 cuando están disponibles.
   // El P&L se calcula como market - cost. Si no hay precio actualizado para
   // alguna posición, esa cae al fallback "a costo" y aparece en pricesFromCost.
@@ -8312,7 +8377,7 @@ function TotalCard({ positions, fx, bondPrices, futurePrices, stockPrices, fciPr
           }}
         >
           {(totals.value !== null || cashInValuation !== 0)
-            ? fmtCurrencyValue(totalWithCash, valuationCurrency === "ARS" ? "ARS" : "USD")
+            ? maskAmount(fmtCurrencyValue(totalWithCash, valuationCurrency === "ARS" ? "ARS" : "USD"), privHidden)
             : "—"}
         </span>
       </div>
@@ -8329,7 +8394,7 @@ function TotalCard({ positions, fx, bondPrices, futurePrices, stockPrices, fciPr
               fontFamily: "'JetBrains Mono', monospace",
             }}
           >
-            {pnlSymbol}{fmtCurrencyValue(totals.pnl, valuationCurrency === "ARS" ? "ARS" : "USD")}
+            {pnlSymbol}{maskAmount(fmtCurrencyValue(totals.pnl, valuationCurrency === "ARS" ? "ARS" : "USD"), privHidden)}
           </span>
           {totals.pnlPct != null && (
             <span
@@ -8372,7 +8437,7 @@ function TotalCard({ positions, fx, bondPrices, futurePrices, stockPrices, fciPr
               fontFamily: "'JetBrains Mono', monospace",
             }}
           >
-            {dailySymbol}{fmtCurrencyValue(dailyTotals.pnl, valuationCurrency === "ARS" ? "ARS" : "USD")}
+            {dailySymbol}{maskAmount(fmtCurrencyValue(dailyTotals.pnl, valuationCurrency === "ARS" ? "ARS" : "USD"), privHidden)}
           </span>
           {dailyPct != null && (
             <span
@@ -17365,6 +17430,7 @@ function ToggleButton({ active, onClick, children, color }) {
 // ═══════════════════════════════════════════════════════════════════════
 function PortfolioSummaryWidget({ expanded }) {
   const { user } = useAuth();
+  const { hidden: privHidden } = usePrivacy();
   const { positions } = useUserPositions();
   const { fx } = useDashboardFx();
   const { data: brokerCashSnapshots } = useBrokerCashSnapshots(user?.id);
@@ -17508,11 +17574,11 @@ function PortfolioSummaryWidget({ expanded }) {
           Total · USD-MEP
         </div>
         <div style={{ fontSize: expanded ? 28 : 22, color: C.text, fontWeight: 600, fontVariantNumeric: "tabular-nums" }}>
-          USD {fmtARS(totalUsd)}
+          USD {maskAmount(fmtARS(totalUsd), privHidden)}
         </div>
         {expanded && totalArs != null && (
           <div style={{ fontSize: 13, color: C.muted, marginTop: 4, fontVariantNumeric: "tabular-nums" }}>
-            AR$ {fmtARS(totalArs)}
+            AR$ {maskAmount(fmtARS(totalArs), privHidden)}
           </div>
         )}
       </div>
@@ -17526,8 +17592,8 @@ function PortfolioSummaryWidget({ expanded }) {
         <div style={{ display: "flex", alignItems: "baseline", gap: 12, flexWrap: "wrap" }}>
           <div style={{ fontSize: expanded ? 22 : 18, color: dailyColor, fontWeight: 600, fontVariantNumeric: "tabular-nums" }}>
             {showDaily && !dailyTotals.marketClosed
-              ? `${dailySymbol}USD ${fmtARS(dailyPnl)}`
-              : (dailyTotals.marketClosed ? "USD 0,00" : "—")
+              ? `${dailySymbol}USD ${maskAmount(fmtARS(dailyPnl), privHidden)}`
+              : (dailyTotals.marketClosed ? `USD ${maskAmount("0,00", privHidden)}` : "—")
             }
           </div>
           {dailyPct != null && (
@@ -17548,7 +17614,7 @@ function PortfolioSummaryWidget({ expanded }) {
             <div style={{ display: "flex", alignItems: "baseline", gap: 12, flexWrap: "wrap" }}>
               <div style={{ fontSize: 18, color: totalPnlColor, fontWeight: 600, fontVariantNumeric: "tabular-nums" }}>
                 {totalPnl != null
-                  ? `${totalPnl >= 0 ? "+" : ""}USD ${fmtARS(totalPnl)}`
+                  ? `${totalPnl >= 0 ? "+" : ""}USD ${maskAmount(fmtARS(totalPnl), privHidden)}`
                   : "—"
                 }
               </div>
