@@ -17441,6 +17441,273 @@ function ToggleButton({ active, onClick, children, color }) {
 
 
 // ═══════════════════════════════════════════════════════════════════════
+// processCarryBonds: helper compartido que transforma el array crudo de
+// data912 (formato: {symbol, px_ask, c, ...}) en el array procesado con
+// TEA, TIR anual, TEM, días al vto, valorFinal, etc.
+//
+// Lógica copiada de CarryTradeModule.processedBonds para reusar entre
+// el widget del Dashboard y el módulo completo. (Refactor pendiente: el
+// CarryTradeModule sigue con su versión inline; cuando se refactorice,
+// se puede pasar a usar este helper.)
+//
+// Filtra:
+//   - Tickers en lista de "ruido" (AE, AL, GD, X*, etc.) vía shouldIgnoreTicker
+//   - Bonos no mapeados en BOND_REGISTRY
+//   - Vencidos (days <= 0)
+//   - Sin precio (px_ask y c null o 0)
+// ═══════════════════════════════════════════════════════════════════════
+function processCarryBonds(bondsRaw) {
+  if (!Array.isArray(bondsRaw)) return [];
+  return bondsRaw
+    .map((row) => {
+      const ticker = row.symbol;
+      if (shouldIgnoreTicker(ticker)) return null;
+      const resolved = resolveBond(ticker);
+      if (!resolved) return null;
+      const days = daysToMaturity(resolved.maturityDate);
+      if (days == null || days <= 0) return null;
+      const priceArs = (row.px_ask || row.c) ? (row.px_ask || row.c) : null;
+      if (!priceArs || priceArs <= 0) return null;
+
+      // Pago final del bono: si está en el registry usamos el dato real,
+      // sino fallback a $100 VN (aproximación que subestima rendimiento).
+      const valorFinal = resolved.finalPayoff ?? 100;
+      const hasFinalPayoff = resolved.finalPayoff != null;
+
+      const roiArs = valorFinal / priceArs - 1;
+      const tirAnual = Math.pow(1 + roiArs, 365 / days) - 1;
+      const tem = Math.pow(1 + roiArs, 30 / days) - 1;
+      const tea = Math.pow(1 + tem, 12) - 1;
+
+      return {
+        ticker, type: resolved.type, source: resolved.source,
+        maturityDate: resolved.maturityDate, days, priceArs, valorFinal,
+        hasFinalPayoff, roiArs, tirAnual, tem, tea,
+      };
+    })
+    .filter(Boolean);
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// useCarryBonds: hook con cache singleton para fetch a /api/data912.
+//
+// Trae LECAPs (/arg_notes) + BONCAPs (/arg_bonds) en paralelo, los pasa
+// por processCarryBonds y cachea el resultado en module-level state.
+// Refresh cada 5 minutos en mercado abierto, 30 min cerrado.
+//
+// Si el usuario navega entre Dashboard y CarryTradeModule, este hook
+// comparte el fetch para evitar duplicación.
+// ═══════════════════════════════════════════════════════════════════════
+let _carryBondsCache = null;
+let _carryBondsCachePromise = null;
+let _carryBondsCacheAt = 0;
+const CARRY_BONDS_TTL = 5 * 60 * 1000; // 5 min
+
+async function fetchCarryBonds() {
+  const now = Date.now();
+  if (_carryBondsCache && (now - _carryBondsCacheAt) < CARRY_BONDS_TTL) {
+    return _carryBondsCache;
+  }
+  if (_carryBondsCachePromise) return _carryBondsCachePromise;
+
+  _carryBondsCachePromise = (async () => {
+    const [bondsRes, letrasRes] = await Promise.all([
+      fetch("/api/data912?type=bonos"),
+      fetch("/api/data912?type=letras"),
+    ]);
+    if (!bondsRes.ok) throw new Error("API bonos respondió " + bondsRes.status);
+    const bonds = await bondsRes.json();
+    let letras = [];
+    if (letrasRes.ok) letras = await letrasRes.json();
+    // Merge — prioriza letras si hay duplicados
+    const seen = new Set();
+    const combined = [];
+    for (const item of [...letras, ...bonds]) {
+      if (item?.symbol && !seen.has(item.symbol)) {
+        seen.add(item.symbol);
+        combined.push(item);
+      }
+    }
+    const processed = processCarryBonds(combined);
+    _carryBondsCache = processed;
+    _carryBondsCacheAt = Date.now();
+    _carryBondsCachePromise = null;
+    return processed;
+  })().catch((err) => {
+    _carryBondsCachePromise = null;
+    throw err;
+  });
+
+  return _carryBondsCachePromise;
+}
+
+function useCarryBonds() {
+  const [bonds, setBonds] = useState(_carryBondsCache);
+  const [loading, setLoading] = useState(!_carryBondsCache);
+  const [error, setError] = useState(null);
+  const [lastFetch, setLastFetch] = useState(_carryBondsCacheAt || null);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    fetchCarryBonds()
+      .then((data) => {
+        if (cancelled) return;
+        setBonds(data);
+        setLastFetch(_carryBondsCacheAt);
+        setError(null);
+      })
+      .catch((e) => { if (!cancelled) setError(e); })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, []);
+
+  return { bonds, loading, error, lastFetch };
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// CarryTradeWidget: top oportunidades de tasa fija en ARS.
+//
+// Muestra LECAPs/BONCAPs ordenados por TEA descendente.
+// Compact: top 5, columnas mínimas (ticker, vto, TEA, días).
+// Expanded: top 15 + precio, valor final, ROI total, TEM.
+// ═══════════════════════════════════════════════════════════════════════
+function CarryTradeWidget({ expanded }) {
+  const { bonds, loading, error, lastFetch } = useCarryBonds();
+
+  const ageStr = (() => {
+    if (!lastFetch) return null;
+    const seconds = Math.floor((Date.now() - lastFetch) / 1000);
+    if (seconds < 60) return `hace ${seconds}s`;
+    const minutes = Math.floor(seconds / 60);
+    if (minutes < 60) return `hace ${minutes} min`;
+    const hours = Math.floor(minutes / 60);
+    return `hace ${hours}h`;
+  })();
+
+  // Top N por TEA descendente
+  const topBonds = useMemo(() => {
+    if (!bonds) return [];
+    return [...bonds].sort((a, b) => b.tea - a.tea).slice(0, expanded ? 15 : 5);
+  }, [bonds, expanded]);
+
+  if (loading && !bonds) {
+    return (
+      <div style={{ padding: "30px 22px", textAlign: "center", color: C.muted, fontSize: 11 }}>
+        Cargando bonos...
+      </div>
+    );
+  }
+  if (error && !bonds) {
+    return (
+      <div style={{ padding: "30px 22px", textAlign: "center", color: C.red, fontSize: 11 }}>
+        Error al cargar bonos: {String(error.message || error)}
+      </div>
+    );
+  }
+  if (!bonds || bonds.length === 0) {
+    return (
+      <div style={{ padding: "30px 22px", textAlign: "center", color: C.muted, fontSize: 11 }}>
+        Sin bonos disponibles.
+      </div>
+    );
+  }
+
+  // Helper: format date as DD/MM
+  const fmtDateDDMM = (iso) => {
+    const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(iso).trim());
+    if (m) return `${m[3]}/${m[2]}`;
+    const d = new Date(iso);
+    if (isNaN(d.getTime())) return "—";
+    return `${String(d.getDate()).padStart(2, "0")}/${String(d.getMonth() + 1).padStart(2, "0")}`;
+  };
+
+  return (
+    <div style={{ padding: expanded ? "18px 22px" : "10px 14px", fontFamily: "'Roboto Mono', monospace" }}>
+      <table style={{
+        width: "100%",
+        borderCollapse: "collapse",
+        fontSize: expanded ? 12 : 11.5,
+        fontVariantNumeric: "tabular-nums",
+      }}>
+        <thead>
+          <tr>
+            <th style={{ textAlign: "left", padding: "5px 6px", color: C.dim, fontSize: 9.5, letterSpacing: "0.06em", textTransform: "uppercase", fontWeight: 500, borderBottom: `1px solid ${C.border}` }}>Ticker</th>
+            <th style={{ textAlign: "right", padding: "5px 6px", color: C.dim, fontSize: 9.5, letterSpacing: "0.06em", textTransform: "uppercase", fontWeight: 500, borderBottom: `1px solid ${C.border}` }}>Vto</th>
+            <th style={{ textAlign: "right", padding: "5px 6px", color: C.dim, fontSize: 9.5, letterSpacing: "0.06em", textTransform: "uppercase", fontWeight: 500, borderBottom: `1px solid ${C.border}` }}>Días</th>
+            <th style={{ textAlign: "right", padding: "5px 6px", color: C.dim, fontSize: 9.5, letterSpacing: "0.06em", textTransform: "uppercase", fontWeight: 500, borderBottom: `1px solid ${C.border}` }}>TEA</th>
+            {expanded && (
+              <>
+                <th style={{ textAlign: "right", padding: "5px 6px", color: C.dim, fontSize: 9.5, letterSpacing: "0.06em", textTransform: "uppercase", fontWeight: 500, borderBottom: `1px solid ${C.border}` }}>TEM</th>
+                <th style={{ textAlign: "right", padding: "5px 6px", color: C.dim, fontSize: 9.5, letterSpacing: "0.06em", textTransform: "uppercase", fontWeight: 500, borderBottom: `1px solid ${C.border}` }}>ROI</th>
+                <th style={{ textAlign: "right", padding: "5px 6px", color: C.dim, fontSize: 9.5, letterSpacing: "0.06em", textTransform: "uppercase", fontWeight: 500, borderBottom: `1px solid ${C.border}` }}>Precio</th>
+                <th style={{ textAlign: "right", padding: "5px 6px", color: C.dim, fontSize: 9.5, letterSpacing: "0.06em", textTransform: "uppercase", fontWeight: 500, borderBottom: `1px solid ${C.border}` }}>V.Final</th>
+              </>
+            )}
+          </tr>
+        </thead>
+        <tbody>
+          {topBonds.map((b, i) => (
+            <tr key={b.ticker} style={{ borderBottom: `1px solid ${C.border}` }}>
+              <td style={{ padding: "6px", color: C.text, fontWeight: 500 }}>
+                {b.ticker}
+                {!b.hasFinalPayoff && (
+                  <span title="Valor final aproximado a $100 (sin dato real)" style={{ color: C.dim, marginLeft: 4 }}>*</span>
+                )}
+              </td>
+              <td style={{ padding: "6px", textAlign: "right", color: C.muted }}>
+                {fmtDateDDMM(b.maturityDate)}
+              </td>
+              <td style={{ padding: "6px", textAlign: "right", color: C.muted }}>
+                {b.days}
+              </td>
+              <td style={{ padding: "6px", textAlign: "right", color: i < 3 ? C.green : C.text, fontWeight: 600 }}>
+                {(b.tea * 100).toFixed(1)}%
+              </td>
+              {expanded && (
+                <>
+                  <td style={{ padding: "6px", textAlign: "right", color: C.muted }}>
+                    {(b.tem * 100).toFixed(2)}%
+                  </td>
+                  <td style={{ padding: "6px", textAlign: "right", color: C.muted }}>
+                    {(b.roiArs * 100).toFixed(2)}%
+                  </td>
+                  <td style={{ padding: "6px", textAlign: "right", color: C.muted }}>
+                    {fmtARS(b.priceArs)}
+                  </td>
+                  <td style={{ padding: "6px", textAlign: "right", color: C.muted }}>
+                    {fmtARS(b.valorFinal)}
+                  </td>
+                </>
+              )}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+
+      {/* Footer */}
+      <div style={{
+        marginTop: expanded ? 14 : 10,
+        paddingTop: 8,
+        borderTop: `1px solid ${C.border}`,
+        display: "flex",
+        justifyContent: "space-between",
+        alignItems: "center",
+        gap: 10,
+        fontSize: expanded ? 11 : 10.5,
+        color: C.muted,
+        flexWrap: "wrap",
+      }}>
+        <span>
+          Mostrando top <strong style={{ color: C.text }}>{topBonds.length}</strong> de <strong style={{ color: C.text }}>{bonds.length}</strong> · TEA ARS
+        </span>
+        <span style={{ color: C.dim }}>{ageStr || "—"}</span>
+      </div>
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════
 // PortfolioSummaryWidget: Total del portfolio + P&L del día.
 //
 // IMPORTANTE — overhead de polling:
@@ -18062,7 +18329,6 @@ function DashboardModule() {
   const upcomingWidgets = [
     { title: "Alertas activas",   desc: "Cruces de basis, vencimientos próximos, gaps" },
     { title: "Indicadores BCRA",  desc: "Reservas, tasa de política, riesgo país" },
-    { title: "Carry Trade",       desc: "Top oportunidades de carry en BONCAPs/LECAPs" },
   ];
 
   return (
@@ -18109,6 +18375,11 @@ function DashboardModule() {
         {/* Widget 3: Resumen Portfolio (real) */}
         <DashboardWidget title="Resumen Portfolio" minHeight={280}>
           {({ expanded }) => <PortfolioSummaryWidget expanded={expanded} />}
+        </DashboardWidget>
+
+        {/* Widget 4: Carry Trade (real) */}
+        <DashboardWidget title="Carry Trade · Top TEA" minHeight={280}>
+          {({ expanded }) => <CarryTradeWidget expanded={expanded} />}
         </DashboardWidget>
 
         {/* Widgets placeholder — se van reemplazando en próximas sesiones */}
