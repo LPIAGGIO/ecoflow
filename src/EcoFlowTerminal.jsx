@@ -17475,7 +17475,7 @@ async function fetchMacroIndicators() {
     const [riesgoData, inflMensualData, inflInterData] = await Promise.all([
       fetch("https://api.argentinadatos.com/v1/finanzas/indices/riesgo-pais/ultimo").then((r) => r.ok ? r.json() : null).catch(() => null),
       fetch("https://api.argentinadatos.com/v1/finanzas/indices/inflacion").then((r) => r.ok ? r.json() : null).catch(() => null),
-      fetch("https://api.argentinadatos.com/v1/finanzas/indices/inflacion-interanual").then((r) => r.ok ? r.json() : null).catch(() => null),
+      fetch("https://api.argentinadatos.com/v1/finanzas/indices/inflacionInteranual").then((r) => r.ok ? r.json() : null).catch(() => null),
     ]);
 
     const inflMensualLast = Array.isArray(inflMensualData) && inflMensualData.length > 0
