@@ -17441,6 +17441,221 @@ function ToggleButton({ active, onClick, children, color }) {
 
 
 // ═══════════════════════════════════════════════════════════════════════
+// useMacroIndicators: hook con cache singleton para indicadores macro AR.
+//
+// Fetcha en paralelo desde argentinadatos.com:
+//   - Riesgo país (último valor)
+//   - Inflación mensual (último valor de la serie)
+//   - Inflación interanual (último valor de la serie)
+//
+// Es independiente del useArgentinaDatos del modal del bono porque ese
+// solo necesita inflación mensual para el default de devaluación. Este
+// trae más datos para el widget del Dashboard.
+//
+// TTL 10 minutos: estos indicadores se actualizan diariamente o menos.
+//
+// PENDIENTE para próxima iteración:
+//   - Reservas BCRA: requiere endpoint backend que proxee a
+//     api.bcra.gob.ar (CORS no permite request directo del browser).
+//   - Tasa de política monetaria: idem.
+// ═══════════════════════════════════════════════════════════════════════
+let _macroIndicatorsCache = null;
+let _macroIndicatorsCachePromise = null;
+let _macroIndicatorsCacheAt = 0;
+const MACRO_INDICATORS_TTL = 10 * 60 * 1000; // 10 min
+
+async function fetchMacroIndicators() {
+  const now = Date.now();
+  if (_macroIndicatorsCache && (now - _macroIndicatorsCacheAt) < MACRO_INDICATORS_TTL) {
+    return _macroIndicatorsCache;
+  }
+  if (_macroIndicatorsCachePromise) return _macroIndicatorsCachePromise;
+
+  _macroIndicatorsCachePromise = (async () => {
+    const [riesgoData, inflMensualData, inflInterData] = await Promise.all([
+      fetch("https://api.argentinadatos.com/v1/finanzas/indices/riesgo-pais/ultimo").then((r) => r.ok ? r.json() : null).catch(() => null),
+      fetch("https://api.argentinadatos.com/v1/finanzas/indices/inflacion").then((r) => r.ok ? r.json() : null).catch(() => null),
+      fetch("https://api.argentinadatos.com/v1/finanzas/indices/inflacion-interanual").then((r) => r.ok ? r.json() : null).catch(() => null),
+    ]);
+
+    const inflMensualLast = Array.isArray(inflMensualData) && inflMensualData.length > 0
+      ? inflMensualData[inflMensualData.length - 1] : null;
+    const inflInterLast = Array.isArray(inflInterData) && inflInterData.length > 0
+      ? inflInterData[inflInterData.length - 1] : null;
+
+    _macroIndicatorsCache = {
+      riesgoPais: riesgoData?.valor ?? null,
+      riesgoPaisFecha: riesgoData?.fecha ?? null,
+      inflacionMensual: inflMensualLast?.valor ?? null,
+      inflacionMensualFecha: inflMensualLast?.fecha ?? null,
+      inflacionInteranual: inflInterLast?.valor ?? null,
+      inflacionInteranualFecha: inflInterLast?.fecha ?? null,
+    };
+    _macroIndicatorsCacheAt = Date.now();
+    _macroIndicatorsCachePromise = null;
+    return _macroIndicatorsCache;
+  })().catch((err) => {
+    _macroIndicatorsCachePromise = null;
+    throw err;
+  });
+
+  return _macroIndicatorsCachePromise;
+}
+
+function useMacroIndicators() {
+  const [data, setData] = useState(_macroIndicatorsCache);
+  const [loading, setLoading] = useState(!_macroIndicatorsCache);
+  const [error, setError] = useState(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    fetchMacroIndicators()
+      .then((d) => { if (!cancelled) { setData(d); setError(null); } })
+      .catch((e) => { if (!cancelled) setError(e); })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, []);
+
+  return { data, loading, error };
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// BcraIndicatorsWidget: indicadores macroeconómicos clave de Argentina.
+//
+// V1: riesgo país, inflación mensual e interanual (vía argentinadatos).
+// V2 pendiente: reservas BCRA, tasa de política monetaria (requieren
+// endpoint backend que proxee api.bcra.gob.ar).
+// ═══════════════════════════════════════════════════════════════════════
+function BcraIndicatorsWidget({ expanded }) {
+  const { data, loading, error } = useMacroIndicators();
+
+  // Helper: formato de fecha YYYY-MM-DD → DD/MM/YY o YYYY-MM → MMM YY
+  const fmtFecha = (iso) => {
+    if (!iso) return "—";
+    const m1 = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(iso).trim());
+    if (m1) return `${m1[3]}/${m1[2]}/${m1[1].slice(2)}`;
+    const m2 = /^(\d{4})-(\d{2})$/.exec(String(iso).trim());
+    if (m2) {
+      const meses = ["ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sep", "oct", "nov", "dic"];
+      return `${meses[parseInt(m2[2], 10) - 1]} ${m2[1].slice(2)}`;
+    }
+    return iso;
+  };
+
+  if (loading && !data) {
+    return (
+      <div style={{ padding: "30px 22px", textAlign: "center", color: C.muted, fontSize: 11 }}>
+        Cargando indicadores...
+      </div>
+    );
+  }
+  if (error && !data) {
+    return (
+      <div style={{ padding: "30px 22px", textAlign: "center", color: C.red, fontSize: 11 }}>
+        Error al cargar indicadores macro.
+      </div>
+    );
+  }
+  if (!data) return null;
+
+  // Cada indicador con su fila estructurada.
+  // Para riesgo país: color rojo si > 1000pb (zona stress), amarillo 500-1000, verde < 500.
+  const riesgoColor = data.riesgoPais == null
+    ? C.dim
+    : data.riesgoPais > 1000 ? C.red
+    : data.riesgoPais > 500 ? "#d4a417" // amarillo
+    : C.green;
+
+  // Inflación mensual: rojo si > 5%, amarillo 2-5%, verde < 2%
+  const inflMensualColor = data.inflacionMensual == null
+    ? C.dim
+    : data.inflacionMensual > 5 ? C.red
+    : data.inflacionMensual > 2 ? "#d4a417"
+    : C.green;
+
+  return (
+    <div style={{ padding: expanded ? "20px 24px" : "14px 16px", fontFamily: "'Roboto Mono', monospace" }}>
+      {/* Riesgo país */}
+      <div style={{ marginBottom: expanded ? 16 : 12, paddingBottom: expanded ? 12 : 10, borderBottom: `1px solid ${C.border}` }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 3 }}>
+          <span style={{ fontSize: 10, color: C.dim, letterSpacing: "0.1em", textTransform: "uppercase", fontWeight: 600 }}>
+            Riesgo País · EMBI
+          </span>
+          <span style={{ fontSize: 9.5, color: C.dim }}>
+            {fmtFecha(data.riesgoPaisFecha)}
+          </span>
+        </div>
+        <div style={{ display: "flex", alignItems: "baseline", gap: 6 }}>
+          <span style={{ fontSize: expanded ? 24 : 20, color: riesgoColor, fontWeight: 600, fontVariantNumeric: "tabular-nums" }}>
+            {data.riesgoPais != null ? data.riesgoPais.toLocaleString("es-AR") : "—"}
+          </span>
+          <span style={{ fontSize: 11, color: C.muted, fontWeight: 500 }}>pb</span>
+        </div>
+      </div>
+
+      {/* Inflación mensual */}
+      <div style={{ marginBottom: expanded ? 16 : 12, paddingBottom: expanded ? 12 : 10, borderBottom: `1px solid ${C.border}` }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 3 }}>
+          <span style={{ fontSize: 10, color: C.dim, letterSpacing: "0.1em", textTransform: "uppercase", fontWeight: 600 }}>
+            Inflación · Mensual
+          </span>
+          <span style={{ fontSize: 9.5, color: C.dim }}>
+            {fmtFecha(data.inflacionMensualFecha)}
+          </span>
+        </div>
+        <div style={{ display: "flex", alignItems: "baseline", gap: 6 }}>
+          <span style={{ fontSize: expanded ? 24 : 20, color: inflMensualColor, fontWeight: 600, fontVariantNumeric: "tabular-nums" }}>
+            {data.inflacionMensual != null ? `${data.inflacionMensual.toFixed(1)}%` : "—"}
+          </span>
+        </div>
+      </div>
+
+      {/* Inflación interanual */}
+      <div style={{ marginBottom: expanded ? 12 : 0 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 3 }}>
+          <span style={{ fontSize: 10, color: C.dim, letterSpacing: "0.1em", textTransform: "uppercase", fontWeight: 600 }}>
+            Inflación · Interanual
+          </span>
+          <span style={{ fontSize: 9.5, color: C.dim }}>
+            {fmtFecha(data.inflacionInteranualFecha)}
+          </span>
+        </div>
+        <div style={{ display: "flex", alignItems: "baseline", gap: 6 }}>
+          <span style={{ fontSize: expanded ? 24 : 20, color: C.text, fontWeight: 600, fontVariantNumeric: "tabular-nums" }}>
+            {data.inflacionInteranual != null ? `${data.inflacionInteranual.toFixed(1)}%` : "—"}
+          </span>
+        </div>
+      </div>
+
+      {/* Notas de items pendientes — solo en expanded */}
+      {expanded && (
+        <div style={{
+          marginTop: 18,
+          paddingTop: 12,
+          borderTop: `1px solid ${C.border}`,
+          fontSize: 11,
+          color: C.muted,
+          lineHeight: 1.6,
+        }}>
+          <div style={{ fontSize: 10, color: C.dim, letterSpacing: "0.1em", textTransform: "uppercase", fontWeight: 600, marginBottom: 8 }}>
+            Próximamente
+          </div>
+          <ul style={{ margin: 0, paddingLeft: 16 }}>
+            <li>Reservas internacionales BCRA (USD millones)</li>
+            <li>Tasa de política monetaria (TNA)</li>
+            <li>Base monetaria</li>
+          </ul>
+          <p style={{ marginTop: 8, fontSize: 10, color: C.dim }}>
+            Requieren endpoint backend que proxee a api.bcra.gob.ar (la API oficial del BCRA no permite requests directos del navegador por restricciones CORS).
+          </p>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════
 // processCarryBonds: helper compartido que transforma el array crudo de
 // data912 (formato: {symbol, px_ask, c, ...}) en el array procesado con
 // TEA, TIR anual, TEM, días al vto, valorFinal, etc.
@@ -17603,10 +17818,20 @@ function CarryTradeWidget({ expanded }) {
     return `hace ${hours}h`;
   })();
 
-  // Top N por TEA descendente
+  // Top N por TEA descendente.
+  // Filtramos bonos con menos de 7 días al vto: en plazos muy cortos las
+  // tasas son extremadamente sensibles a centavos en el precio (un bono
+  // a 2 días tiene multiplicador 365/2 = 182.5 sobre el ROI, lo que
+  // amplifica diferencias de microstructura/bid-ask spread). Quedan
+  // valores poco representativos de la curva real. Verificado contra
+  // lamacro: S29Y6 (2 días) muestra TEA 36% pero es ruido — los bonos
+  // que sí se operan empiezan en T30J6 (34d) y más arriba.
   const topBonds = useMemo(() => {
     if (!bonds) return [];
-    return [...bonds].sort((a, b) => b.tea - a.tea).slice(0, expanded ? 15 : 5);
+    return [...bonds]
+      .filter((b) => b.days >= 7)
+      .sort((a, b) => b.tea - a.tea)
+      .slice(0, expanded ? 15 : 5);
   }, [bonds, expanded]);
 
   if (loading && !bonds) {
@@ -18350,7 +18575,6 @@ function DashboardModule() {
   // Los voy a ir reemplazando con widgets reales en próximas sesiones.
   const upcomingWidgets = [
     { title: "Alertas activas",   desc: "Cruces de basis, vencimientos próximos, gaps" },
-    { title: "Indicadores BCRA",  desc: "Reservas, tasa de política, riesgo país" },
   ];
 
   return (
@@ -18402,6 +18626,11 @@ function DashboardModule() {
         {/* Widget 4: Carry Trade (real) */}
         <DashboardWidget title="Carry Trade · Top TEA" minHeight={280}>
           {({ expanded }) => <CarryTradeWidget expanded={expanded} />}
+        </DashboardWidget>
+
+        {/* Widget 5: Indicadores BCRA / Macro (real) */}
+        <DashboardWidget title="Indicadores Macro" minHeight={280}>
+          {({ expanded }) => <BcraIndicatorsWidget expanded={expanded} />}
         </DashboardWidget>
 
         {/* Widgets placeholder — se van reemplazando en próximas sesiones */}
