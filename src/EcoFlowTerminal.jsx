@@ -17478,11 +17478,15 @@ function processCarryBonds(bondsRaw) {
       const tirAnual = Math.pow(1 + roiArs, 365 / days) - 1;
       const tem = Math.pow(1 + roiArs, 30 / days) - 1;
       const tea = Math.pow(1 + tem, 12) - 1;
-      // TNA: tasa nominal anual (simple, sin capitalización).
-      // Fórmula AR estándar: TNA = ROI × (365/días).
-      // Se diferencia de TEA porque NO capitaliza — para plazos cortos
-      // la TNA queda más alta que TEA; para plazos largos, al revés.
-      const tna = roiArs * (365 / days);
+      // TNA: convención argentina estándar = tasa nominal anual
+      // capitalizable mensualmente = TEM × 12. Es la que aparece en
+      // publicidad de plazos fijos. Con esta definición, SIEMPRE
+      // TEA > TNA (porque TEA capitaliza, TNA no).
+      //
+      // NOTA: existe otra fórmula común ROI × 365/días = "tasa
+      // proporcional anualizada", pero NO es la TNA estándar AR.
+      // La usaba antes y daba el bug de TNA > TEA en plazos cortos.
+      const tna = tem * 12;
 
       return {
         ticker, type: resolved.type, source: resolved.source,
