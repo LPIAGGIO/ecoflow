@@ -17595,7 +17595,7 @@ function DashboardModule() {
         <DashboardWidget title="Curva DLR · Detector de Basis" minHeight={280}>
           {({ expanded }) => (
             dlrCurve ? (
-              <DlrCurveSection dlrCurve={dlrCurve} C={C} compact={!expanded} />
+              <DlrCurveSection dlrCurve={dlrCurve} C={C} compact={!expanded} hideTitle />
             ) : (
               <div style={{ padding: "40px 22px", textAlign: "center", color: C.muted, fontSize: 11 }}>
                 {futuresLoading
@@ -21523,7 +21523,7 @@ function computeBontamFloor(temFija, fechaEmision, maturityDate) {
 // Originalmente vivía inline en SinteticoDolarModule; se extrajo para
 // poder reusar en el Dashboard (y otros lugares futuros).
 // ═══════════════════════════════════════════════════════════════════════
-function DlrCurveSection({ dlrCurve, C, compact = false }) {
+function DlrCurveSection({ dlrCurve, C, compact = false, hideTitle = false }) {
   if (!dlrCurve || dlrCurve.points.length < 2) return null;
 
   // Constantes de layout del SVG. En compact: gráfico más chico, sin tabla.
@@ -21571,9 +21571,11 @@ function DlrCurveSection({ dlrCurve, C, compact = false }) {
     <div style={{ marginTop: compact ? 0 : 24, padding: compact ? "10px 12px" : "18px 22px 16px 22px", background: compact ? "transparent" : C.panel, border: compact ? "none" : `1px solid ${C.border}` }}>
       {/* Header */}
       <div style={{ display: "flex", alignItems: "baseline", gap: compact ? 10 : 14, marginBottom: compact ? 8 : 14, flexWrap: "wrap" }}>
-        <h2 style={{ fontSize: compact ? 12 : 14, fontWeight: 600, color: C.text, margin: 0, letterSpacing: "0.05em", textTransform: "uppercase" }}>
-          Curva DLR · Detector de basis
-        </h2>
+        {!hideTitle && (
+          <h2 style={{ fontSize: compact ? 12 : 14, fontWeight: 600, color: C.text, margin: 0, letterSpacing: "0.05em", textTransform: "uppercase" }}>
+            Curva DLR · Detector de basis
+          </h2>
+        )}
         <span style={{ fontSize: compact ? 10.5 : 11.5, color: C.muted }}>
           Devaluación implícita: <strong style={{ color: C.text }}>{(dlrCurve.monthlyDevRate * 100).toFixed(2)}%</strong> mensual / <strong style={{ color: C.text }}>{(dlrCurve.annualDevRate * 100).toFixed(2)}%</strong> anual
         </span>
