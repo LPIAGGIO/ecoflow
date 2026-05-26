@@ -6254,19 +6254,17 @@ function useFciPrices(positions) {
 // ═══════════════════════════════════════════════════════════════════════
 // useArgentinaDatos: fetch de indicadores macro de argentinadatos.com.
 //
-// Trae los últimos valores de:
-//   - Inflación interanual (en %, ej: 32.4 = 32.4%).
-//   - Tasa de depósitos a 30 días (en decimal → convertimos a %, ej: 0.31 → 31).
+// Trae el último valor de:
+//   - Inflación mensual (en %, ej: 2.6 = 2.6%). Para usar como default
+//     en el input de devaluación de la comparativa de escenarios.
 //
-// Se usan como DEFAULTS en el modal del bono:
-//   - Tasa caución default = tasa depósitos 30d directa.
-//   - Devaluación default = inflación interanual prorrateada al horizonte
-//     del bono (matemáticamente: (1+i)^(días/365) - 1).
+// La API tiene también inflación interanual, plazo fijo, depósitos 30d,
+// pero NO tiene un endpoint específico de "caución bursátil". Para la
+// tasa de caución usamos como default la TIR ARS del bono más corto
+// del universo (calculado en el componente como `defaultCaucionTNA`),
+// que es una proxy directa del mercado y no depende de feeds externos.
 //
-// Cache singleton a nivel módulo: se fetchea UNA SOLA VEZ por sesión y se
-// comparte entre todos los componentes que usen el hook. No tiene TTL
-// porque los valores cambian con baja frecuencia (mensual / quincenal) y
-// no necesitan refrescarse en una sesión típica de usuario.
+// Cache singleton a nivel módulo: 1 sola petición por sesión, compartida.
 // ═══════════════════════════════════════════════════════════════════════
 let _argentinaDatosCache = null;
 let _argentinaDatosCachePromise = null;
@@ -6275,26 +6273,21 @@ async function fetchArgentinaDatos() {
   if (_argentinaDatosCache) return _argentinaDatosCache;
   if (_argentinaDatosCachePromise) return _argentinaDatosCachePromise;
 
-  _argentinaDatosCachePromise = Promise.all([
-    fetch("https://api.argentinadatos.com/v1/finanzas/indices/inflacionInteranual").then((r) => r.json()),
-    fetch("https://api.argentinadatos.com/v1/finanzas/tasas/depositos30Dias").then((r) => r.json()),
-  ]).then(([inflacionData, depositosData]) => {
-    const inflLast = Array.isArray(inflacionData) && inflacionData.length > 0
-      ? inflacionData[inflacionData.length - 1] : null;
-    const depLast = Array.isArray(depositosData) && depositosData.length > 0
-      ? depositosData[depositosData.length - 1] : null;
+  _argentinaDatosCachePromise = fetch("https://api.argentinadatos.com/v1/finanzas/indices/inflacion")
+    .then((r) => r.json())
+    .then((inflacionData) => {
+      const inflLast = Array.isArray(inflacionData) && inflacionData.length > 0
+        ? inflacionData[inflacionData.length - 1] : null;
 
-    _argentinaDatosCache = {
-      inflacionInteranual: inflLast?.valor ?? null,         // ej: 32.4
-      inflacionInteranualFecha: inflLast?.fecha ?? null,
-      depositos30d: depLast?.valor != null ? depLast.valor * 100 : null, // decimal → %
-      depositos30dFecha: depLast?.fecha ?? null,
-    };
-    return _argentinaDatosCache;
-  }).catch((err) => {
-    _argentinaDatosCachePromise = null; // permitir retry en próximo call
-    throw err;
-  });
+      _argentinaDatosCache = {
+        inflacionMensual: inflLast?.valor ?? null,           // ej: 2.6 (%)
+        inflacionMensualFecha: inflLast?.fecha ?? null,
+      };
+      return _argentinaDatosCache;
+    }).catch((err) => {
+      _argentinaDatosCachePromise = null;
+      throw err;
+    });
 
   return _argentinaDatosCachePromise;
 }
@@ -22621,39 +22614,27 @@ function BondDetailModal({ row, spotMayorista, spotMep, futuresLive, curveData, 
   // String con formato AR ("3,46"). Se parsea con parsePercentString().
   // Acepta negativos (para modelar apreciación del peso).
   const [customDevPercent, setCustomDevPercent] = useState("0");
-  // Flags para no sobreescribir el input si el usuario ya lo tocó.
-  // Cuando llega el feed de argentinadatos, si el flag es false, aplicamos
-  // el valor del feed como default. Si el flag es true (LP cambió algo),
-  // respetamos su valor manual.
-  const [caucionTouched, setCaucionTouched] = useState(false);
+  // Flag para no sobreescribir el input de devaluación si el usuario ya
+  // lo tocó manualmente. Cuando llega el feed de argentinadatos, si el
+  // flag es false, aplicamos el valor del feed como default.
+  // (La caución NO necesita esto: su default es la TIR ARS del bono más
+  // corto, calculado localmente, no viene de un feed externo).
   const [devTouched, setDevTouched] = useState(false);
 
-  // Fetch a argentinadatos para defaults de caución e inflación.
+  // Fetch a argentinadatos para default de devaluación.
   // El hook cachea a nivel módulo: 1 sola request por sesión, compartida.
   const { data: argentinaDatos } = useArgentinaDatos();
 
-  // Default caución: tasa de depósitos a 30 días (BCRA). Se aplica cuando
-  // llega el feed Y el usuario no tocó el input todavía.
+  // Default devaluación: último valor de inflación MENSUAL.
+  // Es UN número de referencia que el usuario puede modificar manualmente.
+  // No prorrateamos por horizonte porque la columna "Custom" de la tabla
+  // muestra escenarios fijos (DOLAR PLANO / +15% / -5% / Custom) y el
+  // valor que LP pone es el escenario que quiere modelar — su criterio.
   useEffect(() => {
-    if (argentinaDatos?.depositos30d != null && !caucionTouched) {
-      setCaucionRateInput(formatPercentInput(argentinaDatos.depositos30d.toFixed(2)));
+    if (argentinaDatos?.inflacionMensual != null && !devTouched) {
+      setCustomDevPercent(formatPercentInput(argentinaDatos.inflacionMensual.toFixed(2)));
     }
-  }, [argentinaDatos, caucionTouched]);
-
-  // Default devaluación: inflación interanual PRORRATEADA al horizonte del
-  // bono. La inflación interanual es ANUAL (32.4%); el input se aplica
-  // como devaluación TOTAL al expiry. Si el bono vence en 36d, usar 32.4%
-  // sería absurdo (=> 32.4% en 36 días). Prorrateamos:
-  //   dev_default = (1 + infl_anual)^(días/365) - 1
-  // Se recalcula cuando cambia row.days (otro bono). NO sobreescribe si
-  // el usuario tocó el input.
-  useEffect(() => {
-    if (argentinaDatos?.inflacionInteranual != null && !devTouched && Number.isFinite(row.days) && row.days > 0) {
-      const inflAnual = argentinaDatos.inflacionInteranual / 100;
-      const devProrrateada = Math.pow(1 + inflAnual, row.days / 365) - 1;
-      setCustomDevPercent(formatPercentInput((devProrrateada * 100).toFixed(2)));
-    }
-  }, [argentinaDatos, devTouched, row.days]);
+  }, [argentinaDatos, devTouched]);
 
   // Horizontes a mostrar en las tablas Single Hedge y Rolling Mensual del modal.
   // FILTRADO: omitimos los horizontes que exceden el vto del bono. Para un bono
@@ -23619,10 +23600,7 @@ function BondDetailModal({ row, spotMayorista, spotMep, futuresLive, curveData, 
                   type="text"
                   inputMode="decimal"
                   value={caucionRateInput}
-                  onChange={(e) => {
-                    setCaucionTouched(true);
-                    setCaucionRateInput(formatPercentInput(e.target.value));
-                  }}
+                  onChange={(e) => setCaucionRateInput(formatPercentInput(e.target.value))}
                   style={{
                     width: 78,
                     padding: "4px 8px",
@@ -23640,13 +23618,6 @@ function BondDetailModal({ row, spotMayorista, spotMep, futuresLive, curveData, 
                 {scenarios && Number.isFinite(scenarios.caucionTEA) && (
                   <span style={{ fontSize: 10, color: C.muted, fontStyle: "italic" }}>
                     → {(scenarios.caucionTEA * 100).toFixed(2)}% TEA
-                  </span>
-                )}
-                {argentinaDatos?.depositos30d != null && !caucionTouched && (
-                  <span style={{ fontSize: 10, color: C.dim, fontStyle: "italic" }}
-                    title={`Default del feed argentinadatos.com (BCRA, ${argentinaDatos.depositos30dFecha || "—"})`}
-                  >
-                    📊 depósitos 30d BCRA
                   </span>
                 )}
               </div>
@@ -23679,13 +23650,6 @@ function BondDetailModal({ row, spotMayorista, spotMep, futuresLive, curveData, 
                 {spotMep > 0 && (
                   <span style={{ fontSize: 10, color: C.muted, fontStyle: "italic" }}>
                     → MEP $ {(spotMep * (1 + parsePercentString(customDevPercent) / 100)).toFixed(2)}
-                  </span>
-                )}
-                {argentinaDatos?.inflacionInteranual != null && !devTouched && Number.isFinite(row.days) && (
-                  <span style={{ fontSize: 10, color: C.dim, fontStyle: "italic" }}
-                    title={`Inflación interanual ${argentinaDatos.inflacionInteranual.toFixed(1)}% (${argentinaDatos.inflacionInteranualFecha || "—"}) prorrateada a ${row.days}d del bono. Asume devaluación = inflación.`}
-                  >
-                    📊 {argentinaDatos.inflacionInteranual.toFixed(1)}% interanual prorrateado a {row.days}d
                   </span>
                 )}
               </div>
