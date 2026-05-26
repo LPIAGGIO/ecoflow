@@ -798,6 +798,8 @@ export default function EcoFlowTerminal() {
                 brokersLoading={brokersLoading}
                 refetchBrokers={refetchBrokers}
               />
+            ) : active === "dashboard" ? (
+              <DashboardModule />
             ) : (
               <EmptyWorkspace key={active} active={active} />
             )}
@@ -17342,6 +17344,73 @@ function ToggleButton({ active, onClick, children, color }) {
 
 
 
+// ═══════════════════════════════════════════════════════════════════════
+// DashboardModule: home del usuario al entrar a Midas.
+//
+// Por ahora muestra UNA sección: la Curva DLR + Detector de Basis. Es la
+// info de mercado más accionable y vale ponerla front-and-center.
+//
+// El hook useFuturePrices es propio del módulo (no compartido). Cuando el
+// usuario navega a otro item del menú, el componente se desmonta y el
+// polling se detiene (cleanup en el useEffect del hook). Si después abre
+// Sintético DLR, ese módulo hace SU polling propio. Hay un poco de fetch
+// duplicado al transicionar entre los dos, pero es transitorio y no genera
+// presión sobre el feed Primary (que ya cacheaba a 30s).
+//
+// En el futuro este módulo va a crecer con más secciones: totales de
+// portfolio, FX, alerts, etc. Por ahora solo la curva.
+// ═══════════════════════════════════════════════════════════════════════
+function DashboardModule() {
+  // Tickers DLR vivos (con vencimiento futuro). Memoizado para que el hook
+  // de polling no se reinicie en cada render.
+  const dlrTickers = useMemo(
+    () => DLR_REGISTRY
+      .filter((c) => daysToExpiry(c.maturityDate) > 0)
+      .map((c) => c.ticker),
+    []
+  );
+
+  const futurePricesState = useFuturePrices(dlrTickers);
+  const futurePrices = futurePricesState?.prices || {};
+  const futuresLoading = futurePricesState?.loading;
+
+  // Construcción de la curva. Reusa el helper global que también usa el
+  // Sintético DLR — misma lógica de filtrado y mismo umbral de basis.
+  const dlrCurve = useMemo(
+    () => buildDlrCurveFromFuturePrices(futurePrices),
+    [futurePrices]
+  );
+
+  return (
+    <div style={{ padding: "24px 28px", overflowY: "auto", height: "100%" }}>
+      {/* Header del módulo */}
+      <div style={{ marginBottom: 22, paddingBottom: 14, borderBottom: `1px solid ${C.border}` }}>
+        <h1 style={{ fontSize: 18, fontWeight: 600, color: C.text, margin: 0, letterSpacing: "0.04em", textTransform: "uppercase" }}>
+          Dashboard
+        </h1>
+        <p style={{ fontSize: 11, color: C.muted, margin: "6px 0 0 0", letterSpacing: "0.02em" }}>
+          Indicadores macro relevantes en tiempo real.
+        </p>
+      </div>
+
+      {/* Curva DLR + Detector de Basis — primera sección del Dashboard */}
+      {dlrCurve ? (
+        <DlrCurveSection dlrCurve={dlrCurve} C={C} />
+      ) : (
+        <div style={{ padding: "40px 22px", textAlign: "center", color: C.muted, fontSize: 12, background: C.panel, border: `1px solid ${C.border}` }}>
+          {futuresLoading
+            ? "Cargando precios de futuros DLR..."
+            : "Sin datos de futuros DLR disponibles. Verificá la conexión con Primary."
+          }
+        </div>
+      )}
+
+      {/* TODO próximas sesiones: más secciones (FX, totales del portfolio,
+          alertas, etc.) según vayamos sumando features. */}
+    </div>
+  );
+}
+
 function EmptyWorkspace({ active }) {
   const item = flattenNav(NAV).find((i) => i.id === active);
   const Icon = item?.icon || Activity;
@@ -20932,6 +21001,43 @@ function buildDlrCurve(futuresList, thresholdPct = 0.003) {
 }
 
 /**
+ * Helper que arma la curva DLR a partir de `futurePrices` (objeto crudo
+ * indexado por ticker, como el que devuelve useFuturePrices).
+ *
+ * Replica la lógica de filtrado/sorting que estaba inline en SinteticoDolarModule:
+ *   1. Filtrar DLR_REGISTRY por vivos (expiryDays > 0).
+ *   2. Para cada uno, resolver precio (price > settlement como fallback).
+ *   3. Filtrar los sin precio válido.
+ *   4. Sort por expiryDays ascendente.
+ *   5. Pasar a buildDlrCurve.
+ *
+ * Usado en DashboardOverview para mostrar la curva DLR como sección
+ * standalone, sin necesidad de los useMemos pesados del SinteticoDolarModule.
+ *
+ * @param {Object} futurePrices — { ticker: { price, settlement, error, ... } }
+ * @param {number} thresholdPct — umbral basis (default 0.003 = 0.3%)
+ * @returns {Object|null} resultado de buildDlrCurve, o null si no hay datos
+ */
+function buildDlrCurveFromFuturePrices(futurePrices, thresholdPct = 0.003) {
+  if (!futurePrices || typeof futurePrices !== "object") return null;
+
+  const futuresLive = DLR_REGISTRY
+    .map((c) => ({ ...c, expiryDays: daysToExpiry(c.maturityDate) }))
+    .filter((c) => c.expiryDays > 0)
+    .map((f) => {
+      const fp = futurePrices[f.ticker];
+      let price = null;
+      if (fp?.price > 0 && !fp.error) price = Number(fp.price);
+      else if (fp?.settlement > 0 && !fp.error) price = Number(fp.settlement);
+      return { ...f, price };
+    })
+    .filter((f) => Number.isFinite(f.price) && f.price > 0)
+    .sort((a, b) => a.expiryDays - b.expiryDays);
+
+  return buildDlrCurve(futuresLive, thresholdPct);
+}
+
+/**
  * Computa todas las TIR USD para un bono dado a multiples horizontes y
  * estrategias. Devuelve la matriz completa para que la UI elija qué mostrar.
  *
@@ -21170,6 +21276,221 @@ function computeBontamFloor(temFija, fechaEmision, maturityDate) {
   if (!Number.isFinite(ms) || ms <= 0) return null;
   const meses = ms / (1000 * 60 * 60 * 24 * 30.4375);
   return 100 * Math.pow(1 + temFija, meses);
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// DlrCurveSection: componente visual reusable de la Curva DLR + Basis.
+//
+// Recibe el objeto dlrCurve ya construido por buildDlrCurve(), el tema C,
+// y un prop opcional `compact` para versión chica (sin tabla ni nota).
+//
+// Uso típico:
+//   const dlrCurve = useMemo(() => buildDlrCurve(futuresLive, 0.003), [futuresLive]);
+//   <DlrCurveSection dlrCurve={dlrCurve} C={C} />          // full (default)
+//   <DlrCurveSection dlrCurve={dlrCurve} C={C} compact />   // compact
+//
+// Originalmente vivía inline en SinteticoDolarModule; se extrajo para
+// poder reusar en el Dashboard (y otros lugares futuros).
+// ═══════════════════════════════════════════════════════════════════════
+function DlrCurveSection({ dlrCurve, C, compact = false }) {
+  if (!dlrCurve || dlrCurve.points.length < 2) return null;
+
+  // Constantes de layout del SVG. En compact: gráfico más chico, sin tabla.
+  const SVG_W = compact ? 680 : 1100;
+  const SVG_H = compact ? 220 : 320;
+  const PAD_LEFT = compact ? 50 : 70;
+  const PAD_RIGHT = compact ? 25 : 40;
+  const PAD_TOP = compact ? 24 : 30;
+  const PAD_BOTTOM = compact ? 42 : 55;
+  const plotW = SVG_W - PAD_LEFT - PAD_RIGHT;
+  const plotH = SVG_H - PAD_TOP - PAD_BOTTOM;
+
+  const xMin = dlrCurve.points[0].expiryDays;
+  const xMax = dlrCurve.points[dlrCurve.points.length - 1].expiryDays;
+  const xSpan = xMax - xMin;
+
+  const allPrices = dlrCurve.points.flatMap((p) => [p.price, p.priceTheoric]);
+  const yMin = Math.min(...allPrices) * 0.98;
+  const yMax = Math.max(...allPrices) * 1.02;
+  const ySpan = yMax - yMin;
+
+  const xCoord = (days) => PAD_LEFT + ((days - xMin) / xSpan) * plotW;
+  const yCoord = (price) => PAD_TOP + plotH - ((price - yMin) / ySpan) * plotH;
+
+  const pathReal = dlrCurve.points
+    .map((p, i) => `${i === 0 ? "M" : "L"} ${xCoord(p.expiryDays)} ${yCoord(p.price)}`)
+    .join(" ");
+  const pathTheoric = dlrCurve.points
+    .map((p, i) => `${i === 0 ? "M" : "L"} ${xCoord(p.expiryDays)} ${yCoord(p.priceTheoric)}`)
+    .join(" ");
+
+  const yTicks = [0, 0.25, 0.5, 0.75, 1].map((f) => yMin + ySpan * f);
+
+  const colorForStatus = (s) => {
+    if (s === "barato") return C.green;
+    if (s === "caro") return C.red;
+    if (s === "ancla") return C.accent;
+    return C.muted;
+  };
+
+  const baratos = dlrCurve.points.filter((p) => p.status === "barato");
+  const caros = dlrCurve.points.filter((p) => p.status === "caro");
+
+  return (
+    <div style={{ marginTop: compact ? 0 : 24, padding: compact ? "12px 14px" : "18px 22px 16px 22px", background: C.panel, border: `1px solid ${C.border}` }}>
+      {/* Header */}
+      <div style={{ display: "flex", alignItems: "baseline", gap: compact ? 10 : 14, marginBottom: compact ? 8 : 14, flexWrap: "wrap" }}>
+        <h2 style={{ fontSize: compact ? 12 : 14, fontWeight: 600, color: C.text, margin: 0, letterSpacing: "0.05em", textTransform: "uppercase" }}>
+          Curva DLR · Detector de basis
+        </h2>
+        <span style={{ fontSize: compact ? 10.5 : 11.5, color: C.muted }}>
+          Devaluación implícita: <strong style={{ color: C.text }}>{(dlrCurve.monthlyDevRate * 100).toFixed(2)}%</strong> mensual / <strong style={{ color: C.text }}>{(dlrCurve.annualDevRate * 100).toFixed(2)}%</strong> anual
+        </span>
+        {(baratos.length > 0 || caros.length > 0) && (
+          <span style={{ fontSize: compact ? 10.5 : 11.5, color: C.muted, marginLeft: "auto" }}>
+            {baratos.length > 0 && (
+              <span style={{ color: C.green, fontWeight: 600 }}>
+                ● {baratos.length} barato{baratos.length > 1 ? "s" : ""}: {baratos.map((p) => p.shortTicker).join(", ")}
+              </span>
+            )}
+            {baratos.length > 0 && caros.length > 0 && <span style={{ color: C.dim, margin: "0 8px" }}>·</span>}
+            {caros.length > 0 && (
+              <span style={{ color: C.red, fontWeight: 600 }}>
+                ● {caros.length} caro{caros.length > 1 ? "s" : ""}: {caros.map((p) => p.shortTicker).join(", ")}
+              </span>
+            )}
+          </span>
+        )}
+      </div>
+
+      <div style={{ display: "flex", gap: 22, alignItems: "flex-start", flexWrap: "wrap" }}>
+        {/* Gráfico SVG */}
+        <div style={{ flex: compact ? "1 1 100%" : "1 1 700px", minWidth: compact ? 280 : 400 }}>
+          <svg viewBox={`0 0 ${SVG_W} ${SVG_H}`} style={{ width: "100%", height: "auto", maxHeight: compact ? 260 : 380 }}>
+            {/* Grid horizontal */}
+            {yTicks.map((tick, i) => (
+              <g key={`yt-${i}`}>
+                <line
+                  x1={PAD_LEFT}
+                  y1={yCoord(tick)}
+                  x2={SVG_W - PAD_RIGHT}
+                  y2={yCoord(tick)}
+                  stroke={C.border}
+                  strokeWidth="1"
+                  strokeDasharray="2,4"
+                />
+                <text
+                  x={PAD_LEFT - 10}
+                  y={yCoord(tick) + 4}
+                  textAnchor="end"
+                  fontSize={compact ? 9.5 : 11}
+                  fill={C.dim}
+                  fontFamily="'Roboto Mono', monospace"
+                >
+                  ${tick.toFixed(0)}
+                </text>
+              </g>
+            ))}
+
+            {/* Curva teórica */}
+            <path d={pathTheoric} fill="none" stroke={C.muted} strokeWidth={compact ? "1.5" : "1.8"} strokeDasharray="6,4" opacity="0.65"/>
+            {/* Curva real */}
+            <path d={pathReal} fill="none" stroke={C.accent} strokeWidth={compact ? "2" : "2.5"}/>
+
+            {/* Puntos */}
+            {dlrCurve.points.map((p) => {
+              const cx = xCoord(p.expiryDays);
+              const cy = yCoord(p.price);
+              const fill = colorForStatus(p.status);
+              return (
+                <g key={`pt-${p.ticker}`}>
+                  <circle cx={cx} cy={cy} r={compact ? 5 : 7} fill={fill} stroke="#0a0e1a" strokeWidth={compact ? "2" : "2.5"}>
+                    <title>
+                      {p.ticker}: ${p.price.toFixed(2)} (teórico ${p.priceTheoric.toFixed(2)}, basis {p.basisPct >= 0 ? "+" : ""}{p.basisPct.toFixed(2)}%)
+                    </title>
+                  </circle>
+                  <text
+                    x={cx}
+                    y={SVG_H - PAD_BOTTOM + (compact ? 14 : 18)}
+                    textAnchor="middle"
+                    fontSize={compact ? 9.5 : 11.5}
+                    fill={C.muted}
+                    fontFamily="'Roboto Mono', monospace"
+                    fontWeight="500"
+                  >
+                    {p.shortTicker}
+                  </text>
+                  <text
+                    x={cx}
+                    y={SVG_H - PAD_BOTTOM + (compact ? 26 : 33)}
+                    textAnchor="middle"
+                    fontSize={compact ? 9 : 10.5}
+                    fill={fill}
+                    fontFamily="'Roboto Mono', monospace"
+                    fontWeight="600"
+                  >
+                    {p.status === "ancla" ? "⚓" : (p.basisPct >= 0 ? "+" : "") + p.basisPct.toFixed(2) + "%"}
+                  </text>
+                </g>
+              );
+            })}
+
+            {/* Leyenda */}
+            <g transform={`translate(${PAD_LEFT + (compact ? 8 : 14)}, ${PAD_TOP + 4})`}>
+              <rect x="0" y="0" width={compact ? 170 : 195} height={compact ? 48 : 56} fill="rgba(15, 21, 36, 0.85)" stroke={C.border} strokeWidth="1" rx="3"/>
+              <line x1={compact ? 10 : 12} y1={compact ? 16 : 18} x2={compact ? 32 : 38} y2={compact ? 16 : 18} stroke={C.accent} strokeWidth={compact ? "2.5" : "3"}/>
+              <circle cx={compact ? 21 : 25} cy={compact ? 16 : 18} r={compact ? 3.5 : 4} fill={C.accent} stroke="#0a0e1a" strokeWidth="1.5"/>
+              <text x={compact ? 40 : 46} y={compact ? 19 : 22} fontSize={compact ? 10.5 : 12} fill={C.text} fontWeight="500">Precio real DLR</text>
+              <line x1={compact ? 10 : 12} y1={compact ? 35 : 40} x2={compact ? 32 : 38} y2={compact ? 35 : 40} stroke={C.muted} strokeWidth={compact ? "1.8" : "2"} strokeDasharray="5,3" opacity="0.75"/>
+              <text x={compact ? 40 : 46} y={compact ? 38 : 44} fontSize={compact ? 10.5 : 12} fill={C.text} fontWeight="500">Curva lisa teórica</text>
+            </g>
+          </svg>
+        </div>
+
+        {/* Tabla compacta de basis — OCULTA en modo compact */}
+        {!compact && (
+          <div style={{ flex: "0 1 340px", minWidth: 280 }}>
+            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12, fontVariantNumeric: "tabular-nums" }}>
+              <thead>
+                <tr>
+                  <th style={{ textAlign: "left", padding: "6px 8px", color: C.dim, fontSize: 10, letterSpacing: "0.06em", textTransform: "uppercase", fontWeight: 500, borderBottom: `1px solid ${C.border}` }}>DLR</th>
+                  <th style={{ textAlign: "right", padding: "6px 8px", color: C.dim, fontSize: 10, letterSpacing: "0.06em", textTransform: "uppercase", fontWeight: 500, borderBottom: `1px solid ${C.border}` }}>Real</th>
+                  <th style={{ textAlign: "right", padding: "6px 8px", color: C.dim, fontSize: 10, letterSpacing: "0.06em", textTransform: "uppercase", fontWeight: 500, borderBottom: `1px solid ${C.border}` }}>Teórico</th>
+                  <th style={{ textAlign: "right", padding: "6px 8px", color: C.dim, fontSize: 10, letterSpacing: "0.06em", textTransform: "uppercase", fontWeight: 500, borderBottom: `1px solid ${C.border}` }}>Basis</th>
+                </tr>
+              </thead>
+              <tbody>
+                {dlrCurve.points.map((p) => (
+                  <tr key={`tbl-${p.ticker}`} style={{ borderBottom: `1px solid ${C.border}` }}>
+                    <td style={{ padding: "6px 8px", color: C.text, fontWeight: 500 }}>
+                      <span style={{ color: colorForStatus(p.status), marginRight: 6, fontSize: 13 }}>●</span>
+                      {p.shortTicker}
+                    </td>
+                    <td style={{ padding: "6px 8px", textAlign: "right", color: C.text, fontFamily: "'Roboto Mono', monospace" }}>
+                      {p.price.toFixed(2)}
+                    </td>
+                    <td style={{ padding: "6px 8px", textAlign: "right", color: C.muted, fontFamily: "'Roboto Mono', monospace" }}>
+                      {p.priceTheoric.toFixed(2)}
+                    </td>
+                    <td style={{ padding: "6px 8px", textAlign: "right", color: colorForStatus(p.status), fontWeight: 600, fontFamily: "'Roboto Mono', monospace" }}>
+                      {p.status === "ancla" ? "ancla" : `${p.basisPct >= 0 ? "+" : ""}${p.basisPct.toFixed(2)}%`}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
+      {/* Nota explicativa al pie — OCULTA en modo compact */}
+      {!compact && (
+        <div style={{ marginTop: 14, padding: "10px 14px", background: "rgba(91, 141, 214, 0.06)", borderLeft: `2px solid ${C.accentBorder}`, fontSize: 11, color: C.muted, lineHeight: 1.6 }}>
+          <strong style={{ color: C.text }}>Lectura:</strong> la <strong style={{ color: C.text }}>curva lisa teórica</strong> asume devaluación mensual constante entre el primer y último DLR. Un DLR <strong style={{ color: C.green }}>verde</strong> cotiza por debajo de la curva (basis &lt; -0.3%) — hedgear con él captura alfa extra. Un DLR <strong style={{ color: C.red }}>rojo</strong> cotiza encima (basis &gt; +0.3%), se evita como hedge cuando hay alternativa. Las <strong style={{ color: C.accent }}>anclas</strong> (primer y último DLR) definen la curva por construcción.
+        </div>
+      )}
+    </div>
+  );
 }
 
 function SinteticoDolarModule() {
@@ -22301,227 +22622,8 @@ TIR_USD    = USD_factor^(365/T) − 1`}
         </table>
       </div>
 
-      {/* ═══════════════════════════════════════════════════════════ */}
-      {/* SECCIÓN: CURVA DLR + DETECTOR DE BASIS                       */}
-      {/* (En el menú principal, info de mercado siempre visible)      */}
-      {/* ═══════════════════════════════════════════════════════════ */}
-      {dlrCurve && dlrCurve.points.length >= 2 && (() => {
-        // Constantes de layout del SVG — más grande que en el modal
-        const SVG_W = 1100;
-        const SVG_H = 320;
-        const PAD_LEFT = 70;
-        const PAD_RIGHT = 40;
-        const PAD_TOP = 30;
-        const PAD_BOTTOM = 55;
-        const plotW = SVG_W - PAD_LEFT - PAD_RIGHT;
-        const plotH = SVG_H - PAD_TOP - PAD_BOTTOM;
-
-        const xMin = dlrCurve.points[0].expiryDays;
-        const xMax = dlrCurve.points[dlrCurve.points.length - 1].expiryDays;
-        const xSpan = xMax - xMin;
-
-        const allPrices = dlrCurve.points.flatMap((p) => [p.price, p.priceTheoric]);
-        const yMin = Math.min(...allPrices) * 0.98;
-        const yMax = Math.max(...allPrices) * 1.02;
-        const ySpan = yMax - yMin;
-
-        const xCoord = (days) => PAD_LEFT + ((days - xMin) / xSpan) * plotW;
-        const yCoord = (price) => PAD_TOP + plotH - ((price - yMin) / ySpan) * plotH;
-
-        const pathReal = dlrCurve.points
-          .map((p, i) => `${i === 0 ? "M" : "L"} ${xCoord(p.expiryDays)} ${yCoord(p.price)}`)
-          .join(" ");
-        const pathTheoric = dlrCurve.points
-          .map((p, i) => `${i === 0 ? "M" : "L"} ${xCoord(p.expiryDays)} ${yCoord(p.priceTheoric)}`)
-          .join(" ");
-
-        const yTicks = [0, 0.25, 0.5, 0.75, 1].map((f) => yMin + ySpan * f);
-
-        const colorForStatus = (s) => {
-          if (s === "barato") return C.green;
-          if (s === "caro") return C.red;
-          if (s === "ancla") return C.accent;
-          return C.muted;
-        };
-
-        const baratos = dlrCurve.points.filter((p) => p.status === "barato");
-        const caros = dlrCurve.points.filter((p) => p.status === "caro");
-
-        return (
-          <div style={{ marginTop: 24, padding: "18px 22px 16px 22px", background: C.panel, border: `1px solid ${C.border}` }}>
-            {/* Header */}
-            <div style={{ display: "flex", alignItems: "baseline", gap: 14, marginBottom: 14, flexWrap: "wrap" }}>
-              <h2 style={{ fontSize: 14, fontWeight: 600, color: C.text, margin: 0, letterSpacing: "0.05em", textTransform: "uppercase" }}>
-                Curva DLR · Detector de basis
-              </h2>
-              <span style={{ fontSize: 11.5, color: C.muted }}>
-                Devaluación implícita: <strong style={{ color: C.text }}>{(dlrCurve.monthlyDevRate * 100).toFixed(2)}%</strong> mensual / <strong style={{ color: C.text }}>{(dlrCurve.annualDevRate * 100).toFixed(2)}%</strong> anual
-              </span>
-              {(baratos.length > 0 || caros.length > 0) && (
-                <span style={{ fontSize: 11.5, color: C.muted, marginLeft: "auto" }}>
-                  {baratos.length > 0 && (
-                    <span style={{ color: C.green, fontWeight: 600 }}>
-                      ● {baratos.length} barato{baratos.length > 1 ? "s" : ""}: {baratos.map((p) => p.shortTicker).join(", ")}
-                    </span>
-                  )}
-                  {baratos.length > 0 && caros.length > 0 && <span style={{ color: C.dim, margin: "0 8px" }}>·</span>}
-                  {caros.length > 0 && (
-                    <span style={{ color: C.red, fontWeight: 600 }}>
-                      ● {caros.length} caro{caros.length > 1 ? "s" : ""}: {caros.map((p) => p.shortTicker).join(", ")}
-                    </span>
-                  )}
-                </span>
-              )}
-            </div>
-
-            <div style={{ display: "flex", gap: 22, alignItems: "flex-start", flexWrap: "wrap" }}>
-              {/* Gráfico SVG grande */}
-              <div style={{ flex: "1 1 700px", minWidth: 400 }}>
-                <svg viewBox={`0 0 ${SVG_W} ${SVG_H}`} style={{ width: "100%", height: "auto", maxHeight: 380 }}>
-                  {/* Grid horizontal (ticks Y) */}
-                  {yTicks.map((tick, i) => (
-                    <g key={`yt-${i}`}>
-                      <line
-                        x1={PAD_LEFT}
-                        y1={yCoord(tick)}
-                        x2={SVG_W - PAD_RIGHT}
-                        y2={yCoord(tick)}
-                        stroke={C.border}
-                        strokeWidth="1"
-                        strokeDasharray="2,4"
-                      />
-                      <text
-                        x={PAD_LEFT - 10}
-                        y={yCoord(tick) + 4}
-                        textAnchor="end"
-                        fontSize="11"
-                        fill={C.dim}
-                        fontFamily="'Roboto Mono', monospace"
-                      >
-                        ${tick.toFixed(0)}
-                      </text>
-                    </g>
-                  ))}
-
-                  {/* Curva teórica (punteada) */}
-                  <path
-                    d={pathTheoric}
-                    fill="none"
-                    stroke={C.muted}
-                    strokeWidth="1.8"
-                    strokeDasharray="6,4"
-                    opacity="0.65"
-                  />
-
-                  {/* Curva real (línea continua) */}
-                  <path
-                    d={pathReal}
-                    fill="none"
-                    stroke={C.accent}
-                    strokeWidth="2.5"
-                  />
-
-                  {/* Puntos coloreados */}
-                  {dlrCurve.points.map((p) => {
-                    const cx = xCoord(p.expiryDays);
-                    const cy = yCoord(p.price);
-                    const fill = colorForStatus(p.status);
-                    return (
-                      <g key={`pt-${p.ticker}`}>
-                        <circle cx={cx} cy={cy} r={7} fill={fill} stroke="#0a0e1a" strokeWidth="2.5">
-                          <title>
-                            {p.ticker}: ${p.price.toFixed(2)} (teórico ${p.priceTheoric.toFixed(2)}, basis {p.basisPct >= 0 ? "+" : ""}{p.basisPct.toFixed(2)}%)
-                          </title>
-                        </circle>
-                        {/* Etiqueta del ticker */}
-                        <text
-                          x={cx}
-                          y={SVG_H - PAD_BOTTOM + 18}
-                          textAnchor="middle"
-                          fontSize="11.5"
-                          fill={C.muted}
-                          fontFamily="'Roboto Mono', monospace"
-                          fontWeight="500"
-                        >
-                          {p.shortTicker}
-                        </text>
-                        {/* Basis */}
-                        <text
-                          x={cx}
-                          y={SVG_H - PAD_BOTTOM + 33}
-                          textAnchor="middle"
-                          fontSize="10.5"
-                          fill={fill}
-                          fontFamily="'Roboto Mono', monospace"
-                          fontWeight="600"
-                        >
-                          {p.status === "ancla" ? "⚓" : (p.basisPct >= 0 ? "+" : "") + p.basisPct.toFixed(2) + "%"}
-                        </text>
-                      </g>
-                    );
-                  })}
-
-                  {/* Leyenda con cuadro de fondo, borde y fuentes más
-                      legibles. Posicionada arriba a la izquierda para no
-                      interferir con la curva (que avanza hacia abajo-derecha). */}
-                  <g transform={`translate(${PAD_LEFT + 14}, ${PAD_TOP + 4})`}>
-                    <rect
-                      x="0" y="0" width="195" height="56"
-                      fill="rgba(15, 21, 36, 0.85)"
-                      stroke={C.border}
-                      strokeWidth="1"
-                      rx="3"
-                    />
-                    <line x1="12" y1="18" x2="38" y2="18" stroke={C.accent} strokeWidth="3"/>
-                    <circle cx="25" cy="18" r="4" fill={C.accent} stroke="#0a0e1a" strokeWidth="1.5"/>
-                    <text x="46" y="22" fontSize="12" fill={C.text} fontWeight="500">Precio real DLR</text>
-                    <line x1="12" y1="40" x2="38" y2="40" stroke={C.muted} strokeWidth="2" strokeDasharray="5,3" opacity="0.75"/>
-                    <text x="46" y="44" fontSize="12" fill={C.text} fontWeight="500">Curva lisa teórica</text>
-                  </g>
-                </svg>
-              </div>
-
-              {/* Tabla compacta de basis */}
-              <div style={{ flex: "0 1 340px", minWidth: 280 }}>
-                <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12, fontVariantNumeric: "tabular-nums" }}>
-                  <thead>
-                    <tr>
-                      <th style={{ textAlign: "left", padding: "6px 8px", color: C.dim, fontSize: 10, letterSpacing: "0.06em", textTransform: "uppercase", fontWeight: 500, borderBottom: `1px solid ${C.border}` }}>DLR</th>
-                      <th style={{ textAlign: "right", padding: "6px 8px", color: C.dim, fontSize: 10, letterSpacing: "0.06em", textTransform: "uppercase", fontWeight: 500, borderBottom: `1px solid ${C.border}` }}>Real</th>
-                      <th style={{ textAlign: "right", padding: "6px 8px", color: C.dim, fontSize: 10, letterSpacing: "0.06em", textTransform: "uppercase", fontWeight: 500, borderBottom: `1px solid ${C.border}` }}>Teórico</th>
-                      <th style={{ textAlign: "right", padding: "6px 8px", color: C.dim, fontSize: 10, letterSpacing: "0.06em", textTransform: "uppercase", fontWeight: 500, borderBottom: `1px solid ${C.border}` }}>Basis</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {dlrCurve.points.map((p) => (
-                      <tr key={`tbl-${p.ticker}`} style={{ borderBottom: `1px solid ${C.border}` }}>
-                        <td style={{ padding: "6px 8px", color: C.text, fontWeight: 500 }}>
-                          <span style={{ color: colorForStatus(p.status), marginRight: 6, fontSize: 13 }}>●</span>
-                          {p.shortTicker}
-                        </td>
-                        <td style={{ padding: "6px 8px", textAlign: "right", color: C.text, fontFamily: "'Roboto Mono', monospace" }}>
-                          {p.price.toFixed(2)}
-                        </td>
-                        <td style={{ padding: "6px 8px", textAlign: "right", color: C.muted, fontFamily: "'Roboto Mono', monospace" }}>
-                          {p.priceTheoric.toFixed(2)}
-                        </td>
-                        <td style={{ padding: "6px 8px", textAlign: "right", color: colorForStatus(p.status), fontWeight: 600, fontFamily: "'Roboto Mono', monospace" }}>
-                          {p.status === "ancla" ? "ancla" : `${p.basisPct >= 0 ? "+" : ""}${p.basisPct.toFixed(2)}%`}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            </div>
-
-            {/* Nota explicativa al pie */}
-            <div style={{ marginTop: 14, padding: "10px 14px", background: "rgba(91, 141, 214, 0.06)", borderLeft: `2px solid ${C.accentBorder}`, fontSize: 11, color: C.muted, lineHeight: 1.6 }}>
-              <strong style={{ color: C.text }}>Lectura:</strong> la <strong style={{ color: C.text }}>curva lisa teórica</strong> asume devaluación mensual constante entre el primer y último DLR. Un DLR <strong style={{ color: C.green }}>verde</strong> cotiza por debajo de la curva (basis &lt; -0.3%) — hedgear con él captura alfa extra. Un DLR <strong style={{ color: C.red }}>rojo</strong> cotiza encima (basis &gt; +0.3%), se evita como hedge cuando hay alternativa. Las <strong style={{ color: C.accent }}>anclas</strong> (primer y último DLR) definen la curva por construcción.
-            </div>
-          </div>
-        );
-      })()}
+      {/* Curva DLR + Detector de Basis (componente reusable, también en Dashboard) */}
+      <DlrCurveSection dlrCurve={dlrCurve} C={C} />
 
       {/* Footer */}
       <div style={{ marginTop: 14, fontSize: 10, color: C.dim, letterSpacing: "0.05em", textTransform: "uppercase", fontWeight: 500 }}>
@@ -25339,9 +25441,6 @@ function typeColor(type) {
     default: return C.text;
   }
 }
-
-
-
 
 function typeLabel(type) {
   switch (type) {
