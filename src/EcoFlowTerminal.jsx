@@ -1227,6 +1227,49 @@ function parseAmountString(str) {
   return Number.isFinite(n) ? n : 0;
 }
 
+// Helpers de máscara para inputs de PORCENTAJE en formato AR.
+// Como un porcentaje, NO necesitamos separadores de miles. Solo manejamos
+// la conversión "." → "," (intento de decimal) y limitamos a 2 decimales.
+// Permite el signo "-" al principio (para apreciación / valores negativos).
+//
+// Casos:
+//   "3.46"   → "3,46"
+//   "-5"     → "-5"
+//   "0.5"    → "0,5"
+//   ".5"     → ",5"
+//   "1,234"  → "1,23" (decimales limitados)
+//
+// Uso:
+//   <input value={x} onChange={(e) => setX(formatPercentInput(e.target.value))} />
+//   const value = parsePercentString(x);
+function formatPercentInput(raw) {
+  if (raw == null) return "";
+  let s = String(raw);
+  // Reemplazar "." por "," (formato AR, sin separadores de miles)
+  s = s.replace(/\./g, ",");
+  // Preservar signo "-" si está al inicio
+  const isNegative = s.startsWith("-");
+  s = s.replace(/-/g, "");
+  // Solo dígitos y coma
+  s = s.replace(/[^\d,]/g, "");
+  // Una sola coma
+  const firstComma = s.indexOf(",");
+  if (firstComma !== -1) {
+    s = s.slice(0, firstComma + 1) + s.slice(firstComma + 1).replace(/,/g, "");
+    // Limitar decimales a 2
+    const [intPart, decPart = ""] = s.split(",");
+    s = intPart + "," + decPart.slice(0, 2);
+  }
+  return (isNegative ? "-" : "") + s;
+}
+
+function parsePercentString(str) {
+  if (str == null || str === "") return 0;
+  const cleaned = String(str).replace(",", ".");
+  const n = parseFloat(cleaned);
+  return Number.isFinite(n) ? n : 0;
+}
+
 const fmtPct = (n) =>
   n == null ? "—" : `${n >= 0 ? "+" : ""}${n.toFixed(2)}%`;
 
@@ -22512,7 +22555,9 @@ function BondDetailModal({ row, spotMayorista, spotMep, futuresLive, curveData, 
     return Number((tna * 100).toFixed(2));
   }, [shortestBondTir]);
   const [caucionRateInput, setCaucionRateInput] = useState(String(defaultCaucionTNA));
-  const [customDevPercent, setCustomDevPercent] = useState(0);
+  // String con formato AR ("3,46"). Se parsea con parsePercentString().
+  // Acepta negativos (para modelar apreciación del peso).
+  const [customDevPercent, setCustomDevPercent] = useState("0");
 
   // Horizontes a mostrar en las tablas Single Hedge y Rolling Mensual del modal.
   // FILTRADO: omitimos los horizontes que exceden el vto del bono. Para un bono
@@ -22701,7 +22746,7 @@ function BondDetailModal({ row, spotMayorista, spotMep, futuresLive, curveData, 
     if (!Number.isFinite(usdIn) || usdIn <= 0) return null;
 
     // Tasa de caución (input en TNA decimal). Default desde defaultCaucionTNA.
-    const caucionTNA = Number(caucionRateInput) / 100;
+    const caucionTNA = parsePercentString(caucionRateInput) / 100;
     const caucionTNAvalid = Number.isFinite(caucionTNA) ? Math.max(0, caucionTNA) : 0.35;
     // TEA derivada (capitalización diaria), para mostrar como info.
     const caucionTEA = Math.pow(1 + caucionTNAvalid / 365, 365) - 1;
@@ -22724,7 +22769,7 @@ function BondDetailModal({ row, spotMayorista, spotMep, futuresLive, curveData, 
       { id: "curva", label: "Curva implícita", subLabel: `MEP al expiry: $${(MEP_hoy * F_hedge / Spot_may).toFixed(2)}`, MEP_exp: MEP_hoy * (F_hedge / Spot_may) },
       { id: "stress", label: "Devaluación +15%", subLabel: `MEP al expiry: $${(MEP_hoy * 1.15).toFixed(2)}`, MEP_exp: MEP_hoy * 1.15 },
       { id: "baja", label: "Dólar baja -5%", subLabel: `MEP al expiry: $${(MEP_hoy * 0.95).toFixed(2)}`, MEP_exp: MEP_hoy * 0.95 },
-      { id: "custom", label: `Custom: ${customDevPercent >= 0 ? "+" : ""}${customDevPercent.toFixed(2)}%`, subLabel: `MEP al expiry: $${(MEP_hoy * (1 + customDevPercent / 100)).toFixed(2)}`, MEP_exp: MEP_hoy * (1 + customDevPercent / 100) },
+      { id: "custom", label: `Custom: ${parsePercentString(customDevPercent) >= 0 ? "+" : ""}${parsePercentString(customDevPercent).toFixed(2)}%`, subLabel: `MEP al expiry: $${(MEP_hoy * (1 + parsePercentString(customDevPercent) / 100)).toFixed(2)}`, MEP_exp: MEP_hoy * (1 + parsePercentString(customDevPercent) / 100) },
     ];
 
     // Calcular celdas
@@ -23475,10 +23520,10 @@ function BondDetailModal({ row, spotMayorista, spotMep, futuresLive, curveData, 
                   Tasa caución
                 </span>
                 <input
-                  type="number"
+                  type="text"
+                  inputMode="decimal"
                   value={caucionRateInput}
-                  onChange={(e) => setCaucionRateInput(e.target.value)}
-                  step="0.5"
+                  onChange={(e) => setCaucionRateInput(formatPercentInput(e.target.value))}
                   style={{
                     width: 78,
                     padding: "4px 8px",
@@ -23504,10 +23549,10 @@ function BondDetailModal({ row, spotMayorista, spotMep, futuresLive, curveData, 
                   Devaluación
                 </span>
                 <input
-                  type="number"
+                  type="text"
+                  inputMode="decimal"
                   value={customDevPercent}
-                  onChange={(e) => setCustomDevPercent(Number(e.target.value))}
-                  step="0.25"
+                  onChange={(e) => setCustomDevPercent(formatPercentInput(e.target.value))}
                   style={{
                     width: 78,
                     padding: "4px 8px",
@@ -23522,9 +23567,9 @@ function BondDetailModal({ row, spotMayorista, spotMep, futuresLive, curveData, 
                   }}
                 />
                 <span style={{ fontSize: 10, color: C.dim }}>%</span>
-                {Number.isFinite(customDevPercent) && spotMep > 0 && (
+                {spotMep > 0 && (
                   <span style={{ fontSize: 10, color: C.muted, fontStyle: "italic" }}>
-                    → MEP $ {(spotMep * (1 + customDevPercent / 100)).toFixed(2)}
+                    → MEP $ {(spotMep * (1 + parsePercentString(customDevPercent) / 100)).toFixed(2)}
                   </span>
                 )}
               </div>
