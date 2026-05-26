@@ -17478,11 +17478,16 @@ function processCarryBonds(bondsRaw) {
       const tirAnual = Math.pow(1 + roiArs, 365 / days) - 1;
       const tem = Math.pow(1 + roiArs, 30 / days) - 1;
       const tea = Math.pow(1 + tem, 12) - 1;
+      // TNA: tasa nominal anual (simple, sin capitalización).
+      // Fórmula AR estándar: TNA = ROI × (365/días).
+      // Se diferencia de TEA porque NO capitaliza — para plazos cortos
+      // la TNA queda más alta que TEA; para plazos largos, al revés.
+      const tna = roiArs * (365 / days);
 
       return {
         ticker, type: resolved.type, source: resolved.source,
         maturityDate: resolved.maturityDate, days, priceArs, valorFinal,
-        hasFinalPayoff, roiArs, tirAnual, tem, tea,
+        hasFinalPayoff, roiArs, tirAnual, tem, tea, tna,
       };
     })
     .filter(Boolean);
@@ -17627,21 +17632,22 @@ function CarryTradeWidget({ expanded }) {
       <table style={{
         width: "100%",
         borderCollapse: "collapse",
-        fontSize: expanded ? 12 : 11.5,
+        fontSize: expanded ? 12 : 11,
         fontVariantNumeric: "tabular-nums",
       }}>
         <thead>
           <tr>
-            <th style={{ textAlign: "left", padding: "5px 6px", color: C.dim, fontSize: 9.5, letterSpacing: "0.06em", textTransform: "uppercase", fontWeight: 500, borderBottom: `1px solid ${C.border}` }}>Ticker</th>
-            <th style={{ textAlign: "right", padding: "5px 6px", color: C.dim, fontSize: 9.5, letterSpacing: "0.06em", textTransform: "uppercase", fontWeight: 500, borderBottom: `1px solid ${C.border}` }}>Vto</th>
-            <th style={{ textAlign: "right", padding: "5px 6px", color: C.dim, fontSize: 9.5, letterSpacing: "0.06em", textTransform: "uppercase", fontWeight: 500, borderBottom: `1px solid ${C.border}` }}>Días</th>
-            <th style={{ textAlign: "right", padding: "5px 6px", color: C.dim, fontSize: 9.5, letterSpacing: "0.06em", textTransform: "uppercase", fontWeight: 500, borderBottom: `1px solid ${C.border}` }}>TEA</th>
+            <th style={{ textAlign: "left", padding: "5px 5px", color: C.dim, fontSize: 9.5, letterSpacing: "0.06em", textTransform: "uppercase", fontWeight: 500, borderBottom: `1px solid ${C.border}` }}>Ticker</th>
+            <th style={{ textAlign: "right", padding: "5px 5px", color: C.dim, fontSize: 9.5, letterSpacing: "0.06em", textTransform: "uppercase", fontWeight: 500, borderBottom: `1px solid ${C.border}` }}>Vto</th>
+            <th style={{ textAlign: "right", padding: "5px 5px", color: C.dim, fontSize: 9.5, letterSpacing: "0.06em", textTransform: "uppercase", fontWeight: 500, borderBottom: `1px solid ${C.border}` }}>Días</th>
+            <th style={{ textAlign: "right", padding: "5px 5px", color: C.dim, fontSize: 9.5, letterSpacing: "0.06em", textTransform: "uppercase", fontWeight: 500, borderBottom: `1px solid ${C.border}` }}>Precio</th>
+            <th style={{ textAlign: "right", padding: "5px 5px", color: C.dim, fontSize: 9.5, letterSpacing: "0.06em", textTransform: "uppercase", fontWeight: 500, borderBottom: `1px solid ${C.border}` }}>TNA</th>
+            <th style={{ textAlign: "right", padding: "5px 5px", color: C.dim, fontSize: 9.5, letterSpacing: "0.06em", textTransform: "uppercase", fontWeight: 500, borderBottom: `1px solid ${C.border}` }}>TEA</th>
             {expanded && (
               <>
-                <th style={{ textAlign: "right", padding: "5px 6px", color: C.dim, fontSize: 9.5, letterSpacing: "0.06em", textTransform: "uppercase", fontWeight: 500, borderBottom: `1px solid ${C.border}` }}>TEM</th>
-                <th style={{ textAlign: "right", padding: "5px 6px", color: C.dim, fontSize: 9.5, letterSpacing: "0.06em", textTransform: "uppercase", fontWeight: 500, borderBottom: `1px solid ${C.border}` }}>ROI</th>
-                <th style={{ textAlign: "right", padding: "5px 6px", color: C.dim, fontSize: 9.5, letterSpacing: "0.06em", textTransform: "uppercase", fontWeight: 500, borderBottom: `1px solid ${C.border}` }}>Precio</th>
-                <th style={{ textAlign: "right", padding: "5px 6px", color: C.dim, fontSize: 9.5, letterSpacing: "0.06em", textTransform: "uppercase", fontWeight: 500, borderBottom: `1px solid ${C.border}` }}>V.Final</th>
+                <th style={{ textAlign: "right", padding: "5px 5px", color: C.dim, fontSize: 9.5, letterSpacing: "0.06em", textTransform: "uppercase", fontWeight: 500, borderBottom: `1px solid ${C.border}` }}>TEM</th>
+                <th style={{ textAlign: "right", padding: "5px 5px", color: C.dim, fontSize: 9.5, letterSpacing: "0.06em", textTransform: "uppercase", fontWeight: 500, borderBottom: `1px solid ${C.border}` }}>ROI</th>
+                <th style={{ textAlign: "right", padding: "5px 5px", color: C.dim, fontSize: 9.5, letterSpacing: "0.06em", textTransform: "uppercase", fontWeight: 500, borderBottom: `1px solid ${C.border}` }}>V.Final</th>
               </>
             )}
           </tr>
@@ -17649,33 +17655,36 @@ function CarryTradeWidget({ expanded }) {
         <tbody>
           {topBonds.map((b, i) => (
             <tr key={b.ticker} style={{ borderBottom: `1px solid ${C.border}` }}>
-              <td style={{ padding: "6px", color: C.text, fontWeight: 500 }}>
+              <td style={{ padding: "5px", color: C.text, fontWeight: 500 }}>
                 {b.ticker}
                 {!b.hasFinalPayoff && (
                   <span title="Valor final aproximado a $100 (sin dato real)" style={{ color: C.dim, marginLeft: 4 }}>*</span>
                 )}
               </td>
-              <td style={{ padding: "6px", textAlign: "right", color: C.muted }}>
+              <td style={{ padding: "5px", textAlign: "right", color: C.muted }}>
                 {fmtDateDDMM(b.maturityDate)}
               </td>
-              <td style={{ padding: "6px", textAlign: "right", color: C.muted }}>
+              <td style={{ padding: "5px", textAlign: "right", color: C.muted }}>
                 {b.days}
               </td>
-              <td style={{ padding: "6px", textAlign: "right", color: i < 3 ? C.green : C.text, fontWeight: 600 }}>
+              <td style={{ padding: "5px", textAlign: "right", color: C.muted }}>
+                {fmtARS(b.priceArs)}
+              </td>
+              <td style={{ padding: "5px", textAlign: "right", color: C.text, fontWeight: 500 }}>
+                {(b.tna * 100).toFixed(1)}%
+              </td>
+              <td style={{ padding: "5px", textAlign: "right", color: i < 3 ? C.green : C.text, fontWeight: 600 }}>
                 {(b.tea * 100).toFixed(1)}%
               </td>
               {expanded && (
                 <>
-                  <td style={{ padding: "6px", textAlign: "right", color: C.muted }}>
+                  <td style={{ padding: "5px", textAlign: "right", color: C.muted }}>
                     {(b.tem * 100).toFixed(2)}%
                   </td>
-                  <td style={{ padding: "6px", textAlign: "right", color: C.muted }}>
+                  <td style={{ padding: "5px", textAlign: "right", color: C.muted }}>
                     {(b.roiArs * 100).toFixed(2)}%
                   </td>
-                  <td style={{ padding: "6px", textAlign: "right", color: C.muted }}>
-                    {fmtARS(b.priceArs)}
-                  </td>
-                  <td style={{ padding: "6px", textAlign: "right", color: C.muted }}>
+                  <td style={{ padding: "5px", textAlign: "right", color: C.muted }}>
                     {fmtARS(b.valorFinal)}
                   </td>
                 </>
