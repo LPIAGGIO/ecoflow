@@ -25340,6 +25340,9 @@ function typeColor(type) {
   }
 }
 
+
+
+
 function typeLabel(type) {
   switch (type) {
     case "lecap": return "Lecap";
