@@ -17345,6 +17345,184 @@ function ToggleButton({ active, onClick, children, color }) {
 
 
 // ═══════════════════════════════════════════════════════════════════════
+// DashboardWidget: contenedor reusable para los widgets del Dashboard.
+//
+// Cada widget tiene:
+//   - Header con título + botón de maximizar.
+//   - Cuerpo compacto por default.
+//   - Click en maximizar → modal a pantalla completa con la versión expandida.
+//
+// El children es una FUNCIÓN que recibe { expanded } y devuelve el JSX.
+// Permite que el contenido se adapte: chico cuando es widget, grande
+// cuando es modal.
+//
+// Uso:
+//   <DashboardWidget title="Curva DLR">
+//     {({ expanded }) => (
+//       <DlrCurveSection dlrCurve={dlrCurve} C={C} compact={!expanded} />
+//     )}
+//   </DashboardWidget>
+//
+// El modal se cierra con Escape, click en backdrop, o click en la X.
+// ═══════════════════════════════════════════════════════════════════════
+function DashboardWidget({ title, children, minHeight = 240 }) {
+  const [expanded, setExpanded] = useState(false);
+
+  // Escape cierra el modal cuando está expandido
+  useEffect(() => {
+    if (!expanded) return;
+    const onKey = (e) => { if (e.key === "Escape") setExpanded(false); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [expanded]);
+
+  // Lock scroll del body cuando el modal está abierto
+  useEffect(() => {
+    if (!expanded) return;
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => { document.body.style.overflow = prev; };
+  }, [expanded]);
+
+  return (
+    <>
+      {/* Widget compacto en el grid */}
+      <div style={{
+        background: C.panel,
+        border: `1px solid ${C.border}`,
+        display: "flex",
+        flexDirection: "column",
+        minHeight,
+      }}>
+        {/* Header del widget */}
+        <div style={{
+          padding: "10px 14px",
+          borderBottom: `1px solid ${C.border}`,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          gap: 10,
+        }}>
+          <span style={{
+            fontSize: 11,
+            fontWeight: 600,
+            color: C.text,
+            letterSpacing: "0.06em",
+            textTransform: "uppercase",
+          }}>
+            {title}
+          </span>
+          <button
+            onClick={() => setExpanded(true)}
+            title="Maximizar"
+            style={{
+              width: 22,
+              height: 22,
+              padding: 0,
+              background: "transparent",
+              border: `1px solid ${C.border}`,
+              color: C.muted,
+              cursor: "pointer",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              fontSize: 14,
+              lineHeight: 1,
+            }}
+            onMouseEnter={(e) => { e.currentTarget.style.borderColor = C.accent; e.currentTarget.style.color = C.text; }}
+            onMouseLeave={(e) => { e.currentTarget.style.borderColor = C.border; e.currentTarget.style.color = C.muted; }}
+          >
+            ⛶
+          </button>
+        </div>
+
+        {/* Cuerpo compacto */}
+        <div style={{ flex: 1, padding: 0, overflow: "hidden" }}>
+          {children({ expanded: false })}
+        </div>
+      </div>
+
+      {/* Modal expandido (cuando expanded=true) */}
+      {expanded && (
+        <div
+          onClick={() => setExpanded(false)}
+          style={{
+            position: "fixed",
+            inset: 0,
+            background: "rgba(5, 8, 15, 0.85)",
+            backdropFilter: "blur(4px)",
+            zIndex: 100,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            padding: 30,
+          }}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              background: C.bg || "#0a0e1a",
+              border: `1px solid ${C.accentBorder}`,
+              maxWidth: 1400,
+              width: "100%",
+              maxHeight: "90vh",
+              overflow: "auto",
+              boxShadow: `0 0 60px ${C.accentGlow || "rgba(91,141,214,0.3)"}`,
+            }}
+          >
+            {/* Header del modal expandido */}
+            <div style={{
+              padding: "14px 22px",
+              borderBottom: `1px solid ${C.border}`,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+              position: "sticky",
+              top: 0,
+              background: C.bg || "#0a0e1a",
+              zIndex: 1,
+            }}>
+              <span style={{
+                fontSize: 13,
+                fontWeight: 600,
+                color: C.text,
+                letterSpacing: "0.06em",
+                textTransform: "uppercase",
+              }}>
+                {title}
+              </span>
+              <button
+                onClick={() => setExpanded(false)}
+                title="Cerrar (Esc)"
+                style={{
+                  padding: "4px 12px",
+                  background: "transparent",
+                  border: `1px solid ${C.border}`,
+                  color: C.muted,
+                  cursor: "pointer",
+                  fontSize: 11,
+                  letterSpacing: "0.05em",
+                  textTransform: "uppercase",
+                }}
+                onMouseEnter={(e) => { e.currentTarget.style.borderColor = C.red; e.currentTarget.style.color = C.text; }}
+                onMouseLeave={(e) => { e.currentTarget.style.borderColor = C.border; e.currentTarget.style.color = C.muted; }}
+              >
+                Cerrar ✕
+              </button>
+            </div>
+
+            {/* Cuerpo expandido */}
+            <div>
+              {children({ expanded: true })}
+            </div>
+          </div>
+        </div>
+      )}
+    </>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════
 // DashboardModule: home del usuario al entrar a Midas.
 //
 // Por ahora muestra UNA sección: la Curva DLR + Detector de Basis. Es la
@@ -17381,32 +17559,85 @@ function DashboardModule() {
     [futurePrices]
   );
 
+  // Placeholders de widgets futuros. Cada uno reserva espacio en el grid
+  // para que se vea el formato de "panel modular" desde el primer día.
+  // Los voy a ir reemplazando con widgets reales en próximas sesiones.
+  const upcomingWidgets = [
+    { title: "FX en vivo",        desc: "Spot mayorista · MEP · CCL · Blue" },
+    { title: "Resumen Portfolio", desc: "Total, distribución por moneda, P&L del día" },
+    { title: "Alertas activas",   desc: "Cruces de basis, vencimientos próximos, gaps" },
+    { title: "Indicadores BCRA",  desc: "Reservas, tasa de política, riesgo país" },
+    { title: "Carry Trade",       desc: "Top oportunidades de carry en BONCAPs/LECAPs" },
+  ];
+
   return (
-    <div style={{ padding: "24px 28px", overflowY: "auto", height: "100%" }}>
+    <div style={{ padding: "20px 24px 32px", overflowY: "auto", height: "100%" }}>
       {/* Header del módulo */}
-      <div style={{ marginBottom: 22, paddingBottom: 14, borderBottom: `1px solid ${C.border}` }}>
-        <h1 style={{ fontSize: 18, fontWeight: 600, color: C.text, margin: 0, letterSpacing: "0.04em", textTransform: "uppercase" }}>
+      <div style={{ marginBottom: 18, paddingBottom: 12, borderBottom: `1px solid ${C.border}` }}>
+        <h1 style={{ fontSize: 16, fontWeight: 600, color: C.text, margin: 0, letterSpacing: "0.05em", textTransform: "uppercase" }}>
           Dashboard
         </h1>
-        <p style={{ fontSize: 11, color: C.muted, margin: "6px 0 0 0", letterSpacing: "0.02em" }}>
-          Indicadores macro relevantes en tiempo real.
+        <p style={{ fontSize: 11, color: C.muted, margin: "5px 0 0 0", letterSpacing: "0.02em" }}>
+          Panel modular · click en ⛶ para expandir cada widget
         </p>
       </div>
 
-      {/* Curva DLR + Detector de Basis — primera sección del Dashboard */}
-      {dlrCurve ? (
-        <DlrCurveSection dlrCurve={dlrCurve} C={C} />
-      ) : (
-        <div style={{ padding: "40px 22px", textAlign: "center", color: C.muted, fontSize: 12, background: C.panel, border: `1px solid ${C.border}` }}>
-          {futuresLoading
-            ? "Cargando precios de futuros DLR..."
-            : "Sin datos de futuros DLR disponibles. Verificá la conexión con Primary."
-          }
-        </div>
-      )}
+      {/* Grid responsive de widgets.
+          - En notebook (~1280px): 2 columnas (380px min cada una).
+          - En monitor 27" (~2560px): hasta 6 columnas con 380px min.
+          - Se reacomoda automáticamente con autoFit. */}
+      <div style={{
+        display: "grid",
+        gridTemplateColumns: "repeat(auto-fit, minmax(380px, 1fr))",
+        gap: 14,
+      }}>
+        {/* Widget 1: Curva DLR + Detector de Basis (real) */}
+        <DashboardWidget title="Curva DLR · Detector de Basis" minHeight={280}>
+          {({ expanded }) => (
+            dlrCurve ? (
+              <DlrCurveSection dlrCurve={dlrCurve} C={C} compact={!expanded} />
+            ) : (
+              <div style={{ padding: "40px 22px", textAlign: "center", color: C.muted, fontSize: 11 }}>
+                {futuresLoading
+                  ? "Cargando precios de futuros DLR..."
+                  : "Sin datos de futuros DLR disponibles."}
+              </div>
+            )
+          )}
+        </DashboardWidget>
 
-      {/* TODO próximas sesiones: más secciones (FX, totales del portfolio,
-          alertas, etc.) según vayamos sumando features. */}
+        {/* Widgets placeholder — se van reemplazando en próximas sesiones */}
+        {upcomingWidgets.map((w) => (
+          <DashboardWidget key={w.title} title={w.title} minHeight={280}>
+            {() => (
+              <div style={{
+                height: "100%",
+                minHeight: 240,
+                display: "flex",
+                flexDirection: "column",
+                alignItems: "center",
+                justifyContent: "center",
+                gap: 8,
+                padding: "20px 24px",
+                textAlign: "center",
+              }}>
+                <span style={{
+                  fontSize: 10,
+                  color: C.dim,
+                  letterSpacing: "0.18em",
+                  textTransform: "uppercase",
+                  fontWeight: 600,
+                }}>
+                  Próximamente
+                </span>
+                <p style={{ fontSize: 11.5, color: C.muted, margin: 0, lineHeight: 1.6, maxWidth: 280 }}>
+                  {w.desc}
+                </p>
+              </div>
+            )}
+          </DashboardWidget>
+        ))}
+      </div>
     </div>
   );
 }
@@ -21337,7 +21568,7 @@ function DlrCurveSection({ dlrCurve, C, compact = false }) {
   const caros = dlrCurve.points.filter((p) => p.status === "caro");
 
   return (
-    <div style={{ marginTop: compact ? 0 : 24, padding: compact ? "12px 14px" : "18px 22px 16px 22px", background: C.panel, border: `1px solid ${C.border}` }}>
+    <div style={{ marginTop: compact ? 0 : 24, padding: compact ? "10px 12px" : "18px 22px 16px 22px", background: compact ? "transparent" : C.panel, border: compact ? "none" : `1px solid ${C.border}` }}>
       {/* Header */}
       <div style={{ display: "flex", alignItems: "baseline", gap: compact ? 10 : 14, marginBottom: compact ? 8 : 14, flexWrap: "wrap" }}>
         <h2 style={{ fontSize: compact ? 12 : 14, fontWeight: 600, color: C.text, margin: 0, letterSpacing: "0.05em", textTransform: "uppercase" }}>
