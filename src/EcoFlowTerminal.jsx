@@ -358,16 +358,10 @@ export default function EcoFlowTerminal() {
     .toUpperCase()
     .replace(/\./g, "");
 
-  // Horario BYMA: Lun–Vie, 11:00–17:00 ART
-  const parts = new Intl.DateTimeFormat("en-US", {
-    timeZone: "America/Argentina/Buenos_Aires",
-    weekday: "short",
-    hour: "2-digit",
-    hour12: false,
-  }).formatToParts(now);
-  const wd = parts.find((p) => p.type === "weekday")?.value;
-  const hh = parseInt(parts.find((p) => p.type === "hour")?.value || "0", 10);
-  const marketOpen = !["Sat", "Sun"].includes(wd) && hh >= 11 && hh < 17;
+  // Mercado AR (BYMA/MERVAL): Lun–Vie, 10:30–17:30 ART.
+  // Reutilizamos isTradingDayAndMarketOpened() para no duplicar lógica.
+  // Como depende de `now` (state que tick cada segundo), se reevalúa.
+  const marketOpen = useMemo(() => isTradingDayAndMarketOpened(), [now]);
 
   const sidebarWidth = collapsed ? 64 : 220;
 
@@ -688,6 +682,7 @@ export default function EcoFlowTerminal() {
 
           {/* Botones de íconos + perfil */}
           <div className="flex items-stretch" style={{ borderLeft: `1px solid ${C.border}` }}>
+            <GlobalRefreshButton />
             <PrivacyToggleButton />
             <button className="eco-icon-btn" aria-label="Notificaciones">
               <Bell size={15} strokeWidth={1.6} />
@@ -909,6 +904,17 @@ export default function EcoFlowTerminal() {
 
 /* ─────────── Subcomponentes ─────────── */
 
+// Hook helper para suscribirse al evento global de refresh.
+// Cualquier hook con cache puede usar esto para invalidarlo y refetchear
+// cuando el usuario clickea el botón refresh del TopBar.
+function useRefreshOnGlobal(callback) {
+  useEffect(() => {
+    const handler = () => callback();
+    window.addEventListener("midas:refresh-all", handler);
+    return () => window.removeEventListener("midas:refresh-all", handler);
+  }, [callback]);
+}
+
 // Toggle de privacidad: ojo abierto = mostrando, tachado = ocultando.
 // Vive en el TopBar al lado del Bell. Persiste en localStorage.
 function PrivacyToggleButton() {
@@ -921,6 +927,46 @@ function PrivacyToggleButton() {
       aria-label={hidden ? "Mostrar montos" : "Ocultar montos"}
     >
       {hidden ? <EyeOff size={15} strokeWidth={1.6} /> : <Eye size={15} strokeWidth={1.6} />}
+    </button>
+  );
+}
+
+// Botón de refresh global. Dispara el evento "midas:refresh-all" que los
+// hooks con cache escuchan para invalidar y refetchear su data.
+//
+// El ícono "gira" durante 800ms mientras el evento se propaga, para dar
+// feedback visual. La animación NO espera a que todos los fetches terminen
+// (que pueden tardar varios segundos) — es solo confirmar que el click se
+// registró.
+//
+// Cobertura actual de hooks que escuchan:
+//   - useCarryBonds (5 min TTL → invalida y refetcha)
+//   - useMacroIndicators (10 min TTL → invalida y refetcha)
+// Pendiente: useDashboardFx, useFuturePrices, useBondPrices y otros
+// hooks pre-existentes. Cuando se necesite, se les puede agregar el
+// useRefreshOnGlobal sin tocar la lógica de cada uno.
+function GlobalRefreshButton() {
+  const [spinning, setSpinning] = useState(false);
+  return (
+    <button
+      className="eco-icon-btn"
+      onClick={() => {
+        setSpinning(true);
+        window.dispatchEvent(new CustomEvent("midas:refresh-all"));
+        setTimeout(() => setSpinning(false), 800);
+      }}
+      title="Refrescar todos los widgets"
+      aria-label="Refrescar widgets"
+      style={{ position: "relative" }}
+    >
+      <RefreshCw
+        size={15}
+        strokeWidth={1.6}
+        style={{
+          animation: spinning ? "ecoSpin 0.8s linear" : "none",
+          transformOrigin: "center",
+        }}
+      />
     </button>
   );
 }
@@ -1224,6 +1270,9 @@ function isWithinTradingDay() {
 // medir contra el cierre de ayer). Después de 23:59 → 0 hasta que vuelva
 // a abrir el próximo día hábil. Fin de semana → 0 todo el día.
 function isTradingDayAndMarketOpened() {
+  // Mercado AR (BYMA/MERVAL): lunes a viernes, 10:30 a 17:30 ART.
+  // Antes este check solo validaba apertura (>= 10:30), nunca chequeaba
+  // el cierre — devolvía true a las 23:00 los días hábiles.
   const parts = new Intl.DateTimeFormat("en-US", {
     timeZone: "America/Argentina/Buenos_Aires",
     weekday: "short",
@@ -1235,7 +1284,10 @@ function isTradingDayAndMarketOpened() {
   if (["Sat", "Sun"].includes(wd)) return false;
   const hh = parseInt(parts.find((p) => p.type === "hour")?.value || "0", 10);
   const mm = parseInt(parts.find((p) => p.type === "minute")?.value || "0", 10);
-  return hh * 60 + mm >= 10 * 60 + 30; // >= 10:30 ART
+  const mins = hh * 60 + mm;
+  const opensAt = 10 * 60 + 30; // 10:30 ART
+  const closesAt = 17 * 60 + 30; // 17:30 ART
+  return mins >= opensAt && mins < closesAt;
 }
 
 // Formatters
@@ -17506,7 +17558,17 @@ function useMacroIndicators() {
   const [data, setData] = useState(_macroIndicatorsCache);
   const [loading, setLoading] = useState(!_macroIndicatorsCache);
   const [error, setError] = useState(null);
+  const [refreshTick, setRefreshTick] = useState(0);
 
+  // Suscripción al evento global de refresh (botón en TopBar).
+  // Invalida cache y dispara refetch via tick.
+  useRefreshOnGlobal(useCallback(() => {
+    _macroIndicatorsCache = null;
+    _macroIndicatorsCacheAt = 0;
+    setRefreshTick((t) => t + 1);
+  }, []));
+
+  // Fetch al montar + cuando cambia el tick (por refresh global).
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
@@ -17515,6 +17577,26 @@ function useMacroIndicators() {
       .catch((e) => { if (!cancelled) setError(e); })
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
+  }, [refreshTick]);
+
+  // Polling automático con TTL dinámico:
+  //   - Mercado ABIERTO: cache expira cada 5 min (indicadores macro no
+  //     se mueven rápido pero queremos que se sienta "vivo").
+  //   - Mercado CERRADO: cache expira cada 30 min (sin urgencia).
+  //
+  // Chequeamos cada 60 seg si el TTL venció. Si sí, invalidamos cache
+  // y disparamos refetch via tick. Más eficiente que setInterval rígido.
+  useEffect(() => {
+    const interval = setInterval(() => {
+      const marketOpen = isTradingDayAndMarketOpened();
+      const ttl = marketOpen ? 5 * 60 * 1000 : 30 * 60 * 1000;
+      if (Date.now() - _macroIndicatorsCacheAt > ttl) {
+        _macroIndicatorsCache = null;
+        _macroIndicatorsCacheAt = 0;
+        setRefreshTick((t) => t + 1);
+      }
+    }, 60 * 1000); // chequeo cada minuto
+    return () => clearInterval(interval);
   }, []);
 
   return { data, loading, error };
@@ -17779,6 +17861,14 @@ function useCarryBonds() {
   const [loading, setLoading] = useState(!_carryBondsCache);
   const [error, setError] = useState(null);
   const [lastFetch, setLastFetch] = useState(_carryBondsCacheAt || null);
+  const [refreshTick, setRefreshTick] = useState(0);
+
+  // Suscripción al evento global de refresh (botón en TopBar).
+  useRefreshOnGlobal(useCallback(() => {
+    _carryBondsCache = null;
+    _carryBondsCacheAt = 0;
+    setRefreshTick((t) => t + 1);
+  }, []));
 
   useEffect(() => {
     let cancelled = false;
@@ -17793,6 +17883,23 @@ function useCarryBonds() {
       .catch((e) => { if (!cancelled) setError(e); })
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
+  }, [refreshTick]);
+
+  // Polling automático con TTL dinámico:
+  //   - Mercado ABIERTO: cache expira cada 60 seg (precios de bonos
+  //     se mueven rápido durante operatoria).
+  //   - Mercado CERRADO: cache expira cada 30 min.
+  useEffect(() => {
+    const interval = setInterval(() => {
+      const marketOpen = isTradingDayAndMarketOpened();
+      const ttl = marketOpen ? 60 * 1000 : 30 * 60 * 1000;
+      if (Date.now() - _carryBondsCacheAt > ttl) {
+        _carryBondsCache = null;
+        _carryBondsCacheAt = 0;
+        setRefreshTick((t) => t + 1);
+      }
+    }, 30 * 1000); // chequeo cada 30 seg
+    return () => clearInterval(interval);
   }, []);
 
   return { bonds, loading, error, lastFetch };
