@@ -17345,6 +17345,175 @@ function ToggleButton({ active, onClick, children, color }) {
 
 
 // ═══════════════════════════════════════════════════════════════════════
+// FxLiveWidget: contenido del widget "FX en vivo" del Dashboard.
+//
+// Reusa el hook useDashboardFx() que ya está implementado para el
+// Portfolio (un solo polling compartido si el usuario navega entre
+// pantallas — el cache en sessionStorage es a nivel app, no por hook).
+//
+// Compact: lista 4 dólares con su valor mid + tabla de gaps cruzados.
+// Expanded: agrega compra/venta/spread de cada dólar.
+// ═══════════════════════════════════════════════════════════════════════
+function FxLiveWidget({ expanded }) {
+  const { fx, loading, error, lastUpdated, refresh } = useDashboardFx();
+
+  // Edades en español (placeholder simple, formato "X seg/min/h ago")
+  const ageStr = (() => {
+    if (!lastUpdated) return null;
+    const seconds = Math.floor((Date.now() - new Date(lastUpdated).getTime()) / 1000);
+    if (seconds < 60) return `hace ${seconds}s`;
+    const minutes = Math.floor(seconds / 60);
+    if (minutes < 60) return `hace ${minutes} min`;
+    const hours = Math.floor(minutes / 60);
+    return `hace ${hours}h`;
+  })();
+
+  if (loading && !fx) {
+    return (
+      <div style={{ padding: "30px 22px", textAlign: "center", color: C.muted, fontSize: 11 }}>
+        Cargando FX...
+      </div>
+    );
+  }
+
+  if (error && !fx) {
+    return (
+      <div style={{ padding: "30px 22px", textAlign: "center", color: C.red, fontSize: 11 }}>
+        Error al cargar FX: {String(error.message || error)}
+      </div>
+    );
+  }
+
+  if (!fx) return null;
+
+  const order = ["mayorista", "mep", "ccl", "blue"];
+  const mayorista = fx.mayorista?.mid;
+
+  // Gaps cruzados (% sobre mayorista)
+  const gap = (key) => {
+    const val = fx[key]?.mid;
+    if (!Number.isFinite(val) || !Number.isFinite(mayorista) || mayorista === 0) return null;
+    return ((val - mayorista) / mayorista) * 100;
+  };
+
+  // Spread entre CCL y MEP (% del MEP)
+  const ccmep = (() => {
+    const c = fx.ccl?.mid;
+    const m = fx.mep?.mid;
+    if (!Number.isFinite(c) || !Number.isFinite(m) || m === 0) return null;
+    return ((c - m) / m) * 100;
+  })();
+
+  return (
+    <div style={{ padding: expanded ? "18px 22px" : "10px 14px", fontFamily: "'Roboto Mono', monospace" }}>
+      {/* Tabla principal de dólares */}
+      <table style={{
+        width: "100%",
+        borderCollapse: "collapse",
+        fontSize: expanded ? 13 : 12,
+        fontVariantNumeric: "tabular-nums",
+      }}>
+        <thead>
+          <tr>
+            <th style={{ textAlign: "left", padding: "4px 6px", color: C.dim, fontSize: 9.5, letterSpacing: "0.06em", textTransform: "uppercase", fontWeight: 500, borderBottom: `1px solid ${C.border}` }}>
+              Dólar
+            </th>
+            {expanded && (
+              <>
+                <th style={{ textAlign: "right", padding: "4px 6px", color: C.dim, fontSize: 9.5, letterSpacing: "0.06em", textTransform: "uppercase", fontWeight: 500, borderBottom: `1px solid ${C.border}` }}>Compra</th>
+                <th style={{ textAlign: "right", padding: "4px 6px", color: C.dim, fontSize: 9.5, letterSpacing: "0.06em", textTransform: "uppercase", fontWeight: 500, borderBottom: `1px solid ${C.border}` }}>Venta</th>
+              </>
+            )}
+            <th style={{ textAlign: "right", padding: "4px 6px", color: C.dim, fontSize: 9.5, letterSpacing: "0.06em", textTransform: "uppercase", fontWeight: 500, borderBottom: `1px solid ${C.border}` }}>
+              {expanded ? "Mid" : "Cotiz."}
+            </th>
+            <th style={{ textAlign: "right", padding: "4px 6px", color: C.dim, fontSize: 9.5, letterSpacing: "0.06em", textTransform: "uppercase", fontWeight: 500, borderBottom: `1px solid ${C.border}` }}>
+              Gap May.
+            </th>
+          </tr>
+        </thead>
+        <tbody>
+          {order.map((key) => {
+            const entry = fx[key];
+            const g = gap(key);
+            const isMay = key === "mayorista";
+            return (
+              <tr key={key} style={{ borderBottom: `1px solid ${C.border}` }}>
+                <td style={{ padding: "6px", color: C.text, fontWeight: 500 }}>
+                  {entry?.label || key}
+                </td>
+                {expanded && (
+                  <>
+                    <td style={{ padding: "6px", textAlign: "right", color: C.muted }}>
+                      {Number.isFinite(entry?.buy) ? fmtARS(entry.buy) : "—"}
+                    </td>
+                    <td style={{ padding: "6px", textAlign: "right", color: C.muted }}>
+                      {Number.isFinite(entry?.sell) ? fmtARS(entry.sell) : "—"}
+                    </td>
+                  </>
+                )}
+                <td style={{ padding: "6px", textAlign: "right", color: C.text, fontWeight: 600 }}>
+                  {Number.isFinite(entry?.mid) ? fmtARS(entry.mid) : "—"}
+                </td>
+                <td style={{
+                  padding: "6px",
+                  textAlign: "right",
+                  color: isMay ? C.dim : (g != null && g > 0 ? C.red : g != null && g < 0 ? C.green : C.muted),
+                  fontWeight: isMay ? 400 : 600,
+                }}>
+                  {isMay ? "—" : (g != null ? `${g >= 0 ? "+" : ""}${g.toFixed(1)}%` : "—")}
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+
+      {/* Footer: spread CCL/MEP + última actualización */}
+      <div style={{
+        marginTop: expanded ? 14 : 10,
+        paddingTop: 8,
+        borderTop: `1px solid ${C.border}`,
+        display: "flex",
+        justifyContent: "space-between",
+        alignItems: "center",
+        gap: 10,
+        fontSize: expanded ? 11 : 10.5,
+        color: C.muted,
+        flexWrap: "wrap",
+      }}>
+        <span>
+          Spread CCL/MEP: <strong style={{
+            color: ccmep != null ? (ccmep > 0 ? C.text : C.green) : C.muted,
+          }}>{ccmep != null ? `${ccmep >= 0 ? "+" : ""}${ccmep.toFixed(2)}%` : "—"}</strong>
+        </span>
+        <span style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          {ageStr && <span style={{ color: C.dim }}>{ageStr}</span>}
+          <button
+            onClick={(e) => { e.stopPropagation(); refresh(); }}
+            disabled={loading}
+            title="Refrescar"
+            style={{
+              padding: "2px 8px",
+              background: "transparent",
+              border: `1px solid ${C.border}`,
+              color: C.muted,
+              cursor: loading ? "wait" : "pointer",
+              fontSize: 10,
+              letterSpacing: "0.04em",
+              textTransform: "uppercase",
+              opacity: loading ? 0.5 : 1,
+            }}
+          >
+            {loading ? "..." : "↻"}
+          </button>
+        </span>
+      </div>
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════
 // DashboardWidget: contenedor reusable para los widgets del Dashboard.
 //
 // Cada widget tiene:
@@ -17563,7 +17732,6 @@ function DashboardModule() {
   // para que se vea el formato de "panel modular" desde el primer día.
   // Los voy a ir reemplazando con widgets reales en próximas sesiones.
   const upcomingWidgets = [
-    { title: "FX en vivo",        desc: "Spot mayorista · MEP · CCL · Blue" },
     { title: "Resumen Portfolio", desc: "Total, distribución por moneda, P&L del día" },
     { title: "Alertas activas",   desc: "Cruces de basis, vencimientos próximos, gaps" },
     { title: "Indicadores BCRA",  desc: "Reservas, tasa de política, riesgo país" },
@@ -17604,6 +17772,11 @@ function DashboardModule() {
               </div>
             )
           )}
+        </DashboardWidget>
+
+        {/* Widget 2: FX en vivo (real) */}
+        <DashboardWidget title="FX en vivo" minHeight={280}>
+          {({ expanded }) => <FxLiveWidget expanded={expanded} />}
         </DashboardWidget>
 
         {/* Widgets placeholder — se van reemplazando en próximas sesiones */}
