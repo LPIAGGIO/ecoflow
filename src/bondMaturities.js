@@ -132,12 +132,28 @@ export function resolveBond(ticker) {
   return null;
 }
 
-/** Días desde hoy hasta la fecha de vencimiento (ART, 24:00) */
+/**
+ * Días desde la fecha de SETTLEMENT (T+1) hasta el vencimiento.
+ *
+ * En BYMA los bonos liquidan al día siguiente: comprás T0, te entregan
+ * el título y se debita el cash en T+1. Por eso el horizonte real de
+ * la inversión es desde mañana, no desde hoy. Esta es la convención
+ * que usan lamacro.ar, Cocos, IOL, BYMA para calcular TIR/TEA/TNA.
+ *
+ * Antes esto devolvía T+0 (días desde hoy). Cambio en may-2026 para
+ * alinear con el mercado y eliminar el offset constante de 1 día
+ * que teníamos contra lamacro.
+ *
+ * Retorna 0 si el bono vence hoy o ya venció (no genera intereses).
+ */
 export function daysToMaturity(maturityDate) {
   const today = new Date();
   today.setHours(0, 0, 0, 0);
   const mat = new Date(maturityDate + "T00:00:00");
-  return Math.max(0, Math.round((mat - today) / 86400000));
+  const daysT0 = Math.round((mat - today) / 86400000);
+  // T+1: descontamos 1 día. Si vence mañana (daysT0=1), settlement
+  // y vencimiento son el mismo día → 0 días útiles → ya vencido.
+  return Math.max(0, daysT0 - 1);
 }
 
 /**

@@ -60,10 +60,6 @@ function decodeDlrSuffix(suffix) {
 
 // Lista canónica de contratos vigentes al 30/04/2026 con sus precios seed.
 // Ticker, mes, año y precio "Ajuste Ant." de la captura matbarofex.primary.ventures.
-// DLRABR27: agregado el 21/05/2026 (bid 1.750,0, sin operar últ); el último futuro
-// listado en MtR. T30A7 ya queda con cobertura exacta (mismo vencimiento).
-// T31Y7 y T30J7 (vto mayo y junio 2027) siguen con ⚠ porque MtR todavía no
-// listó DLRMAY27 ni DLRJUN27.
 const DLR_SEED_RAW = [
   { suffix: "MAY26", priceSeed: 1416.0 },
   { suffix: "JUN26", priceSeed: 1443.5 },
@@ -76,7 +72,6 @@ const DLR_SEED_RAW = [
   { suffix: "ENE27", priceSeed: 1655.0 },
   { suffix: "FEB27", priceSeed: 1685.0 },
   { suffix: "MAR27", priceSeed: 1717.0 },
-  { suffix: "ABR27", priceSeed: 1750.0 },
 ];
 
 /**
@@ -108,12 +103,21 @@ export const DLR_SPOT_SEED = 1381.8;
 /** Fecha del seed (para mostrar en UI cuando no hay datos editados). */
 export const DLR_SEED_DATE = "2026-04-30";
 
-/** Días entre hoy y la fecha de vencimiento (>=0). */
+/**
+ * Días desde el SETTLEMENT (T+1) hasta el vencimiento del futuro.
+ *
+ * Mismo criterio que `daysToMaturity` en bondMaturities.js: el horizonte
+ * de la inversión empieza mañana (T+1), no hoy. Esto alinea los
+ * cálculos con BYMA/lamacro/IOL/Cocos. Antes era T+0.
+ *
+ * Retorna 0 si el futuro vence hoy o ya venció.
+ */
 export function daysToExpiry(maturityDate) {
   const today = new Date();
   today.setHours(0, 0, 0, 0);
   const exp = new Date(maturityDate + "T00:00:00");
-  return Math.max(0, Math.round((exp - today) / 86400000));
+  const daysT0 = Math.round((exp - today) / 86400000);
+  return Math.max(0, daysT0 - 1);
 }
 
 /**
