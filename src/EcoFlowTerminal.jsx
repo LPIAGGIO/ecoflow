@@ -17345,6 +17345,236 @@ function ToggleButton({ active, onClick, children, color }) {
 
 
 // ═══════════════════════════════════════════════════════════════════════
+// PortfolioSummaryWidget: Total del portfolio + P&L del día.
+//
+// IMPORTANTE — overhead de polling:
+// Este widget monta SU PROPIA copia de los hooks de Portfolio (positions,
+// bondPrices, stockPrices, fciPrices, futurePrices, cashMovements,
+// futureAdjustments, brokerCashSnapshots). Si el usuario navega entre
+// Dashboard y Portfolio, los hooks se duplican brevemente. Es un trade-off
+// consciente: refactorizar a hooks compartidos requiere lift state a App
+// level, que es trabajo serio y se hace cuando el Dashboard tenga más
+// widgets que dependan de la misma data.
+//
+// Por ahora, el polling extra es aceptable porque la mayoría de hooks
+// tienen cache (sessionStorage para FX, polling cada 5-30min para precios
+// según horario hábil, queries puntuales para positions/cash).
+//
+// VALUATION: por default usamos USD-MEP (más comparable año a año en
+// contextos inflacionarios). En expanded mostramos también ARS.
+// ═══════════════════════════════════════════════════════════════════════
+function PortfolioSummaryWidget({ expanded }) {
+  const { user } = useAuth();
+  const { positions } = useUserPositions();
+  const { fx } = useDashboardFx();
+  const { data: brokerCashSnapshots } = useBrokerCashSnapshots(user?.id);
+  const bondPricesState = useBondPrices();
+  const stockPricesState = useStockPrices();
+  const fciPricesState = useFciPrices(positions);
+  const cashState = useCashMovements();
+
+  // Tickers de futuros únicos (igual que el Portfolio)
+  const futureTickers = useMemo(() => {
+    const set = new Set();
+    for (const p of positions || []) {
+      if (p.instrument_type === "future" && p.ticker) {
+        set.add(p.ticker.toUpperCase().trim());
+      }
+    }
+    return Array.from(set);
+  }, [positions]);
+  const futurePricesState = useFuturePrices(futureTickers);
+
+  const { pendingAdjustments, confirmedAdjustments } = useFutureAdjustments(positions, futurePricesState.prices);
+  const futureAdjLookup = useMemo(
+    () => buildFutureAdjLookup(pendingAdjustments, confirmedAdjustments),
+    [pendingAdjustments, confirmedAdjustments]
+  );
+
+  // Cash bruto: IOL snapshot + manual cash_movements
+  const iolCashByCurrency = useMemo(() => {
+    const acc = { "ARS": 0, "USD-MEP": 0, "USD-CCL": 0 };
+    for (const s of brokerCashSnapshots || []) {
+      if (s.broker !== "iol") continue;
+      acc[iolBalanceCurrency(s.account_type)] += Number(s.available) || 0;
+    }
+    return acc;
+  }, [brokerCashSnapshots]);
+
+  const balanceByCurrency = useMemo(() => {
+    const manual = cashState?.balanceByCurrency || { "ARS": 0, "USD-MEP": 0, "USD-CCL": 0 };
+    return {
+      "ARS": (manual["ARS"] || 0) + (iolCashByCurrency["ARS"] || 0),
+      "USD-MEP": (manual["USD-MEP"] || 0) + (iolCashByCurrency["USD-MEP"] || 0),
+      "USD-CCL": (manual["USD-CCL"] || 0) + (iolCashByCurrency["USD-CCL"] || 0),
+    };
+  }, [cashState, iolCashByCurrency]);
+
+  // Valuation principal: USD-MEP
+  const valuationCurrency = "USD-MEP";
+
+  const totals = useMemo(() => {
+    if (!fx || !positions) return null;
+    return computePortfolioTotals(
+      positions, fx, valuationCurrency,
+      bondPricesState.prices, futurePricesState.prices,
+      futureAdjLookup, stockPricesState.prices, fciPricesState.prices
+    );
+  }, [positions, fx, bondPricesState.prices, futurePricesState.prices, futureAdjLookup, stockPricesState.prices, fciPricesState.prices]);
+
+  // Total final = market value + realized futures P&L + cash convertido
+  const totalUsd = useMemo(() => {
+    if (!totals || !fx) return null;
+    const marketValue = (totals.value || 0) + (totals.realizedFuturesPnL || 0);
+    let cashInUsd = 0;
+    for (const cur of ["ARS", "USD-MEP", "USD-CCL"]) {
+      const conv = convertValue(balanceByCurrency[cur] || 0, cur, valuationCurrency, fx);
+      if (conv != null) cashInUsd += conv;
+    }
+    return marketValue + cashInUsd;
+  }, [totals, fx, balanceByCurrency]);
+
+  // Total también en ARS (para versión expanded)
+  const totalArs = useMemo(() => {
+    if (totalUsd == null || !fx) return null;
+    return convertValue(totalUsd, valuationCurrency, "ARS", fx);
+  }, [totalUsd, fx]);
+
+  // P&L del día (replica la lógica de TotalCard exactamente)
+  const dailyTotals = useMemo(() => {
+    if (!fx || !positions) return { pnl: null };
+    if (!isTradingDayAndMarketOpened()) {
+      return { pnl: 0, base: 0, hasAny: true, marketClosed: true };
+    }
+    let pnlInValuation = 0;
+    let prevValueInValuation = 0;
+    let hasAny = false;
+    for (const p of positions) {
+      const d = computeDailyPnL(p, bondPricesState.prices, futurePricesState.prices, stockPricesState.prices, futureAdjLookup, fciPricesState.prices);
+      if (!d || d.pnl == null || !Number.isFinite(d.pnl)) continue;
+      const cur = p.currency || "ARS";
+      const conv = convertValue(d.pnl, cur, valuationCurrency, fx);
+      if (conv == null) continue;
+      pnlInValuation += conv;
+      hasAny = true;
+      const valNow = positionValueAtMarket(p, bondPricesState.prices, futurePricesState.prices, stockPricesState.prices, fciPricesState.prices);
+      if (valNow?.value != null) {
+        const valNowConv = convertValue(valNow.value, cur, valuationCurrency, fx);
+        if (valNowConv != null) prevValueInValuation += (valNowConv - conv);
+      }
+    }
+    return {
+      pnl: hasAny ? pnlInValuation : null,
+      base: prevValueInValuation,
+      hasAny,
+    };
+  }, [positions, bondPricesState.prices, futurePricesState.prices, stockPricesState.prices, fciPricesState.prices, fx, futureAdjLookup]);
+
+  // Render
+  if (!user) {
+    return (
+      <div style={{ padding: "30px 22px", textAlign: "center", color: C.muted, fontSize: 11 }}>
+        Iniciá sesión para ver tu portfolio.
+      </div>
+    );
+  }
+  if (totalUsd == null || !totals) {
+    return (
+      <div style={{ padding: "30px 22px", textAlign: "center", color: C.muted, fontSize: 11 }}>
+        Cargando portfolio...
+      </div>
+    );
+  }
+
+  const dailyPnl = dailyTotals.pnl;
+  const dailyPct = (dailyPnl != null && dailyTotals.base > 0)
+    ? (dailyPnl / dailyTotals.base) * 100
+    : null;
+  const showDaily = dailyTotals.hasAny && dailyPnl != null;
+  const dailyIsPositive = showDaily && dailyPnl >= 0;
+  const dailyColor = (!showDaily || dailyTotals.marketClosed) ? C.dim : dailyIsPositive ? C.green : C.red;
+  const dailySymbol = (!showDaily || dailyTotals.marketClosed) ? "" : dailyIsPositive ? "+" : "";
+
+  // P&L total vs costo (solo en expanded)
+  const totalPnl = totals.pnl;
+  const totalPnlPct = totals.pnlPct;
+  const totalPnlColor = totalPnl == null ? C.dim : totalPnl >= 0 ? C.green : C.red;
+
+  return (
+    <div style={{ padding: expanded ? "20px 24px" : "14px 16px", fontFamily: "'Roboto Mono', monospace" }}>
+      {/* Total principal */}
+      <div style={{ marginBottom: expanded ? 18 : 14 }}>
+        <div style={{ fontSize: 10, color: C.dim, letterSpacing: "0.12em", textTransform: "uppercase", fontWeight: 600, marginBottom: 4 }}>
+          Total · USD-MEP
+        </div>
+        <div style={{ fontSize: expanded ? 28 : 22, color: C.text, fontWeight: 600, fontVariantNumeric: "tabular-nums" }}>
+          USD {fmtARS(totalUsd)}
+        </div>
+        {expanded && totalArs != null && (
+          <div style={{ fontSize: 13, color: C.muted, marginTop: 4, fontVariantNumeric: "tabular-nums" }}>
+            AR$ {fmtARS(totalArs)}
+          </div>
+        )}
+      </div>
+
+      {/* P&L del día */}
+      <div style={{ marginBottom: expanded ? 18 : 0, paddingTop: 12, borderTop: `1px solid ${C.border}` }}>
+        <div style={{ fontSize: 10, color: C.dim, letterSpacing: "0.12em", textTransform: "uppercase", fontWeight: 600, marginBottom: 4 }}>
+          P&L Hoy
+          {dailyTotals.marketClosed && <span style={{ color: C.dim, marginLeft: 8, textTransform: "none", letterSpacing: 0 }}>· mercado cerrado</span>}
+        </div>
+        <div style={{ display: "flex", alignItems: "baseline", gap: 12, flexWrap: "wrap" }}>
+          <div style={{ fontSize: expanded ? 22 : 18, color: dailyColor, fontWeight: 600, fontVariantNumeric: "tabular-nums" }}>
+            {showDaily && !dailyTotals.marketClosed
+              ? `${dailySymbol}USD ${fmtARS(dailyPnl)}`
+              : (dailyTotals.marketClosed ? "USD 0,00" : "—")
+            }
+          </div>
+          {dailyPct != null && (
+            <div style={{ fontSize: expanded ? 14 : 12, color: dailyColor, fontWeight: 500, fontVariantNumeric: "tabular-nums" }}>
+              ({dailySymbol}{dailyPct.toFixed(2)}%)
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* P&L total + detalles solo en expanded */}
+      {expanded && (
+        <>
+          <div style={{ marginBottom: 18, paddingTop: 12, borderTop: `1px solid ${C.border}` }}>
+            <div style={{ fontSize: 10, color: C.dim, letterSpacing: "0.12em", textTransform: "uppercase", fontWeight: 600, marginBottom: 4 }}>
+              P&L Total · vs costo
+            </div>
+            <div style={{ display: "flex", alignItems: "baseline", gap: 12, flexWrap: "wrap" }}>
+              <div style={{ fontSize: 18, color: totalPnlColor, fontWeight: 600, fontVariantNumeric: "tabular-nums" }}>
+                {totalPnl != null
+                  ? `${totalPnl >= 0 ? "+" : ""}USD ${fmtARS(totalPnl)}`
+                  : "—"
+                }
+              </div>
+              {totalPnlPct != null && (
+                <div style={{ fontSize: 13, color: totalPnlColor, fontWeight: 500, fontVariantNumeric: "tabular-nums" }}>
+                  ({totalPnlPct >= 0 ? "+" : ""}{totalPnlPct.toFixed(2)}%)
+                </div>
+              )}
+            </div>
+          </div>
+
+          <div style={{ paddingTop: 12, borderTop: `1px solid ${C.border}`, fontSize: 11, color: C.muted, display: "flex", gap: 16, flexWrap: "wrap" }}>
+            <span>Posiciones: <strong style={{ color: C.text }}>{positions?.length || 0}</strong></span>
+            <span>Mercado: <strong style={{ color: C.text }}>{totals.pricesFromMarket || 0}</strong></span>
+            <span>A costo: <strong style={{ color: C.text }}>{totals.pricesFromCost || 0}</strong></span>
+            {totals.unvalued > 0 && (
+              <span>Sin valuar: <strong style={{ color: C.muted }}>{totals.unvalued}</strong></span>
+            )}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════
 // FxLiveWidget: contenido del widget "FX en vivo" del Dashboard.
 //
 // Reusa el hook useDashboardFx() que ya está implementado para el
@@ -17732,7 +17962,6 @@ function DashboardModule() {
   // para que se vea el formato de "panel modular" desde el primer día.
   // Los voy a ir reemplazando con widgets reales en próximas sesiones.
   const upcomingWidgets = [
-    { title: "Resumen Portfolio", desc: "Total, distribución por moneda, P&L del día" },
     { title: "Alertas activas",   desc: "Cruces de basis, vencimientos próximos, gaps" },
     { title: "Indicadores BCRA",  desc: "Reservas, tasa de política, riesgo país" },
     { title: "Carry Trade",       desc: "Top oportunidades de carry en BONCAPs/LECAPs" },
@@ -17777,6 +18006,11 @@ function DashboardModule() {
         {/* Widget 2: FX en vivo (real) */}
         <DashboardWidget title="FX en vivo" minHeight={280}>
           {({ expanded }) => <FxLiveWidget expanded={expanded} />}
+        </DashboardWidget>
+
+        {/* Widget 3: Resumen Portfolio (real) */}
+        <DashboardWidget title="Resumen Portfolio" minHeight={280}>
+          {({ expanded }) => <PortfolioSummaryWidget expanded={expanded} />}
         </DashboardWidget>
 
         {/* Widgets placeholder — se van reemplazando en próximas sesiones */}
