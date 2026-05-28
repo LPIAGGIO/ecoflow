@@ -6481,7 +6481,7 @@ function useFuturePrices(tickers) {
     async function fetchPrices() {
       setLoading(true);
       try {
-        const url = `/api/primary-md?symbols=${encodeURIComponent(tickersKey)}`;
+        const url = `/api/mtr-md?symbols=${encodeURIComponent(tickersKey)}`;
         const resp = await fetch(url);
         const data = await resp.json();
         if (cancelled) return;
