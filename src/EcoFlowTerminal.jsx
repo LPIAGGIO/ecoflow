@@ -9660,9 +9660,16 @@ function computeDailyPnL(p, bondPrices, futurePrices, stockPrices, futureAdjLook
   // de compra y la primera corrida del cron, el caso (2) es el que aplica.
   if (p.instrument_type === "future" && futurePrices) {
     const fp = futurePrices[ticker];
-    if (fp?.price != null && !fp.error) {
-      const last = Number(fp.price);
+    
+// Para P&L diario de futuros usamos fp.last (no fp.price). Cocos liquida
+    // contra el último operado, no contra el midpoint del book. Usar fp.price
+    // mezcla criterios (cae a mid cuando last no es fresco) y genera divergen-
+    // cias con la acreditación real. Fallback: settlement si no hay last hoy.
+    const lastRaw = fp?.last != null ? fp.last : fp?.settlement;
+    if (lastRaw != null && !fp?.error) {
+      const last = Number(lastRaw);
       const lookupEntry = futureAdjLookup ? futureAdjLookup.get(p.id) : null;
+
       let settle = lookupEntry?.lastSettle != null
         ? Number(lookupEntry.lastSettle)
         : null;
