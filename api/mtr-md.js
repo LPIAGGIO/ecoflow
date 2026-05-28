@@ -129,12 +129,14 @@ export default async function handler(req, res) {
       url += `&security_id=in.(${securityIds.join(",")})`;
     }
 
-    const resp = await fetch(url, {
-      headers: {
-        apikey: SUPABASE_ANON_KEY,
-        Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
-      },
-    });
+    // Authorization Bearer SOLO para keys legacy JWT (eyJ...). Las publishable
+    // keys nuevas (sb_publishable_...) NO son JWT; mandarlas en Bearer hace que
+    // PostgREST las rechace con 401. Para esas, apikey solo basta (rol anon).
+    const headers = { apikey: SUPABASE_ANON_KEY };
+    if (SUPABASE_ANON_KEY.startsWith("eyJ")) {
+      headers.Authorization = `Bearer ${SUPABASE_ANON_KEY}`;
+    }
+    const resp = await fetch(url, { headers });
 
     if (!resp.ok) {
       const text = await resp.text().catch(() => "");
