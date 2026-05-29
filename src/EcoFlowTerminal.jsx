@@ -11097,12 +11097,20 @@ function consolidatePositions(positions, bondPrices, futurePrices, fciPrices) {
     // distinguir manuales viejos de actuales, recuperar la comparación
     // entre manualOverrideAt y lastSellDate.
 
-    // Precio Primary API: si tenemos un precio fresco vía /api/primary-md,
+    // Precio Primary API: si tenemos un precio fresco vía /api/mtr-md,
     // lo usamos como fuente para futuros — pero solo si NO hay manual
     // override. El override manual gana siempre (Modelo unificado:
     // "el usuario es la fuente de verdad", igual que para bonos).
+    //
+    // 2026-05-29: leemos fp.last en lugar de fp.price. fp.price tiene una
+    // cascada que post-cierre cae al midpoint del book (bid+offer/2), que
+    // puede dar precios artificiales como 1437.75 — el tick mínimo del DLR
+    // es 0.50, así que .75 no existe ni en mercado ni en lo que liquida
+    // Cocos. Con fp.last quedan coherentes el P&L TOTAL (esta función) y
+    // el P&L HOY (computeDailyPnL, que ya usa fp.last desde el Tema 1).
+    // Fallback abajo: primarySettlement si no hay last.
     const primaryPrice = (g.instrument_type === "future" && futurePrices)
-      ? futurePrices[g.ticker]?.price
+      ? futurePrices[g.ticker]?.last
       : null;
     // Settlement de Primary: cuando el feed live no tiene precio
     // (mercado cerrado, ROFEX fuera de horario, hueco temporal), usamos
