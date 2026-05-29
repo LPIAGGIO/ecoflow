@@ -11203,6 +11203,35 @@ function consolidatePositions(positions, bondPrices, futurePrices, fciPrices) {
     if (g.instrument_type === "future") {
       const mult = FUTURE_MULTIPLIER_DEFAULT;
 
+      // ─── FIX shorts puros (2026-05-29) ──────────────────────────────
+      // El PPP (precio promedio ponderado) se calcula SOLO sobre las
+      // compras. Para un SHORT PURO (totalBuyQty=0, sólo ventas), ppp
+      // queda null y el cálculo de openUnrealizedPnl daba 0 — la fila
+      // mostraba P&L TOTAL=0 incluso con la posición moviéndose contra
+      // el entry. Para esos casos usamos el promedio ponderado de las
+      // ventas (PPV) como base del P&L mark-to-market.
+      //
+      // Reglas:
+      //   - Si hay compras → basePriceForPnL = ppp (compras).
+      //   - Si no hay compras pero hay ventas → basePriceForPnL = PPV.
+      //   - Sin compras ni ventas → null (no se puede calcular).
+      let basePriceForPnL = ppp;
+      if (basePriceForPnL == null && g.totalSellQty > 0) {
+        let sumVQ = 0;
+        let sumQ = 0;
+        for (const op of g.operations) {
+          if (op && op.operation_type === "sell") {
+            const q = Math.abs(Number(op.quantity) || 0);
+            const pr = Number(op.entry_price) || 0;
+            if (q > 0 && pr > 0) {
+              sumVQ += q * pr;
+              sumQ += q;
+            }
+          }
+        }
+        if (sumQ > 0) basePriceForPnL = sumVQ / sumQ;
+      }
+
       // Construimos el sintético una sola vez. Devuelve los pares
       // COMPRA-espejo + VENTA neteados, y el P&L realizado total
       // calculado par-por-par con PPP cronológico (PPP al momento de
@@ -11233,10 +11262,11 @@ function consolidatePositions(positions, bondPrices, futurePrices, fciPrices) {
       const isPartialClose = netQty !== 0 && g.totalSellQty > 0;
 
       if (isPartialClose) {
-        // Para la entrada ABIERTA: P&L no realizado solo (netQty × mult × (current − PPP))
+        // Para la entrada ABIERTA: P&L no realizado solo (netQty × mult × (current − base))
+        // base = ppp si hay compras, PPV si es short puro (ver fix arriba).
         let openUnrealizedPnl = 0;
-        if (currentPrice != null && ppp != null && priceSource !== "cost") {
-          openUnrealizedPnl = netQty * mult * (currentPrice - ppp);
+        if (currentPrice != null && basePriceForPnL != null && priceSource !== "cost") {
+          openUnrealizedPnl = netQty * mult * (currentPrice - basePriceForPnL);
         }
         const openNotional = currentPrice != null
           ? Math.abs(netQty) * mult * currentPrice
@@ -11251,11 +11281,15 @@ function consolidatePositions(positions, bondPrices, futurePrices, fciPrices) {
         // representan dos vistas de la misma historia con un ticker.
         // El usuario lo ve en el detalle expandible de cualquiera.
         const lifetimePnl = openUnrealizedPnl + realizedPnl;
-        // % lifetime: sobre el notional total invertido en compras
-        // (qty_total_buy × PPP × mult). Es el denominador natural para
-        // futuros — los CR0SCAR no pagas capital, pero el "% de retorno
-        // sobre exposición" es la métrica que tiene sentido comparar.
-        const lifetimeBaseNotional = g.totalBuyQty * mult * ppp;
+        // % lifetime: sobre el notional total invertido (qty_lado_vivo
+        // × base × mult). Para LONG: g.totalBuyQty × ppp. Para SHORT
+        // PURO: g.totalSellQty × PPV. Es el denominador natural para
+        // futuros — no pagás capital, pero el "% de retorno sobre
+        // exposición" es la métrica que tiene sentido comparar.
+        const lifetimeBaseQty = g.totalBuyQty > 0 ? g.totalBuyQty : g.totalSellQty;
+        const lifetimeBaseNotional = (basePriceForPnL != null && lifetimeBaseQty > 0)
+          ? lifetimeBaseQty * mult * basePriceForPnL
+          : 0;
         const lifetimePnlPct = lifetimeBaseNotional > 0
           ? (lifetimePnl / lifetimeBaseNotional) * 100
           : null;
@@ -11268,7 +11302,9 @@ function consolidatePositions(positions, bondPrices, futurePrices, fciPrices) {
 
         // Para la entrada CERRADA: precio actual = lastSellPrice, P&L realizado
         const closedPnl = realizedPnl;
-        const initialNotional = g.totalSellQty * mult * ppp;
+        const initialNotional = (basePriceForPnL != null && g.totalSellQty > 0)
+          ? g.totalSellQty * mult * basePriceForPnL
+          : 0;
         const closedPnlPct = initialNotional > 0
           ? (closedPnl / initialNotional) * 100
           : null;
@@ -11286,7 +11322,7 @@ function consolidatePositions(positions, bondPrices, futurePrices, fciPrices) {
           netQty,
           isShort: netQty < 0,
           isClosed: false,
-          ppp,
+          ppp: basePriceForPnL,  // <-- PPV cuando es short puro (antes era null)
           ppv: null,
           currentPrice,
           priceSource,
