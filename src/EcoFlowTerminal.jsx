@@ -6377,10 +6377,12 @@ function useFciPrices(positions) {
 
 /* ─────────────── Hook: useFuturePrices ───────────────
  *
- * Pollea precios real-time de futuros (DLR/ROFEX) vía Primary API,
- * proxy en /api/primary-md. Frecuencia adaptativa según horario:
+ * Pollea precios real-time de futuros (DLR/ROFEX) vía Matba-Rofex,
+ * proxy en /api/mtr-md (lee de la tabla mtr_market_data poblada por
+ * el worker mtr-market-data en VPS vía WebSocket). Frecuencia
+ * adaptativa según horario:
  *
- *   - Día hábil 10:00-17:00 ART: cada 10 segundos.
+ *   - Día hábil 10:30-17:30 ART: cada 10 segundos.
  *   - Resto: cada 30 minutos (consistente con auto-refresh del dashboard).
  *
  * Devuelve un objeto `prices` con shape:
@@ -6393,7 +6395,7 @@ function useFciPrices(positions) {
  *     ...
  *   }
  *
- * Si /api/primary-md devuelve error, mantenemos los precios anteriores
+ * Si /api/mtr-md devuelve error, mantenemos los precios anteriores
  * (graceful degradation) y exponemos `error` para mostrar en UI.
  *
  * El hook acepta `tickers` (array de strings) que puede cambiar dinámicamente.
@@ -6469,7 +6471,7 @@ function useFuturePrices(tickers) {
     return [...tickers].map((t) => t.toUpperCase().trim()).sort().join(",");
   }, [tickers]);
 
-  // Fetch principal: pega a /api/primary-md y mergea con state existente.
+  // Fetch principal: pega a /api/mtr-md y mergea con state existente.
   // Si no hay tickers, no hace nada.
   useEffect(() => {
     if (!tickersKey) {
@@ -11936,7 +11938,7 @@ function PortfolioDashboard({ onNavigate }) {
     return Array.from(set);
   }, [positions]);
 
-  // Hook que pollea /api/primary-md cada 10s (horario hábil) o 30 min (fuera).
+  // Hook que pollea /api/mtr-md cada 10s (horario hábil) o 30 min (fuera).
   // Si futureTickers está vacío, no hace ningún request.
   const futurePricesState = useFuturePrices(futureTickers);
 
