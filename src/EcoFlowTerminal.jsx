@@ -10981,7 +10981,20 @@ function consolidatePositions(positions, bondPrices, futurePrices, fciPrices) {
       }
     }
 
-    return { synthetic, realizedPnlRaw };
+    // Devolvemos también el estado FINAL del FIFO (lots vivos del lado
+    // que quedó abierto). consolidatePositions lo necesita para calcular
+    // basePriceForPnL correctamente cuando la posición cruzó el cero
+    // (LONG→SHORT o SHORT→LONG): el PPP histórico de TODAS las compras
+    // (g.weightedBuyPriceNumerator/totalBuyQty) incluye compras que YA se
+    // cerraron y da MTM unrealized incorrecto en esos casos.
+    return {
+      synthetic,
+      realizedPnlRaw,
+      openBuyQty,
+      openBuyValue,
+      openSellQty,
+      openSellValue,
+    };
   };
 
   const groups = new Map();
@@ -11213,45 +11226,72 @@ function consolidatePositions(positions, bondPrices, futurePrices, fciPrices) {
     if (g.instrument_type === "future") {
       const mult = FUTURE_MULTIPLIER_DEFAULT;
 
-      // ─── FIX shorts puros (2026-05-29) ──────────────────────────────
-      // El PPP (precio promedio ponderado) se calcula SOLO sobre las
-      // compras. Para un SHORT PURO (totalBuyQty=0, sólo ventas), ppp
-      // queda null y el cálculo de openUnrealizedPnl daba 0 — la fila
-      // mostraba P&L TOTAL=0 incluso con la posición moviéndose contra
-      // el entry. Para esos casos usamos el promedio ponderado de las
-      // ventas (PPV) como base del P&L mark-to-market.
-      //
-      // Reglas:
-      //   - Si hay compras → basePriceForPnL = ppp (compras).
-      //   - Si no hay compras pero hay ventas → basePriceForPnL = PPV.
-      //   - Sin compras ni ventas → null (no se puede calcular).
-      let basePriceForPnL = ppp;
-      if (basePriceForPnL == null && g.totalSellQty > 0) {
-        let sumVQ = 0;
-        let sumQ = 0;
-        for (const op of g.operations) {
-          if (op && op.operation_type === "sell") {
-            const q = Math.abs(Number(op.quantity) || 0);
-            const pr = Number(op.entry_price) || 0;
-            if (q > 0 && pr > 0) {
-              sumVQ += q * pr;
-              sumQ += q;
-            }
-          }
-        }
-        if (sumQ > 0) basePriceForPnL = sumVQ / sumQ;
-      }
-
       // Construimos el sintético una sola vez. Devuelve los pares
       // COMPRA-espejo + VENTA neteados, y el P&L realizado total
       // calculado par-por-par con PPP cronológico (PPP al momento de
-      // cada venta, no PPP final). Usamos esto como SOURCE OF TRUTH
-      // para tanto el detalle expandible como el realizedPnl global —
-      // así los números de pantalla siempre cuadran.
-      const synth = (g.totalSellQty > 0)
+      // cada venta, no PPP final). También devuelve el estado FINAL
+      // de los lots vivos (openBuyQty/Value, openSellQty/Value) que
+      // usamos abajo para resolver basePriceForPnL en posiciones que
+      // cruzaron el cero. Usamos esto como SOURCE OF TRUTH para el
+      // detalle expandible y el realizedPnl global — así los números
+      // de pantalla siempre cuadran.
+      const synth = (g.totalBuyQty > 0 || g.totalSellQty > 0)
         ? buildClosedOperationsSynthetic(g)
-        : { synthetic: [], realizedPnlRaw: 0 };
+        : {
+            synthetic: [],
+            realizedPnlRaw: 0,
+            openBuyQty: 0,
+            openBuyValue: 0,
+            openSellQty: 0,
+            openSellValue: 0,
+          };
       const closedOperations = synth.synthetic;
+
+      // ─── basePriceForPnL ────────────────────────────────────────────
+      // Base usada para el P&L mark-to-market del lado VIVO. Tiene que
+      // ser el PPP de los lots que efectivamente quedaron abiertos
+      // después del FIFO de buildClosedOperationsSynthetic — NO el PPP
+      // histórico de TODAS las compras (g.weightedBuyPriceNumerator /
+      // g.totalBuyQty), que incluye compras ya cerradas.
+      //
+      // FIX 2026-05-29 (shorts puros): cuando totalBuyQty=0, ppp queda
+      //   null y openUnrealizedPnl daba 0. Se usaba PPV global de ventas.
+      // FIX 2026-06-01 (cruces de cero, ej. SHORT→LONG→SHORT): el ppp
+      //   incluía compras ya cerradas y daba MTM unrealized incorrecto.
+      //   Ahora ambos casos los maneja synth (FIFO con weighted average).
+      //
+      // Reglas:
+      //   - netQty > 0 (LONG vivo) → openBuyValue/openBuyQty del FIFO.
+      //   - netQty < 0 (SHORT vivo) → openSellValue/openSellQty del FIFO.
+      //   - netQty == 0 (cerrado) → ppp (no se usa para unrealized; queda
+      //       como referencia histórica para la fila CERRADA del split).
+      //   - Edge case: si por qty inválidas el FIFO devuelve qty=0 en el
+      //       lado que debería estar vivo, fallback al ppp histórico o
+      //       al PPV global de ventas (compatibilidad pre-fix).
+      let basePriceForPnL = null;
+      if (netQty > 0 && synth.openBuyQty > 0) {
+        basePriceForPnL = synth.openBuyValue / synth.openBuyQty;
+      } else if (netQty < 0 && synth.openSellQty > 0) {
+        basePriceForPnL = synth.openSellValue / synth.openSellQty;
+      } else {
+        // Fallback: ppp histórico o PPV global de ventas si no hay compras.
+        basePriceForPnL = ppp;
+        if (basePriceForPnL == null && g.totalSellQty > 0) {
+          let sumVQ = 0;
+          let sumQ = 0;
+          for (const op of g.operations) {
+            if (op && op.operation_type === "sell") {
+              const q = Math.abs(Number(op.quantity) || 0);
+              const pr = Number(op.entry_price) || 0;
+              if (q > 0 && pr > 0) {
+                sumVQ += q * pr;
+                sumQ += q;
+              }
+            }
+          }
+          if (sumQ > 0) basePriceForPnL = sumVQ / sumQ;
+        }
+      }
 
       // P&L REALIZADO: para futuros se aplica el multiplicador al raw.
       //   raw = sum(qtyVendida × (PPVenta - PPP_momento))
