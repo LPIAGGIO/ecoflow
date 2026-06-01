@@ -4,11 +4,5 @@
   "framework": "vite",
   "rewrites": [
     { "source": "/((?!api/).*)", "destination": "/index.html" }
-  ],
-  "crons": [
-    {
-      "path": "/api/snapshot-mae-boletin",
-      "schedule": "30 22 * * 1-5"
-    }
   ]
 }
