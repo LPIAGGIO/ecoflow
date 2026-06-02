@@ -845,6 +845,7 @@ export default function MidasTerminal() {
               <PriceHistoryModule
                 key={active}
                 title="Bonos Soberanos"
+                category="soberano"
                 defaultTicker="AL30"
                 quickPicks={["AL30", "GD30", "AE38", "AL35", "GD35", "AL41"]}
               />
@@ -852,6 +853,7 @@ export default function MidasTerminal() {
               <PriceHistoryModule
                 key={active}
                 title="Lecaps"
+                category="lecap"
                 defaultTicker="T30J6"
                 quickPicks={["T30J6", "S30O6", "S31G6", "T15E7", "T30A7", "S30N6"]}
               />
@@ -859,6 +861,7 @@ export default function MidasTerminal() {
               <PriceHistoryModule
                 key={active}
                 title="Duales"
+                category="dual"
                 defaultTicker="TTJ26"
                 quickPicks={["TTJ26", "TTS26", "TTD26"]}
               />
@@ -866,6 +869,7 @@ export default function MidasTerminal() {
               <PriceHistoryModule
                 key={active}
                 title="CER"
+                category="cer"
                 defaultTicker="TX26"
                 quickPicks={["TX26", "TZX26", "TZX27", "TZXD6", "TZXD7", "DICP"]}
               />
@@ -873,6 +877,7 @@ export default function MidasTerminal() {
               <PriceHistoryModule
                 key={active}
                 title="ONs"
+                category="on"
                 defaultTicker="YMCWO"
                 quickPicks={["YMCWO", "MU32O", "YM35O", "TTCDO"]}
               />
@@ -19578,12 +19583,12 @@ function usePriceHistory(ticker, source = "mae") {
  * Lista de tickers disponibles para el selector, vía RPC chart_tickers
  * (equity por kind desde equity_daily_close; mae desde daily_close_prices).
  */
-function useChartTickers(source, kind = null) {
+function useChartTickers(source, kind = null, category = null) {
   const [options, setOptions] = useState([]);
   useEffect(() => {
     let cancelled = false;
     supabase
-      .rpc("chart_tickers", { p_source: source, p_kind: kind })
+      .rpc("chart_tickers", { p_source: source, p_kind: kind, p_category: category })
       .then(({ data, error }) => {
         if (cancelled || error) return;
         setOptions((data || []).map((r) => ({ ticker: r.ticker, name: r.name || null })));
@@ -19591,7 +19596,7 @@ function useChartTickers(source, kind = null) {
     return () => {
       cancelled = true;
     };
-  }, [source, kind]);
+  }, [source, kind, category]);
   return options;
 }
 
@@ -19639,6 +19644,12 @@ function TickerCombobox({ value, options, onSelect }) {
         onFocus={() => {
           setQuery("");
           setOpen(true);
+        }}
+        onClick={() => {
+          if (!open) {
+            setQuery("");
+            setOpen(true);
+          }
         }}
         onKeyDown={(e) => {
           if (e.key === "Enter") pick(q || value);
@@ -19796,14 +19807,14 @@ function PriceHistoryChart({ type, data }) {
  * accesos rapidos) y el grafico. Se cablea por leaf del menu (bonos hoy;
  * reusable para lecaps/cer/duales pasando otros quickPicks).
  */
-function PriceHistoryModule({ title, defaultTicker, quickPicks = [], source = "mae", kind = null }) {
+function PriceHistoryModule({ title, defaultTicker, quickPicks = [], source = "mae", kind = null, category = null }) {
   const [ticker, setTicker] = useState(defaultTicker);
   const [input, setInput] = useState(defaultTicker);
   const [chartType, setChartType] = useState("area");
   const [range, setRange] = useState("all");
   const { data, candles, loading, error } = usePriceHistory(ticker, source);
   const isEquity = source === "equity";
-  const tickerOptions = useChartTickers(source, isEquity ? kind : null);
+  const tickerOptions = useChartTickers(source, isEquity ? kind : null, isEquity ? null : category);
 
   // Filtro de rango temporal sobre la serie ya cargada (1M/3M/6M/Todo).
   const ranged = useMemo(() => {
