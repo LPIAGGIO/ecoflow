@@ -876,6 +876,22 @@ export default function MidasTerminal() {
                 defaultTicker="YMCWO"
                 quickPicks={["YMCWO", "MU32O", "YM35O", "TTCDO"]}
               />
+            ) : active === "acciones" ? (
+              <PriceHistoryModule
+                key={active}
+                title="Acciones"
+                source="equity"
+                defaultTicker="GGAL"
+                quickPicks={["GGAL", "COME", "BYMA", "TXAR", "SUPV", "TRAN"]}
+              />
+            ) : active === "cedears" ? (
+              <PriceHistoryModule
+                key={active}
+                title="CEDEARs"
+                source="equity"
+                defaultTicker="AMZN"
+                quickPicks={["AMZN", "GOOGL", "MSTR", "NU", "GLOB"]}
+              />
             ) : active === "dashboard" ? (
               <DashboardModule />
             ) : (
@@ -19400,7 +19416,7 @@ function DashboardModule() {
   );
 }
 
-/* ─────────────── useBondHistory ───────────────
+/* ─────────────── usePriceHistory ───────────────
  *
  * Serie diaria de precio de cierre de un ticker, desde daily_close_prices
  * (cierre oficial del boletin MAE). El frontend solo LEE.
@@ -19418,7 +19434,7 @@ function DashboardModule() {
  * el cap de filas de PostgREST a medida que crece el historico, y ordenamos
  * ascendente en JS (lightweight-charts requiere time creciente y unico).
  */
-function useBondHistory(ticker) {
+function usePriceHistory(ticker, source = "mae") {
   const [data, setData] = useState([]); // línea: { time, value }
   const [candles, setCandles] = useState([]); // velas: { time, open, high, low, close }
   const [loading, setLoading] = useState(true);
@@ -19434,6 +19450,50 @@ function useBondHistory(ticker) {
     let cancelled = false;
     setLoading(true);
     setError(null);
+
+    // Equity (acciones/CEDEARs): equity_daily_close, solo cierre — data912 no
+    // da OHLC intradía, así que las velas quedan body-only (sin mechas) y la
+    // vista útil es la línea. Una fila por (trade_date, ticker), sin
+    // convención por-VN ni dedup (la tabla ya es única por día).
+    if (source === "equity") {
+      supabase
+        .from("equity_daily_close")
+        .select("trade_date, close")
+        .eq("ticker", ticker)
+        .order("trade_date", { ascending: false })
+        .limit(1000)
+        .then(({ data: rows, error: err }) => {
+          if (cancelled) return;
+          if (err) {
+            setError(err.message);
+            setData([]);
+            setCandles([]);
+            setLoading(false);
+            return;
+          }
+          const days = (rows || [])
+            .map((r) => ({ time: r.trade_date, close: Number(r.close) }))
+            .filter((d) => Number.isFinite(d.close) && d.close > 0)
+            .sort((a, b) => (a.time < b.time ? -1 : 1));
+          const line = [];
+          const candleArr = [];
+          let prevClose = null;
+          for (const d of days) {
+            const c = d.close;
+            const o = prevClose != null ? prevClose : c;
+            line.push({ time: d.time, value: c });
+            candleArr.push({ time: d.time, open: o, high: Math.max(o, c), low: Math.min(o, c), close: c });
+            prevClose = c;
+          }
+          setData(line);
+          setCandles(candleArr);
+          setLoading(false);
+        });
+      return () => {
+        cancelled = true;
+      };
+    }
+
     supabase
       .from("daily_close_prices")
       .select(
@@ -19507,7 +19567,7 @@ function useBondHistory(ticker) {
     return () => {
       cancelled = true;
     };
-  }, [ticker]);
+  }, [ticker, source]);
 
   return { data, candles, loading, error };
 }
@@ -19584,12 +19644,13 @@ function PriceHistoryChart({ type, data }) {
  * accesos rapidos) y el grafico. Se cablea por leaf del menu (bonos hoy;
  * reusable para lecaps/cer/duales pasando otros quickPicks).
  */
-function PriceHistoryModule({ title, defaultTicker, quickPicks = [] }) {
+function PriceHistoryModule({ title, defaultTicker, quickPicks = [], source = "mae" }) {
   const [ticker, setTicker] = useState(defaultTicker);
   const [input, setInput] = useState(defaultTicker);
   const [chartType, setChartType] = useState("area");
   const [range, setRange] = useState("all");
-  const { data, candles, loading, error } = useBondHistory(ticker);
+  const { data, candles, loading, error } = usePriceHistory(ticker, source);
+  const isEquity = source === "equity";
 
   // Filtro de rango temporal sobre la serie ya cargada (1M/3M/6M/Todo).
   const ranged = useMemo(() => {
@@ -19634,7 +19695,9 @@ function PriceHistoryModule({ title, defaultTicker, quickPicks = [] }) {
           {title}
         </h1>
         <p style={{ fontSize: 12, color: C.muted, margin: "6px 0 0 0", letterSpacing: "0.02em" }}>
-          Historia de precio de cierre diario (boletín oficial MAE). Precio por 100 VN, en pesos.
+          {isEquity
+            ? "Cierre diario en pesos (data912). Serie acumulada desde 02/06/2026 — crece cada día hábil."
+            : "Historia de precio de cierre diario (boletín oficial MAE). Precio por 100 VN, en pesos."}
         </p>
       </div>
 
@@ -19717,6 +19780,7 @@ function PriceHistoryModule({ title, defaultTicker, quickPicks = [] }) {
                 );
               })}
             </div>
+            {!isEquity && (
             <div
               className="flex items-center"
               style={{ border: `1px solid ${C.border}`, borderRadius: 4, overflow: "hidden" }}
@@ -19745,6 +19809,7 @@ function PriceHistoryModule({ title, defaultTicker, quickPicks = [] }) {
                 );
               })}
             </div>
+            )}
             {last && (
               <span style={{ fontSize: 18, fontWeight: 700, color: C.text, fontVariantNumeric: "tabular-nums" }}>
                 {fmt(last.value)}
@@ -19771,8 +19836,17 @@ function PriceHistoryModule({ title, defaultTicker, quickPicks = [] }) {
           >
             Sin datos históricos para {ticker}.
           </div>
+        ) : data.length < 2 ? (
+          <div
+            className="flex items-center justify-center"
+            style={{ height: 420, fontSize: 12, color: C.muted, textAlign: "center", padding: "0 40px", lineHeight: 1.6 }}
+          >
+            {isEquity
+              ? `Acumulando histórico (${data.length} día). El gráfico se llena a medida que el worker corre cada día hábil (18hs ART).`
+              : `Solo ${data.length} rueda de datos para ${ticker}.`}
+          </div>
         ) : (
-          <PriceHistoryChart type={chartType} data={chartType === "candles" ? ranged.candles : ranged.line} />
+          <PriceHistoryChart type={isEquity ? "area" : chartType} data={(isEquity ? "area" : chartType) === "candles" ? ranged.candles : ranged.line} />
         )}
 
         {ranged.line.length > 0 && (
