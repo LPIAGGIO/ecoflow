@@ -859,6 +859,18 @@ export default function MidasTerminal() {
                 defaultTicker="TTJ26"
                 quickPicks={["TTJ26", "TTS26", "TTD26"]}
               />
+            ) : active === "cer" ? (
+              <PriceHistoryModule
+                title="CER"
+                defaultTicker="TX26"
+                quickPicks={["TX26", "TZX26", "TZX27", "TZXD6", "TZXD7", "DICP"]}
+              />
+            ) : active === "ons" ? (
+              <PriceHistoryModule
+                title="ONs"
+                defaultTicker="YMCWO"
+                quickPicks={["YMCWO", "MU32O", "YM35O", "TTCDO"]}
+              />
             ) : active === "dashboard" ? (
               <DashboardModule />
             ) : (
