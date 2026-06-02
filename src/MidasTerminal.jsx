@@ -19586,7 +19586,7 @@ function useChartTickers(source, kind = null) {
       .rpc("chart_tickers", { p_source: source, p_kind: kind })
       .then(({ data, error }) => {
         if (cancelled || error) return;
-        setOptions((data || []).map((r) => r.ticker));
+        setOptions((data || []).map((r) => ({ ticker: r.ticker, name: r.name || null })));
       });
     return () => {
       cancelled = true;
@@ -19614,7 +19614,11 @@ function TickerCombobox({ value, options, onSelect }) {
   }, []);
 
   const q = query.trim().toUpperCase();
-  const filtered = (q ? options.filter((t) => t.includes(q)) : options).slice(0, 300);
+  const filtered = (
+    q
+      ? options.filter((o) => o.ticker.includes(q) || (o.name && o.name.toUpperCase().includes(q)))
+      : options
+  ).slice(0, 300);
 
   const pick = (t) => {
     const v = String(t || "").toUpperCase().trim();
@@ -19670,22 +19674,23 @@ function TickerCombobox({ value, options, onSelect }) {
             boxShadow: "0 8px 24px rgba(0,0,0,0.4)",
           }}
         >
-          {filtered.map((t) => {
-            const isSel = t === value;
+          {filtered.map((o) => {
+            const isSel = o.ticker === value;
             return (
               <div
-                key={t}
+                key={o.ticker}
                 onMouseDown={(e) => {
                   e.preventDefault();
-                  pick(t);
+                  pick(o.ticker);
                 }}
                 style={{
+                  display: "flex",
+                  alignItems: "baseline",
+                  gap: 8,
                   padding: "6px 10px",
                   fontSize: 12,
-                  color: isSel ? C.accent : C.text,
                   background: isSel ? C.accentSoft : "transparent",
                   cursor: "pointer",
-                  fontWeight: isSel ? 600 : 400,
                 }}
                 onMouseEnter={(e) => {
                   e.currentTarget.style.background = C.deep;
@@ -19694,7 +19699,22 @@ function TickerCombobox({ value, options, onSelect }) {
                   e.currentTarget.style.background = isSel ? C.accentSoft : "transparent";
                 }}
               >
-                {t}
+                <span style={{ color: isSel ? C.accent : C.text, fontWeight: 600, flex: "0 0 60px" }}>
+                  {o.ticker}
+                </span>
+                {o.name && (
+                  <span
+                    style={{
+                      color: C.muted,
+                      fontSize: 11,
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                      whiteSpace: "nowrap",
+                    }}
+                  >
+                    {o.name}
+                  </span>
+                )}
               </div>
             );
           })}
@@ -19808,6 +19828,7 @@ function PriceHistoryModule({ title, defaultTicker, quickPicks = [], source = "m
   const last = data.length ? data[data.length - 1] : null;
   const fmt = (n) =>
     Number(n).toLocaleString("es-AR", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const tickerName = tickerOptions.find((o) => o.ticker === ticker)?.name || null;
   // Variación % sobre el rango visible (primer punto vs último).
   const rangeChange =
     ranged.line.length >= 2
@@ -19842,7 +19863,7 @@ function PriceHistoryModule({ title, defaultTicker, quickPicks = [], source = "m
       <div className="flex items-center gap-3" style={{ marginBottom: 16, flexWrap: "wrap" }}>
         <TickerCombobox
           value={ticker}
-          options={tickerOptions.length ? tickerOptions : quickPicks}
+          options={tickerOptions.length ? tickerOptions : quickPicks.map((t) => ({ ticker: t, name: null }))}
           onSelect={apply}
         />
         {tickerOptions.length > 0 && (
@@ -19854,7 +19875,22 @@ function PriceHistoryModule({ title, defaultTicker, quickPicks = [], source = "m
 
       <div style={{ border: `1px solid ${C.border}`, borderRadius: 6, background: C.panel, padding: 16 }}>
         <div className="flex items-center justify-between" style={{ marginBottom: 12 }}>
-          <span style={{ fontSize: 15, fontWeight: 600, color: C.text }}>{ticker}</span>
+          <div className="flex items-baseline gap-2" style={{ minWidth: 0, marginRight: 12 }}>
+            <span style={{ fontSize: 15, fontWeight: 600, color: C.text, flexShrink: 0 }}>{ticker}</span>
+            {tickerName && (
+              <span
+                style={{
+                  fontSize: 12,
+                  color: C.muted,
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                  whiteSpace: "nowrap",
+                }}
+              >
+                {tickerName}
+              </span>
+            )}
+          </div>
           <div className="flex items-center gap-3">
             <div
               className="flex items-center"
