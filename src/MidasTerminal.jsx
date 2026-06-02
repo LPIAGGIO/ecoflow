@@ -847,6 +847,18 @@ export default function MidasTerminal() {
                 defaultTicker="AL30"
                 quickPicks={["AL30", "GD30", "AE38", "AL35", "GD35", "AL41"]}
               />
+            ) : active === "lecaps" ? (
+              <PriceHistoryModule
+                title="Lecaps"
+                defaultTicker="T30J6"
+                quickPicks={["T30J6", "S30O6", "S31G6", "T15E7", "T30A7", "S30N6"]}
+              />
+            ) : active === "duales" ? (
+              <PriceHistoryModule
+                title="Duales"
+                defaultTicker="TTJ26"
+                quickPicks={["TTJ26", "TTS26", "TTD26"]}
+              />
             ) : active === "dashboard" ? (
               <DashboardModule />
             ) : (
@@ -19140,13 +19152,15 @@ function DashboardModule() {
  * ascendente en JS (lightweight-charts requiere time creciente y unico).
  */
 function useBondHistory(ticker) {
-  const [data, setData] = useState([]);
+  const [data, setData] = useState([]); // línea: { time, value }
+  const [candles, setCandles] = useState([]); // velas: { time, open, high, low, close }
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
 
   useEffect(() => {
     if (!ticker) {
       setData([]);
+      setCandles([]);
       setLoading(false);
       return;
     }
@@ -19155,7 +19169,9 @@ function useBondHistory(ticker) {
     setError(null);
     supabase
       .from("daily_close_prices")
-      .select("trade_date, precio_cierre_hoy, precio_ultimo, monto")
+      .select(
+        "trade_date, precio_cierre_hoy, precio_cierre_ayer, precio_ultimo, precio_minimo, precio_promedio_ponderado, monto"
+      )
       .eq("ticker", ticker)
       .eq("moneda_codigo", "$")
       .in("segmento_codigo", ["2", "3", "4", "5"])
@@ -19166,21 +19182,59 @@ function useBondHistory(ticker) {
         if (err) {
           setError(err.message);
           setData([]);
+          setCandles([]);
           setLoading(false);
           return;
         }
+        // Una fila por día: la de mayor monto (la más líquida).
         const byDate = new Map();
         for (const r of rows || []) {
-          const raw = Number(r.precio_cierre_hoy) || Number(r.precio_ultimo);
-          if (!Number.isFinite(raw) || raw <= 0) continue;
+          const close = Number(r.precio_cierre_hoy) || Number(r.precio_ultimo);
+          if (!Number.isFinite(close) || close <= 0) continue;
           const amount = Number(r.monto) || 0;
           const prev = byDate.get(r.trade_date);
-          if (!prev || amount > prev.amount) byDate.set(r.trade_date, { raw, amount });
+          if (!prev || amount > prev.amount) byDate.set(r.trade_date, { r, close, amount });
         }
-        const series = Array.from(byDate.entries())
-          .map(([time, { raw }]) => ({ time, value: raw < 10 ? raw * 100 : raw }))
+        const days = Array.from(byDate.entries())
+          .map(([time, v]) => ({ time, ...v }))
           .sort((a, b) => (a.time < b.time ? -1 : 1));
-        setData(series);
+
+        // num positivo o null
+        const num = (x) => {
+          const n = Number(x);
+          return Number.isFinite(n) && n > 0 ? n : null;
+        };
+
+        const line = [];
+        const candleArr = [];
+        let prevClose = null;
+        for (const d of days) {
+          // Convención MAE: tickers "por 1 VN" (precio < 10) → base 100 VN.
+          const mult = d.close < 10 ? 100 : 1;
+          const c = d.close * mult;
+          // Open ≈ cierre anterior (el boletín no trae apertura). Fallback al
+          // cierre del día previo de la serie.
+          const ayer = num(d.r.precio_cierre_ayer);
+          const o = ayer != null ? ayer * mult : prevClose != null ? prevClose : c;
+          const lastP = num(d.r.precio_ultimo);
+          const vwap = num(d.r.precio_promedio_ponderado);
+          const lo = num(d.r.precio_minimo);
+          // High aproximado: MAE no publica precio_maximo (siempre vacío), así
+          // que tomamos el máximo entre open/close/último/VWAP. La mecha
+          // superior puede quedar corta. Low SÍ es real (precio_minimo).
+          const ups = [o, c];
+          if (lastP != null) ups.push(lastP * mult);
+          if (vwap != null) ups.push(vwap * mult);
+          let high = Math.max(...ups);
+          let low = Math.min(...ups, lo != null ? lo * mult : Infinity);
+          high = Math.max(high, o, c);
+          low = Math.min(low, o, c);
+          line.push({ time: d.time, value: c });
+          candleArr.push({ time: d.time, open: o, high, low, close: c });
+          prevClose = c;
+        }
+        setData(line);
+        setCandles(candleArr);
         setLoading(false);
       });
     return () => {
@@ -19188,18 +19242,19 @@ function useBondHistory(ticker) {
     };
   }, [ticker]);
 
-  return { data, loading, error };
+  return { data, candles, loading, error };
 }
 
 /* ─────────────── PriceHistoryChart ───────────────
  * Wrapper de TradingView Lightweight Charts (area series) sobre nuestra data.
  * autoSize sigue el tamaño del contenedor; el contenedor define la altura.
  */
-function PriceHistoryChart({ data }) {
+function PriceHistoryChart({ type, data }) {
   const containerRef = useRef(null);
   const chartRef = useRef(null);
   const seriesRef = useRef(null);
 
+  // Recrea chart + serie cuando cambia el tipo (área ↔ velas).
   useEffect(() => {
     const el = containerRef.current;
     if (!el) return;
@@ -19220,14 +19275,25 @@ function PriceHistoryChart({ data }) {
       crosshair: { mode: 0 },
       handleScale: { axisPressedMouseMove: false },
     });
-    const series = chart.addAreaSeries({
-      lineColor: C.accent,
-      topColor: "rgba(91, 141, 214, 0.28)",
-      bottomColor: "rgba(91, 141, 214, 0.02)",
-      lineWidth: 2,
-      priceLineVisible: false,
-      lastValueVisible: true,
-    });
+    const series =
+      type === "candles"
+        ? chart.addCandlestickSeries({
+            upColor: C.green,
+            downColor: C.red,
+            borderUpColor: C.green,
+            borderDownColor: C.red,
+            wickUpColor: C.green,
+            wickDownColor: C.red,
+            priceLineVisible: false,
+          })
+        : chart.addAreaSeries({
+            lineColor: C.accent,
+            topColor: "rgba(91, 141, 214, 0.28)",
+            bottomColor: "rgba(91, 141, 214, 0.02)",
+            lineWidth: 2,
+            priceLineVisible: false,
+            lastValueVisible: true,
+          });
     chartRef.current = chart;
     seriesRef.current = series;
     return () => {
@@ -19235,13 +19301,13 @@ function PriceHistoryChart({ data }) {
       chartRef.current = null;
       seriesRef.current = null;
     };
-  }, []);
+  }, [type]);
 
   useEffect(() => {
     if (!seriesRef.current) return;
     seriesRef.current.setData(data || []);
     if (data && data.length && chartRef.current) chartRef.current.timeScale().fitContent();
-  }, [data]);
+  }, [data, type]);
 
   return <div ref={containerRef} style={{ width: "100%", height: 420 }} />;
 }
@@ -19254,7 +19320,8 @@ function PriceHistoryChart({ data }) {
 function PriceHistoryModule({ title, defaultTicker, quickPicks = [] }) {
   const [ticker, setTicker] = useState(defaultTicker);
   const [input, setInput] = useState(defaultTicker);
-  const { data, loading, error } = useBondHistory(ticker);
+  const [chartType, setChartType] = useState("area");
+  const { data, candles, loading, error } = useBondHistory(ticker);
 
   const apply = (t) => {
     const v = String(t || "").toUpperCase().trim();
@@ -19337,13 +19404,43 @@ function PriceHistoryModule({ title, defaultTicker, quickPicks = [] }) {
       </div>
 
       <div style={{ border: `1px solid ${C.border}`, borderRadius: 6, background: C.panel, padding: 16 }}>
-        <div className="flex items-baseline justify-between" style={{ marginBottom: 12 }}>
+        <div className="flex items-center justify-between" style={{ marginBottom: 12 }}>
           <span style={{ fontSize: 15, fontWeight: 600, color: C.text }}>{ticker}</span>
-          {last && (
-            <span style={{ fontSize: 18, fontWeight: 700, color: C.text, fontVariantNumeric: "tabular-nums" }}>
-              {fmt(last.value)}
-            </span>
-          )}
+          <div className="flex items-center gap-3">
+            <div
+              className="flex items-center"
+              style={{ border: `1px solid ${C.border}`, borderRadius: 4, overflow: "hidden" }}
+            >
+              {[
+                { k: "area", label: "Línea" },
+                { k: "candles", label: "Velas" },
+              ].map((opt) => {
+                const on = chartType === opt.k;
+                return (
+                  <button
+                    key={opt.k}
+                    onClick={() => setChartType(opt.k)}
+                    style={{
+                      padding: "4px 11px",
+                      fontSize: 11,
+                      fontWeight: 600,
+                      color: on ? C.bg : C.muted,
+                      background: on ? C.accent : "transparent",
+                      border: "none",
+                      cursor: "pointer",
+                    }}
+                  >
+                    {opt.label}
+                  </button>
+                );
+              })}
+            </div>
+            {last && (
+              <span style={{ fontSize: 18, fontWeight: 700, color: C.text, fontVariantNumeric: "tabular-nums" }}>
+                {fmt(last.value)}
+              </span>
+            )}
+          </div>
         </div>
 
         {loading ? (
@@ -19365,7 +19462,7 @@ function PriceHistoryModule({ title, defaultTicker, quickPicks = [] }) {
             Sin datos históricos para {ticker}.
           </div>
         ) : (
-          <PriceHistoryChart data={data} />
+          <PriceHistoryChart type={chartType} data={chartType === "candles" ? candles : data} />
         )}
 
         {data.length > 0 && (
