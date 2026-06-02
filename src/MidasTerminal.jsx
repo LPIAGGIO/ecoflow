@@ -843,30 +843,35 @@ export default function MidasTerminal() {
               />
             ) : active === "bonos" ? (
               <PriceHistoryModule
+                key={active}
                 title="Bonos Soberanos"
                 defaultTicker="AL30"
                 quickPicks={["AL30", "GD30", "AE38", "AL35", "GD35", "AL41"]}
               />
             ) : active === "lecaps" ? (
               <PriceHistoryModule
+                key={active}
                 title="Lecaps"
                 defaultTicker="T30J6"
                 quickPicks={["T30J6", "S30O6", "S31G6", "T15E7", "T30A7", "S30N6"]}
               />
             ) : active === "duales" ? (
               <PriceHistoryModule
+                key={active}
                 title="Duales"
                 defaultTicker="TTJ26"
                 quickPicks={["TTJ26", "TTS26", "TTD26"]}
               />
             ) : active === "cer" ? (
               <PriceHistoryModule
+                key={active}
                 title="CER"
                 defaultTicker="TX26"
                 quickPicks={["TX26", "TZX26", "TZX27", "TZXD6", "TZXD7", "DICP"]}
               />
             ) : active === "ons" ? (
               <PriceHistoryModule
+                key={active}
                 title="ONs"
                 defaultTicker="YMCWO"
                 quickPicks={["YMCWO", "MU32O", "YM35O", "TTCDO"]}
