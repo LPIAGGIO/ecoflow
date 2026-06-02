@@ -1765,6 +1765,63 @@ function useApiQuota(userId, broker = "iol") {
   return { data, loading, error, refetch };
 }
 
+/* ─────────────── useApiCallLog ───────────────
+ *
+ * Lee el log de llamadas a la API del broker desde api_call_log (lo puebla
+ * el worker iol-sync server-side en cada call: endpoint, categoría, status,
+ * duración). El frontend SOLO LEE. RLS: policy "api_call_log select own"
+ * (auth.uid() = user_id). Últimas N filas, más recientes primero. Mismo
+ * patrón de poll/refetch que useApiQuota.
+ */
+function useApiCallLog(userId, limit = 60) {
+  const [data, setData] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+  const [refreshKey, setRefreshKey] = useState(0);
+  const hasLoadedRef = useRef(false);
+
+  useEffect(() => {
+    if (!userId) {
+      setLoading(false);
+      return;
+    }
+    let cancelled = false;
+    if (!hasLoadedRef.current) setLoading(true);
+    setError(null);
+    supabase
+      .from("api_call_log")
+      .select("id, broker, endpoint, category, status, duration_ms, called_at")
+      .eq("user_id", userId)
+      .order("called_at", { ascending: false })
+      .limit(limit)
+      .then(({ data: rows, error: err }) => {
+        if (cancelled) return;
+        if (err) setError(err.message);
+        else setData(rows || []);
+        setLoading(false);
+        hasLoadedRef.current = true;
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [userId, limit, refreshKey]);
+
+  useEffect(() => {
+    if (!userId) return;
+    const interval = setInterval(() => setRefreshKey((k) => k + 1), 60000);
+    const onVisible = () => {
+      if (document.visibilityState === "visible") setRefreshKey((k) => k + 1);
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      clearInterval(interval);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
+  }, [userId]);
+
+  return { data, loading, error };
+}
+
 /* ─────────────── useBrokerCashSnapshots ───────────────
  *
  * Lee la FOTO del efectivo por broker desde broker_cash_snapshots.
@@ -2290,7 +2347,7 @@ function SettingsDashboard({ userId, brokers, brokersLoading, refetchBrokers }) 
         />
       )}
       {tab === "usage" && <ApiUsageWidget userId={userId} />}
-      {tab === "activity" && <ActivityPlaceholder />}
+      {tab === "activity" && <ApiActivityWidget userId={userId} />}
     </div>
   );
 }
@@ -2904,6 +2961,106 @@ function UsagePlaceholder() {
         gratis por mes) y el costo acumulado de las calls adicionales que vayas haciendo
         (cada call extra cuesta $500 ARS según IOL). Se activa cuando vincules tu cuenta
         IOL desde la pestaña Cuentas vinculadas.
+      </div>
+    </div>
+  );
+}
+
+const API_CATEGORY_LABELS = {
+  keepalive: "Keep-alive",
+  sync: "Sync",
+  execution: "Ejecución",
+  auth: "Auth",
+};
+
+function ApiActivityWidget({ userId }) {
+  const { data, loading } = useApiCallLog(userId, 60);
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center" style={{ padding: "48px 0" }}>
+        <Loader2 size={24} color={C.muted} className="eco-spin" strokeWidth={1.5} />
+      </div>
+    );
+  }
+  if (!data.length) return <ActivityPlaceholder />;
+
+  const fmtTime = (t) =>
+    new Date(t).toLocaleString("es-AR", {
+      day: "2-digit",
+      month: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+    });
+  const statusColor = (s) =>
+    s === 0 ? C.red : s >= 200 && s < 300 ? C.green : s >= 400 ? C.red : C.yellow;
+
+  return (
+    <div
+      style={{
+        border: `1px solid ${C.border}`,
+        borderRadius: 6,
+        background: C.panel,
+        overflow: "hidden",
+        maxWidth: 680,
+      }}
+    >
+      <div
+        className="flex items-center justify-between"
+        style={{ padding: "12px 16px", borderBottom: `1px solid ${C.border}` }}
+      >
+        <span style={{ fontSize: 13, fontWeight: 600, color: C.text }}>Actividad de API · IOL</span>
+        <span style={{ fontSize: 11, color: C.dim }}>últimas {data.length}</span>
+      </div>
+
+      <div
+        className="flex"
+        style={{
+          padding: "8px 16px",
+          fontSize: 9,
+          letterSpacing: "0.12em",
+          textTransform: "uppercase",
+          color: C.dim,
+          fontWeight: 600,
+          borderBottom: `1px solid ${C.border}`,
+        }}
+      >
+        <span style={{ flex: "0 0 132px" }}>Hora</span>
+        <span style={{ flex: 1 }}>Endpoint</span>
+        <span style={{ flex: "0 0 92px" }}>Categoría</span>
+        <span style={{ flex: "0 0 54px", textAlign: "right" }}>Status</span>
+        <span style={{ flex: "0 0 56px", textAlign: "right" }}>ms</span>
+      </div>
+
+      <div style={{ maxHeight: 460, overflowY: "auto" }}>
+        {data.map((r) => (
+          <div
+            key={r.id}
+            className="flex items-center"
+            style={{ padding: "7px 16px", fontSize: 11, borderBottom: `1px solid ${C.faint}` }}
+          >
+            <span style={{ flex: "0 0 132px", color: C.dim, fontVariantNumeric: "tabular-nums" }}>
+              {fmtTime(r.called_at)}
+            </span>
+            <span
+              style={{ flex: 1, color: C.text, fontFamily: "'JetBrains Mono', monospace", fontSize: 10.5 }}
+            >
+              {r.endpoint}
+            </span>
+            <span style={{ flex: "0 0 92px", color: C.muted }}>
+              {API_CATEGORY_LABELS[r.category] || r.category || "—"}
+            </span>
+            <span
+              style={{ flex: "0 0 54px", textAlign: "right", color: statusColor(r.status), fontWeight: 600 }}
+            >
+              {r.status === 0 ? "ERR" : r.status}
+            </span>
+            <span style={{ flex: "0 0 56px", textAlign: "right", color: C.dim, fontVariantNumeric: "tabular-nums" }}>
+              {r.duration_ms ?? "—"}
+            </span>
+          </div>
+        ))}
       </div>
     </div>
   );
