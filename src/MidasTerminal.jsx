@@ -19426,7 +19426,21 @@ function PriceHistoryModule({ title, defaultTicker, quickPicks = [] }) {
   const [ticker, setTicker] = useState(defaultTicker);
   const [input, setInput] = useState(defaultTicker);
   const [chartType, setChartType] = useState("area");
+  const [range, setRange] = useState("all");
   const { data, candles, loading, error } = useBondHistory(ticker);
+
+  // Filtro de rango temporal sobre la serie ya cargada (1M/3M/6M/Todo).
+  const ranged = useMemo(() => {
+    if (range === "all") return { line: data, candles };
+    const days = range === "1M" ? 31 : range === "3M" ? 93 : 186;
+    const d = new Date();
+    d.setDate(d.getDate() - days);
+    const cutoff = d.toISOString().slice(0, 10);
+    return {
+      line: data.filter((p) => p.time >= cutoff),
+      candles: candles.filter((p) => p.time >= cutoff),
+    };
+  }, [data, candles, range]);
 
   const apply = (t) => {
     const v = String(t || "").toUpperCase().trim();
@@ -19436,7 +19450,6 @@ function PriceHistoryModule({ title, defaultTicker, quickPicks = [] }) {
   };
 
   const last = data.length ? data[data.length - 1] : null;
-  const first = data.length ? data[0] : null;
   const fmt = (n) =>
     Number(n).toLocaleString("es-AR", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
@@ -19517,6 +19530,36 @@ function PriceHistoryModule({ title, defaultTicker, quickPicks = [] }) {
               style={{ border: `1px solid ${C.border}`, borderRadius: 4, overflow: "hidden" }}
             >
               {[
+                { k: "1M", label: "1M" },
+                { k: "3M", label: "3M" },
+                { k: "6M", label: "6M" },
+                { k: "all", label: "Todo" },
+              ].map((opt) => {
+                const on = range === opt.k;
+                return (
+                  <button
+                    key={opt.k}
+                    onClick={() => setRange(opt.k)}
+                    style={{
+                      padding: "4px 9px",
+                      fontSize: 11,
+                      fontWeight: 600,
+                      color: on ? C.bg : C.muted,
+                      background: on ? C.accent : "transparent",
+                      border: "none",
+                      cursor: "pointer",
+                    }}
+                  >
+                    {opt.label}
+                  </button>
+                );
+              })}
+            </div>
+            <div
+              className="flex items-center"
+              style={{ border: `1px solid ${C.border}`, borderRadius: 4, overflow: "hidden" }}
+            >
+              {[
                 { k: "area", label: "Línea" },
                 { k: "candles", label: "Velas" },
               ].map((opt) => {
@@ -19567,12 +19610,12 @@ function PriceHistoryModule({ title, defaultTicker, quickPicks = [] }) {
             Sin datos históricos para {ticker}.
           </div>
         ) : (
-          <PriceHistoryChart type={chartType} data={chartType === "candles" ? candles : data} />
+          <PriceHistoryChart type={chartType} data={chartType === "candles" ? ranged.candles : ranged.line} />
         )}
 
-        {data.length > 0 && (
+        {ranged.line.length > 0 && (
           <div style={{ fontSize: 11, color: C.dim, marginTop: 10, letterSpacing: "0.02em" }}>
-            {data.length} ruedas · {first.time} → {last.time}
+            {ranged.line.length} ruedas · {ranged.line[0].time} → {ranged.line[ranged.line.length - 1].time}
           </div>
         )}
       </div>
