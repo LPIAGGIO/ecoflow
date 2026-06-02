@@ -8664,12 +8664,32 @@ function TotalCard({ positions, fx, bondPrices, futurePrices, stockPrices, fciPr
     };
   }, [positions, bondPrices, futurePrices, stockPrices, fciPrices, fx, valuationCurrency, futureAdjLookup]);
 
+  // Realizado del día: P&L de las posiciones CERRADAS hoy. El P&L del día de
+  // arriba marca a mercado solo lo ABIERTO; los scalps cerrados hoy (vender
+  // alto, recomprar abajo) tienen su realizado que ahí no aparece (los lotes
+  // calzados se cancelan entre sí). Lo sumamos para que "P&L hoy" sea todo lo
+  // que pasó hoy. Mismo gate de mercado que el diario.
+  const realizedToday = useMemo(() => {
+    if (!fx || !positions || !isTradingDayAndMarketOpened()) return 0;
+    const all = consolidatePositions(positions, bondPrices, futurePrices, fciPrices);
+    const closedToday = filterClosedToToday(all.filter((g) => g.isClosed));
+    let sum = 0;
+    for (const g of closedToday) {
+      const conv = convertValue(g.realizedPnl ?? 0, g.currency || "ARS", valuationCurrency, fx);
+      if (conv != null) sum += conv;
+    }
+    return sum;
+  }, [positions, bondPrices, futurePrices, fciPrices, fx, valuationCurrency]);
+
   const showDaily = dailyTotals.hasAny && dailyTotals.pnl != null;
-  const dailyIsPositive = showDaily && dailyTotals.pnl >= 0;
+  const dailyPnlShown = (dailyTotals.pnl != null && !dailyTotals.marketClosed)
+    ? dailyTotals.pnl + realizedToday
+    : dailyTotals.pnl;
+  const dailyIsPositive = showDaily && dailyPnlShown >= 0;
   const dailyColor = (!showDaily || dailyTotals.marketClosed) ? C.dim : dailyIsPositive ? C.green : C.red;
   const dailySymbol = (!showDaily || dailyTotals.marketClosed) ? "" : dailyIsPositive ? "+" : "";
   const dailyPct = (showDaily && !dailyTotals.marketClosed && dailyTotals.base > 0)
-    ? (dailyTotals.pnl / dailyTotals.base) * 100
+    ? (dailyPnlShown / dailyTotals.base) * 100
     : null;
 
   // Cash neto en la moneda activa: convertimos el saldo de cada moneda
@@ -8786,7 +8806,7 @@ function TotalCard({ positions, fx, bondPrices, futurePrices, stockPrices, fciPr
               fontFamily: "'JetBrains Mono', monospace",
             }}
           >
-            {dailySymbol}{maskAmount(fmtCurrencyValue(dailyTotals.pnl, valuationCurrency === "ARS" ? "ARS" : "USD"), privHidden)}
+            {dailySymbol}{maskAmount(fmtCurrencyValue(dailyPnlShown, valuationCurrency === "ARS" ? "ARS" : "USD"), privHidden)}
           </span>
           {dailyPct != null && (
             <span
@@ -14636,7 +14656,7 @@ function ConsolidatedRow({ group, bondPrices, futurePrices, stockPrices, fciPric
                     fontWeight: 600,
                     fontFamily: "'Roboto', sans-serif",
                   }}>
-                    Histórico
+                    {group.isClosed ? "Realizado" : "Histórico"}
                   </span>
                   <span style={{
                     fontSize: 12.5,
@@ -18602,6 +18622,20 @@ function PortfolioSummaryWidget({ expanded }) {
     };
   }, [positions, bondPricesState.prices, futurePricesState.prices, stockPricesState.prices, fciPricesState.prices, fx, futureAdjLookup]);
 
+  // Realizado del día (ver TotalCard): el P&L diario marca a mercado solo lo
+  // abierto; sumamos el realizado de las posiciones cerradas hoy.
+  const realizedToday = useMemo(() => {
+    if (!fx || !positions || !isTradingDayAndMarketOpened()) return 0;
+    const all = consolidatePositions(positions, bondPricesState.prices, futurePricesState.prices, fciPricesState.prices);
+    const closedToday = filterClosedToToday(all.filter((g) => g.isClosed));
+    let sum = 0;
+    for (const g of closedToday) {
+      const conv = convertValue(g.realizedPnl ?? 0, g.currency || "ARS", valuationCurrency, fx);
+      if (conv != null) sum += conv;
+    }
+    return sum;
+  }, [positions, bondPricesState.prices, futurePricesState.prices, fciPricesState.prices, fx, valuationCurrency]);
+
   // Render
   if (!user) {
     return (
@@ -18618,7 +18652,9 @@ function PortfolioSummaryWidget({ expanded }) {
     );
   }
 
-  const dailyPnl = dailyTotals.pnl;
+  const dailyPnl = (dailyTotals.pnl != null && !dailyTotals.marketClosed)
+    ? dailyTotals.pnl + realizedToday
+    : dailyTotals.pnl;
   const dailyPct = (dailyPnl != null && dailyTotals.base > 0)
     ? (dailyPnl / dailyTotals.base) * 100
     : null;
