@@ -881,6 +881,7 @@ export default function MidasTerminal() {
                 key={active}
                 title="Acciones"
                 source="equity"
+                kind="stock"
                 defaultTicker="GGAL"
                 quickPicks={["GGAL", "COME", "BYMA", "TXAR", "SUPV", "TRAN"]}
               />
@@ -889,6 +890,7 @@ export default function MidasTerminal() {
                 key={active}
                 title="CEDEARs"
                 source="equity"
+                kind="cedear"
                 defaultTicker="AMZN"
                 quickPicks={["AMZN", "GOOGL", "MSTR", "NU", "GLOB"]}
               />
@@ -19572,6 +19574,136 @@ function usePriceHistory(ticker, source = "mae") {
   return { data, candles, loading, error };
 }
 
+/* ─────────────── useChartTickers ───────────────
+ * Lista de tickers disponibles para el selector, vía RPC chart_tickers
+ * (equity por kind desde equity_daily_close; mae desde daily_close_prices).
+ */
+function useChartTickers(source, kind = null) {
+  const [options, setOptions] = useState([]);
+  useEffect(() => {
+    let cancelled = false;
+    supabase
+      .rpc("chart_tickers", { p_source: source, p_kind: kind })
+      .then(({ data, error }) => {
+        if (cancelled || error) return;
+        setOptions((data || []).map((r) => r.ticker));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [source, kind]);
+  return options;
+}
+
+/* ─────────────── TickerCombobox ───────────────
+ * Buscador desplegable de tickers: input con filtro + lista scrolleable.
+ * Permite tipear cualquiera (Enter) o elegir de la lista. Reemplaza los
+ * botones de quick-picks (que no mostraban todo el universo).
+ */
+function TickerCombobox({ value, options, onSelect }) {
+  const [query, setQuery] = useState("");
+  const [open, setOpen] = useState(false);
+  const boxRef = useRef(null);
+
+  useEffect(() => {
+    const onDocClick = (e) => {
+      if (boxRef.current && !boxRef.current.contains(e.target)) setOpen(false);
+    };
+    document.addEventListener("mousedown", onDocClick);
+    return () => document.removeEventListener("mousedown", onDocClick);
+  }, []);
+
+  const q = query.trim().toUpperCase();
+  const filtered = (q ? options.filter((t) => t.includes(q)) : options).slice(0, 300);
+
+  const pick = (t) => {
+    const v = String(t || "").toUpperCase().trim();
+    if (!v) return;
+    onSelect(v);
+    setQuery("");
+    setOpen(false);
+  };
+
+  return (
+    <div ref={boxRef} style={{ position: "relative", width: 260 }}>
+      <input
+        value={open ? query : value}
+        onChange={(e) => {
+          setQuery(e.target.value);
+          setOpen(true);
+        }}
+        onFocus={() => {
+          setQuery("");
+          setOpen(true);
+        }}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") pick(q || value);
+          if (e.key === "Escape") setOpen(false);
+        }}
+        placeholder="Buscar ticker…"
+        spellCheck={false}
+        style={{
+          width: "100%",
+          padding: "7px 10px",
+          fontSize: 12,
+          color: C.text,
+          background: C.deep,
+          border: `1px solid ${open ? C.accentBorder : C.border}`,
+          borderRadius: 4,
+          outline: "none",
+          textTransform: "uppercase",
+        }}
+      />
+      {open && filtered.length > 0 && (
+        <div
+          style={{
+            position: "absolute",
+            top: "calc(100% + 4px)",
+            left: 0,
+            right: 0,
+            zIndex: 50,
+            maxHeight: 300,
+            overflowY: "auto",
+            background: C.panel,
+            border: `1px solid ${C.borderStrong}`,
+            borderRadius: 4,
+            boxShadow: "0 8px 24px rgba(0,0,0,0.4)",
+          }}
+        >
+          {filtered.map((t) => {
+            const isSel = t === value;
+            return (
+              <div
+                key={t}
+                onMouseDown={(e) => {
+                  e.preventDefault();
+                  pick(t);
+                }}
+                style={{
+                  padding: "6px 10px",
+                  fontSize: 12,
+                  color: isSel ? C.accent : C.text,
+                  background: isSel ? C.accentSoft : "transparent",
+                  cursor: "pointer",
+                  fontWeight: isSel ? 600 : 400,
+                }}
+                onMouseEnter={(e) => {
+                  e.currentTarget.style.background = C.deep;
+                }}
+                onMouseLeave={(e) => {
+                  e.currentTarget.style.background = isSel ? C.accentSoft : "transparent";
+                }}
+              >
+                {t}
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
 /* ─────────────── PriceHistoryChart ───────────────
  * Wrapper de TradingView Lightweight Charts (area series) sobre nuestra data.
  * autoSize sigue el tamaño del contenedor; el contenedor define la altura.
@@ -19644,13 +19776,14 @@ function PriceHistoryChart({ type, data }) {
  * accesos rapidos) y el grafico. Se cablea por leaf del menu (bonos hoy;
  * reusable para lecaps/cer/duales pasando otros quickPicks).
  */
-function PriceHistoryModule({ title, defaultTicker, quickPicks = [], source = "mae" }) {
+function PriceHistoryModule({ title, defaultTicker, quickPicks = [], source = "mae", kind = null }) {
   const [ticker, setTicker] = useState(defaultTicker);
   const [input, setInput] = useState(defaultTicker);
   const [chartType, setChartType] = useState("area");
   const [range, setRange] = useState("all");
   const { data, candles, loading, error } = usePriceHistory(ticker, source);
   const isEquity = source === "equity";
+  const tickerOptions = useChartTickers(source, isEquity ? kind : null);
 
   // Filtro de rango temporal sobre la serie ya cargada (1M/3M/6M/Todo).
   const ranged = useMemo(() => {
@@ -19696,54 +19829,22 @@ function PriceHistoryModule({ title, defaultTicker, quickPicks = [], source = "m
         </h1>
         <p style={{ fontSize: 12, color: C.muted, margin: "6px 0 0 0", letterSpacing: "0.02em" }}>
           {isEquity
-            ? "Cierre diario en pesos (data912). Serie acumulada desde 02/06/2026 — crece cada día hábil."
+            ? "Cierre diario en pesos (Yahoo Finance .BA + data912). Histórico desde 2024, actualizado a diario."
             : "Historia de precio de cierre diario (boletín oficial MAE). Precio por 100 VN, en pesos."}
         </p>
       </div>
 
-      <div className="flex items-center gap-2" style={{ marginBottom: 16, flexWrap: "wrap" }}>
-        <input
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") apply(input);
-          }}
-          placeholder="Ticker (ej. AL30)"
-          spellCheck={false}
-          style={{
-            width: 160,
-            padding: "7px 10px",
-            fontSize: 12,
-            color: C.text,
-            background: C.deep,
-            border: `1px solid ${C.border}`,
-            borderRadius: 4,
-            outline: "none",
-            textTransform: "uppercase",
-          }}
+      <div className="flex items-center gap-3" style={{ marginBottom: 16, flexWrap: "wrap" }}>
+        <TickerCombobox
+          value={ticker}
+          options={tickerOptions.length ? tickerOptions : quickPicks}
+          onSelect={apply}
         />
-        <button
-          onClick={() => apply(input)}
-          style={{
-            padding: "7px 14px",
-            fontSize: 12,
-            fontWeight: 600,
-            color: C.bg,
-            background: C.accent,
-            border: "none",
-            borderRadius: 4,
-            cursor: "pointer",
-          }}
-        >
-          Ver
-        </button>
-        <div className="flex items-center gap-1" style={{ marginLeft: 8, flexWrap: "wrap" }}>
-          {quickPicks.map((qp) => (
-            <button key={qp} onClick={() => apply(qp)} style={chipStyle(qp === ticker)}>
-              {qp}
-            </button>
-          ))}
-        </div>
+        {tickerOptions.length > 0 && (
+          <span style={{ fontSize: 10, color: C.dim, letterSpacing: "0.04em" }}>
+            {tickerOptions.length} tickers
+          </span>
+        )}
       </div>
 
       <div style={{ border: `1px solid ${C.border}`, borderRadius: 6, background: C.panel, padding: 16 }}>
