@@ -19808,6 +19808,11 @@ function PriceHistoryModule({ title, defaultTicker, quickPicks = [], source = "m
   const last = data.length ? data[data.length - 1] : null;
   const fmt = (n) =>
     Number(n).toLocaleString("es-AR", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  // Variación % sobre el rango visible (primer punto vs último).
+  const rangeChange =
+    ranged.line.length >= 2
+      ? ((ranged.line[ranged.line.length - 1].value - ranged.line[0].value) / ranged.line[0].value) * 100
+      : null;
 
   const chipStyle = (isActive) => ({
     padding: "5px 10px",
@@ -19914,6 +19919,22 @@ function PriceHistoryModule({ title, defaultTicker, quickPicks = [], source = "m
             {last && (
               <span style={{ fontSize: 18, fontWeight: 700, color: C.text, fontVariantNumeric: "tabular-nums" }}>
                 {fmt(last.value)}
+              </span>
+            )}
+            {rangeChange != null && (
+              <span
+                style={{
+                  fontSize: 12,
+                  fontWeight: 600,
+                  color: rangeChange >= 0 ? C.green : C.red,
+                  background: rangeChange >= 0 ? "rgba(74,222,128,0.12)" : "rgba(248,113,113,0.12)",
+                  padding: "2px 7px",
+                  borderRadius: 4,
+                  fontVariantNumeric: "tabular-nums",
+                }}
+              >
+                {rangeChange >= 0 ? "+" : ""}
+                {rangeChange.toFixed(2)}%
               </span>
             )}
           </div>
