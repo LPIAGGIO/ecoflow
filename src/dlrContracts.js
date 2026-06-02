@@ -72,6 +72,10 @@ const DLR_SEED_RAW = [
   { suffix: "ENE27", priceSeed: 1655.0 },
   { suffix: "FEB27", priceSeed: 1685.0 },
   { suffix: "MAR27", priceSeed: 1717.0 },
+  // ABR27: no estaba en la captura del 30/04/2026 (no operaba aún). priceSeed
+  // extrapolado de la curva (~+32/mes desde MAR27). Es solo fallback: el worker
+  // mtr-market-data ya captura ABR27 y la UI lo pisa con el precio live.
+  { suffix: "ABR27", priceSeed: 1749.0 },
 ];
 
 /**
