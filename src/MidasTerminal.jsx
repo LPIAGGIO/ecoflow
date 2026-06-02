@@ -11205,6 +11205,59 @@ function consolidatePositions(positions, bondPrices, futurePrices, fciPrices) {
       realizedPnlRaw += matchedQty * (sellPrice - buyPrice);
     };
 
+    // ─── FUTUROS: matcheo LIFO ──────────────────────────────────────────
+    // Para futuros el usuario day-tradea alrededor de un lote core (ej. un
+    // short de fondo + scalps intradía: vender alto, recomprar más abajo).
+    // La recompra tiene que cerrar el short abierto MÁS RECIENTE, no el
+    // viejo — así el realizado refleja los scalps del día y el core queda
+    // intacto. Por eso LIFO con stacks de lotes. Acciones/bonos siguen con
+    // el promedio ponderado del lado abierto (abajo), que matchea el PPC
+    // de Cocos para instrumentos contado.
+    if (g.instrument_type === "future") {
+      const openBuys = []; // [{ qty, price }] — stack (cierra desde el final)
+      const openSells = [];
+      const closeAgainst = (stack, remaining, makePair) => {
+        let rem = remaining;
+        while (rem > 0 && stack.length > 0) {
+          const lot = stack[stack.length - 1];
+          const matched = Math.min(rem, lot.qty);
+          makePair(matched, lot.price);
+          lot.qty -= matched;
+          rem -= matched;
+          if (lot.qty <= 1e-9) stack.pop();
+        }
+        return rem;
+      };
+      for (const op of sorted) {
+        const qty = Number(op.quantity) || 0;
+        const price = Number(op.entry_price) || 0;
+        if (qty <= 0) continue;
+        if (op.operation_type === "sell") {
+          // cierra compras abiertas (long) LIFO; el sobrante abre/extiende short
+          const rem = closeAgainst(openBuys, qty, (m, buyPrice) =>
+            pushPair(op, m, buyPrice, price)
+          );
+          if (rem > 0) openSells.push({ qty: rem, price });
+        } else {
+          // cierra ventas abiertas (short) LIFO; el sobrante abre/extiende long
+          const rem = closeAgainst(openSells, qty, (m, sellPrice) =>
+            pushPair(op, m, price, sellPrice)
+          );
+          if (rem > 0) openBuys.push({ qty: rem, price });
+        }
+      }
+      const sumQ = (arr) => arr.reduce((s, l) => s + l.qty, 0);
+      const sumV = (arr) => arr.reduce((s, l) => s + l.qty * l.price, 0);
+      return {
+        synthetic,
+        realizedPnlRaw,
+        openBuyQty: sumQ(openBuys),
+        openBuyValue: sumV(openBuys),
+        openSellQty: sumQ(openSells),
+        openSellValue: sumV(openSells),
+      };
+    }
+
     for (const op of sorted) {
       const qty = Number(op.quantity) || 0;
       const price = Number(op.entry_price) || 0;
@@ -11646,8 +11699,11 @@ function consolidatePositions(positions, bondPrices, futurePrices, fciPrices) {
           pnlPct: openPnlPct,
           realizedPnl: 0,
           unrealizedPnl: openUnrealizedPnl,
-          lifetimePnl,
-          lifetimePnlPct,
+          // HISTÓRICO de la fila ABIERTA = solo su no-realizado (= P&L TOTAL).
+          // El realizado vive en la fila CERRADA; no se mezcla acá para no
+          // contarlo dos veces (se ve también en "Posiciones cerradas").
+          lifetimePnl: openUnrealizedPnl,
+          lifetimePnlPct: openPnlPct,
           notional: openNotional,
           firstDate: g.firstDate,
           lastDate: g.lastDate,
@@ -11677,8 +11733,9 @@ function consolidatePositions(positions, bondPrices, futurePrices, fciPrices) {
           pnlPct: closedPnlPct,
           realizedPnl: closedPnl,
           unrealizedPnl: 0,
-          lifetimePnl,
-          lifetimePnlPct,
+          // HISTÓRICO de la fila CERRADA = su realizado (= P&L TOTAL de la fila).
+          lifetimePnl: closedPnl,
+          lifetimePnlPct: closedPnlPct,
           notional: 0,
           // Una info adicional útil para mostrar: cuántos contratos se cerraron
           closedQty: g.totalSellQty,
