@@ -1,0 +1,12 @@
+{
+  "name": "equity-snapshot",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Snapshot diario del cierre de acciones/CEDEARs desde data912 a equity_daily_close",
+  "main": "worker.js",
+  "dependencies": {
+    "@supabase/supabase-js": "^2.39.7",
+    "dotenv": "^16.4.5",
+    "ws": "^8.16.0"
+  }
+}
