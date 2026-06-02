@@ -11,6 +11,7 @@ import {
   implicitTEM,
   implicitTEA,
 } from "./dlrContracts.js";
+import { createChart } from "lightweight-charts";
 import {
   Home,
   TrendingUp,
@@ -839,6 +840,12 @@ export default function MidasTerminal() {
                 linkedBrokers={linkedBrokers}
                 brokersLoading={brokersLoading}
                 refetchBrokers={refetchBrokers}
+              />
+            ) : active === "bonos" ? (
+              <PriceHistoryModule
+                title="Bonos Soberanos"
+                defaultTicker="AL30"
+                quickPicks={["AL30", "GD30", "AE38", "AL35", "GD35", "AL41"]}
               />
             ) : active === "dashboard" ? (
               <DashboardModule />
@@ -19109,6 +19116,263 @@ function DashboardModule() {
             )}
           </DashboardWidget>
         ))}
+      </div>
+    </div>
+  );
+}
+
+/* ─────────────── useBondHistory ───────────────
+ *
+ * Serie diaria de precio de cierre de un ticker, desde daily_close_prices
+ * (cierre oficial del boletin MAE). El frontend solo LEE.
+ *
+ * Limpieza de la serie (la data cruda tiene varias filas por dia):
+ *   - moneda '$' (ARS) y segmentos SPOT {2,3,4,5} (se excluyen 7/8/9, que
+ *     son pase/aforo/financiamiento y cotizan distinto).
+ *   - una fila por dia: la de mayor `monto` (la mas liquida/representativa).
+ *   - precio = precio_cierre_hoy (fallback precio_ultimo).
+ *   - convencion MAE dual: los tickers "por 1 VN" (precio < 10, ej. lecaps
+ *     sin sufijo) se llevan a base 100 VN (x100) para matchear la escala del
+ *     resto de Midas. Misma heuristica que useBondPrices.
+ *
+ * Pedimos las ultimas ~1000 ruedas (order desc + limit) para no chocar con
+ * el cap de filas de PostgREST a medida que crece el historico, y ordenamos
+ * ascendente en JS (lightweight-charts requiere time creciente y unico).
+ */
+function useBondHistory(ticker) {
+  const [data, setData] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+
+  useEffect(() => {
+    if (!ticker) {
+      setData([]);
+      setLoading(false);
+      return;
+    }
+    let cancelled = false;
+    setLoading(true);
+    setError(null);
+    supabase
+      .from("daily_close_prices")
+      .select("trade_date, precio_cierre_hoy, precio_ultimo, monto")
+      .eq("ticker", ticker)
+      .eq("moneda_codigo", "$")
+      .in("segmento_codigo", ["2", "3", "4", "5"])
+      .order("trade_date", { ascending: false })
+      .limit(1000)
+      .then(({ data: rows, error: err }) => {
+        if (cancelled) return;
+        if (err) {
+          setError(err.message);
+          setData([]);
+          setLoading(false);
+          return;
+        }
+        const byDate = new Map();
+        for (const r of rows || []) {
+          const raw = Number(r.precio_cierre_hoy) || Number(r.precio_ultimo);
+          if (!Number.isFinite(raw) || raw <= 0) continue;
+          const amount = Number(r.monto) || 0;
+          const prev = byDate.get(r.trade_date);
+          if (!prev || amount > prev.amount) byDate.set(r.trade_date, { raw, amount });
+        }
+        const series = Array.from(byDate.entries())
+          .map(([time, { raw }]) => ({ time, value: raw < 10 ? raw * 100 : raw }))
+          .sort((a, b) => (a.time < b.time ? -1 : 1));
+        setData(series);
+        setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [ticker]);
+
+  return { data, loading, error };
+}
+
+/* ─────────────── PriceHistoryChart ───────────────
+ * Wrapper de TradingView Lightweight Charts (area series) sobre nuestra data.
+ * autoSize sigue el tamaño del contenedor; el contenedor define la altura.
+ */
+function PriceHistoryChart({ data }) {
+  const containerRef = useRef(null);
+  const chartRef = useRef(null);
+  const seriesRef = useRef(null);
+
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const chart = createChart(el, {
+      autoSize: true,
+      layout: {
+        background: { type: "solid", color: "transparent" },
+        textColor: C.muted,
+        fontFamily: "inherit",
+        fontSize: 11,
+      },
+      grid: {
+        vertLines: { color: C.border },
+        horzLines: { color: C.border },
+      },
+      rightPriceScale: { borderColor: C.border },
+      timeScale: { borderColor: C.border, timeVisible: false, fixLeftEdge: true, fixRightEdge: true },
+      crosshair: { mode: 0 },
+      handleScale: { axisPressedMouseMove: false },
+    });
+    const series = chart.addAreaSeries({
+      lineColor: C.accent,
+      topColor: "rgba(91, 141, 214, 0.28)",
+      bottomColor: "rgba(91, 141, 214, 0.02)",
+      lineWidth: 2,
+      priceLineVisible: false,
+      lastValueVisible: true,
+    });
+    chartRef.current = chart;
+    seriesRef.current = series;
+    return () => {
+      chart.remove();
+      chartRef.current = null;
+      seriesRef.current = null;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!seriesRef.current) return;
+    seriesRef.current.setData(data || []);
+    if (data && data.length && chartRef.current) chartRef.current.timeScale().fitContent();
+  }, [data]);
+
+  return <div ref={containerRef} style={{ width: "100%", height: 420 }} />;
+}
+
+/* ─────────────── PriceHistoryModule ───────────────
+ * Vista generica de historia de precios: selector de ticker (input libre +
+ * accesos rapidos) y el grafico. Se cablea por leaf del menu (bonos hoy;
+ * reusable para lecaps/cer/duales pasando otros quickPicks).
+ */
+function PriceHistoryModule({ title, defaultTicker, quickPicks = [] }) {
+  const [ticker, setTicker] = useState(defaultTicker);
+  const [input, setInput] = useState(defaultTicker);
+  const { data, loading, error } = useBondHistory(ticker);
+
+  const apply = (t) => {
+    const v = String(t || "").toUpperCase().trim();
+    if (!v) return;
+    setInput(v);
+    setTicker(v);
+  };
+
+  const last = data.length ? data[data.length - 1] : null;
+  const first = data.length ? data[0] : null;
+  const fmt = (n) =>
+    Number(n).toLocaleString("es-AR", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+  const chipStyle = (isActive) => ({
+    padding: "5px 10px",
+    fontSize: 11,
+    fontWeight: 600,
+    letterSpacing: "0.02em",
+    color: isActive ? C.bg : C.muted,
+    background: isActive ? C.accent : "transparent",
+    border: `1px solid ${isActive ? C.accent : C.border}`,
+    borderRadius: 4,
+    cursor: "pointer",
+  });
+
+  return (
+    <div style={{ padding: "24px 32px", maxWidth: 1100, margin: "0 auto" }}>
+      <div style={{ marginBottom: 20 }}>
+        <h1 style={{ fontSize: 22, fontWeight: 600, color: C.text, letterSpacing: "-0.01em", margin: 0 }}>
+          {title}
+        </h1>
+        <p style={{ fontSize: 12, color: C.muted, margin: "6px 0 0 0", letterSpacing: "0.02em" }}>
+          Historia de precio de cierre diario (boletín oficial MAE). Precio por 100 VN, en pesos.
+        </p>
+      </div>
+
+      <div className="flex items-center gap-2" style={{ marginBottom: 16, flexWrap: "wrap" }}>
+        <input
+          value={input}
+          onChange={(e) => setInput(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") apply(input);
+          }}
+          placeholder="Ticker (ej. AL30)"
+          spellCheck={false}
+          style={{
+            width: 160,
+            padding: "7px 10px",
+            fontSize: 12,
+            color: C.text,
+            background: C.deep,
+            border: `1px solid ${C.border}`,
+            borderRadius: 4,
+            outline: "none",
+            textTransform: "uppercase",
+          }}
+        />
+        <button
+          onClick={() => apply(input)}
+          style={{
+            padding: "7px 14px",
+            fontSize: 12,
+            fontWeight: 600,
+            color: C.bg,
+            background: C.accent,
+            border: "none",
+            borderRadius: 4,
+            cursor: "pointer",
+          }}
+        >
+          Ver
+        </button>
+        <div className="flex items-center gap-1" style={{ marginLeft: 8, flexWrap: "wrap" }}>
+          {quickPicks.map((qp) => (
+            <button key={qp} onClick={() => apply(qp)} style={chipStyle(qp === ticker)}>
+              {qp}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <div style={{ border: `1px solid ${C.border}`, borderRadius: 6, background: C.panel, padding: 16 }}>
+        <div className="flex items-baseline justify-between" style={{ marginBottom: 12 }}>
+          <span style={{ fontSize: 15, fontWeight: 600, color: C.text }}>{ticker}</span>
+          {last && (
+            <span style={{ fontSize: 18, fontWeight: 700, color: C.text, fontVariantNumeric: "tabular-nums" }}>
+              {fmt(last.value)}
+            </span>
+          )}
+        </div>
+
+        {loading ? (
+          <div className="flex items-center justify-center" style={{ height: 420 }}>
+            <Loader2 size={24} color={C.muted} className="eco-spin" strokeWidth={1.5} />
+          </div>
+        ) : error ? (
+          <div
+            className="flex items-center justify-center"
+            style={{ height: 420, fontSize: 12, color: C.red }}
+          >
+            Error leyendo el histórico: {error}
+          </div>
+        ) : data.length === 0 ? (
+          <div
+            className="flex items-center justify-center"
+            style={{ height: 420, fontSize: 12, color: C.muted }}
+          >
+            Sin datos históricos para {ticker}.
+          </div>
+        ) : (
+          <PriceHistoryChart data={data} />
+        )}
+
+        {data.length > 0 && (
+          <div style={{ fontSize: 11, color: C.dim, marginTop: 10, letterSpacing: "0.02em" }}>
+            {data.length} ruedas · {first.time} → {last.time}
+          </div>
+        )}
       </div>
     </div>
   );
