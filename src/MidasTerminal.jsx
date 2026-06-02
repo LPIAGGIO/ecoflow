@@ -283,7 +283,7 @@ function maskAmount(formattedStr, hidden) {
   return "●●●●●";
 }
 
-export default function EcoFlowTerminal() {
+export default function MidasTerminal() {
   const [collapsed, setCollapsed] = useState(false);
   const [now, setNow] = useState(new Date());
   const [open, setOpen] = useState({ bcra: false, mercado: false, analizadores: false, calculadoras: false, reportes: false });
@@ -1489,7 +1489,7 @@ function PortfolioIAModule({ onNavigate }) {
 /* ─────────────── IOLConnectBanner ───────────────
  *
  * Banner persistente al tope del workspace que invita al usuario a
- * vincular su cuenta IOL. Se renderiza desde EcoFlowTerminal solamente
+ * vincular su cuenta IOL. Se renderiza desde MidasTerminal solamente
  * cuando:
  *   - El usuario no tiene un broker `iol` con status active vinculado, Y
  *   - No dismisseó el banner previamente (localStorage flag), Y
@@ -7258,7 +7258,7 @@ function useUserPositions() {
 
 /* ─────────────── Cash movements: helpers + hook ───────────────
  *
- * Lógica del cash en EcoFlow:
+ * Lógica del cash en Midas:
  *
  * 1) Toda compra de bono/stock/cedear/on inyecta automáticamente un
  *    cash_movement de tipo 'purchase_cost' que resta del saldo. Toda
@@ -13656,7 +13656,7 @@ function OperationsHistorySection({
     // Filtro: si hay items HOY, mostramos solo los de hoy. Si no, los
     // del último día con actividad. Tope: 10. Mismo criterio que antes
     // pero aplicado al merge.
-    const today = new Date().toISOString().slice(0, 10);
+    const today = getTodayStringAR();
     const todayItems = items.filter((it) => it.sortDate === today);
 
     if (todayItems.length > 0) return todayItems.slice(0, 10);
@@ -13670,7 +13670,7 @@ function OperationsHistorySection({
   // día que estemos mostrando.
   const headerLabel = useMemo(() => {
     if (recentRows.length === 0) return "Últimas operaciones";
-    const today = new Date().toISOString().slice(0, 10);
+    const today = getTodayStringAR();
     const showingDate = recentRows[0].sortDate;
     if (showingDate === today) return "Operaciones de hoy";
     return `Operaciones del ${fmtDateShort(showingDate)}`;
@@ -15418,7 +15418,7 @@ function CashMovementModal({ type, editingMovement, onCancel, onSubmit }) {
       return {
         currency: editingMovement.currency || "ARS",
         amount: String(editingMovement.amount ?? ""),
-        movement_date: editingMovement.movement_date || new Date().toISOString().slice(0, 10),
+        movement_date: editingMovement.movement_date || getTodayStringAR(),
         broker: editingMovement.broker || "manual",
         notes: editingMovement.notes || "",
       };
@@ -15426,7 +15426,7 @@ function CashMovementModal({ type, editingMovement, onCancel, onSubmit }) {
     return {
       currency: "ARS",
       amount: "",
-      movement_date: new Date().toISOString().slice(0, 10),
+      movement_date: getTodayStringAR(),
       broker: "manual",
       notes: "",
     };
@@ -16045,7 +16045,7 @@ function AddPositionDrawer({ editingPosition, onClose, onSubmit }) {
         quantity: editingPosition.quantity ?? "",
         entry_price: editingPosition.entry_price ?? "",
         entry_currency: normalizeLegacyCurrency(editingPosition.entry_currency),
-        entry_date: editingPosition.entry_date || new Date().toISOString().slice(0, 10),
+        entry_date: editingPosition.entry_date || getTodayStringAR(),
         settlement: editingPosition.settlement || "CI",
         broker: editingPosition.broker || "manual",
         notes: editingPosition.notes || "",
@@ -16065,7 +16065,7 @@ function AddPositionDrawer({ editingPosition, onClose, onSubmit }) {
       quantity: "",
       entry_price: "",
       entry_currency: "ARS",
-      entry_date: new Date().toISOString().slice(0, 10),
+      entry_date: getTodayStringAR(),
       settlement: "CI",
       broker: "manual",
       notes: "",

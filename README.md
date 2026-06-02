@@ -1,4 +1,4 @@
-# EcoFlow Terminal
+# Midas
 
 Plataforma de finanzas argentinas. Dashboard con cotizaciones de dólar en tiempo real, análisis de carry trade, calculadoras y más.
 
@@ -25,13 +25,13 @@ Cualquier push a la rama `main` se deploya automáticamente a Vercel.
 ## Estructura
 
 ```
-ecoflow/
+midas/
 ├── api/              ← Serverless functions (proxies de APIs)
 │   ├── dolares.js
 │   ├── usdt.js
 │   └── usdc.js
 ├── src/
-│   ├── EcoFlowTerminal.jsx   ← Componente principal
+│   ├── MidasTerminal.jsx     ← Componente principal
 │   ├── main.jsx              ← Entry point React
 │   └── index.css             ← Tailwind directives
 ├── public/           ← Assets estáticos (favicon, etc)

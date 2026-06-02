@@ -96,7 +96,7 @@ async function fetchEndpoint(apiKey, endpoint) {
       headers: {
         "x-api-key": apiKey,
         "Accept": "application/json",
-        "User-Agent": "Mozilla/5.0 (EcoFlow Snapshot Tool)",
+        "User-Agent": "Mozilla/5.0 (Midas Snapshot Tool)",
       },
       signal: controller.signal,
     });

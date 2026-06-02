@@ -25,7 +25,7 @@ export default async function handler(req, res) {
 
   try {
     const response = await fetch(SOURCES[type], {
-      headers: { "User-Agent": "EcoFlow/0.1" },
+      headers: { "User-Agent": "Midas/0.1" },
     });
 
     if (!response.ok) {

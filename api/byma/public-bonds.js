@@ -144,7 +144,7 @@ async function fetchBymaEndpoint(endpoint, bodyObj) {
       "Origin": "https://open.bymadata.com.ar",
       "Referer": "https://open.bymadata.com.ar/",
       // Un User-Agent de browser real es más probable de pasar filtros
-      // anti-bot que "EcoFlow/1.0".
+      // anti-bot que "Midas/1.0".
       "User-Agent":
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
         "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
