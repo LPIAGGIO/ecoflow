@@ -1659,6 +1659,76 @@ function useLinkedBrokers(userId) {
   return { data, loading, error, refetch };
 }
 
+/* ─────────────── useApiQuota ───────────────
+ *
+ * Lee el cupo de API del usuario desde api_quotas (una fila por
+ * user/broker/mes, period_start = date_trunc('month', current_date)). El
+ * contador lo incrementa el worker iol-sync server-side vía la función
+ * increment_api_call_count — el frontend SOLO LEE. RLS: policy
+ * "api_quotas select own" con (auth.uid() = user_id).
+ *
+ * Devuelve la fila del mes más reciente (la activa) o null si todavía no
+ * hubo ninguna call este mes. Mismo patrón de poll/refetch que
+ * useLinkedBrokers: el número cambia del lado del servidor (el cron suma
+ * calls cada 10 min), así que sin poll la UI quedaría stale.
+ */
+function useApiQuota(userId, broker = "iol") {
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+  const [refreshKey, setRefreshKey] = useState(0);
+  const hasLoadedRef = useRef(false);
+
+  const refetch = useCallback(() => setRefreshKey((k) => k + 1), []);
+
+  useEffect(() => {
+    if (!userId) {
+      setLoading(false);
+      return;
+    }
+    let cancelled = false;
+    if (!hasLoadedRef.current) setLoading(true);
+    setError(null);
+    supabase
+      .from("api_quotas")
+      .select(
+        "user_id, broker, period_start, calls_made, calls_limit, extra_calls_made, last_call_at"
+      )
+      .eq("user_id", userId)
+      .eq("broker", broker)
+      .order("period_start", { ascending: false })
+      .limit(1)
+      .then(({ data: rows, error: err }) => {
+        if (cancelled) return;
+        if (err) {
+          setError(err.message);
+        } else {
+          setData((rows && rows[0]) || null);
+        }
+        setLoading(false);
+        hasLoadedRef.current = true;
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [userId, broker, refreshKey]);
+
+  useEffect(() => {
+    if (!userId) return;
+    const interval = setInterval(() => setRefreshKey((k) => k + 1), 60000);
+    const onVisible = () => {
+      if (document.visibilityState === "visible") setRefreshKey((k) => k + 1);
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      clearInterval(interval);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
+  }, [userId]);
+
+  return { data, loading, error, refetch };
+}
+
 /* ─────────────── useBrokerCashSnapshots ───────────────
  *
  * Lee la FOTO del efectivo por broker desde broker_cash_snapshots.
@@ -2183,7 +2253,7 @@ function SettingsDashboard({ userId, brokers, brokersLoading, refetchBrokers }) 
           cashSnapshots={cashSnapshots}
         />
       )}
-      {tab === "usage" && <UsagePlaceholder />}
+      {tab === "usage" && <ApiUsageWidget userId={userId} />}
       {tab === "activity" && <ActivityPlaceholder />}
     </div>
   );
@@ -2603,6 +2673,181 @@ function BrokerCard({ id, meta, linked, positionCount, userId, refetchBrokers, c
         />
       )}
     </>
+  );
+}
+
+// Costo por call adicional una vez agotado el cupo gratuito mensual (IOL).
+const IOL_EXTRA_CALL_COST_ARS = 500;
+
+function ApiUsageWidget({ userId }) {
+  const { data: quota, loading } = useApiQuota(userId, "iol");
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center" style={{ padding: "48px 0" }}>
+        <Loader2 size={24} color={C.muted} className="eco-spin" strokeWidth={1.5} />
+      </div>
+    );
+  }
+
+  // Sin fila de cupo todavía (ninguna call este mes) → cae al placeholder.
+  if (!quota) return <UsagePlaceholder />;
+
+  const made = quota.calls_made || 0;
+  const limit = quota.calls_limit || 25000;
+  const extra = quota.extra_calls_made || 0;
+  const pct = limit > 0 ? Math.min(100, (made / limit) * 100) : 0;
+  const over = made >= limit;
+  const near = pct >= 80;
+  const barColor = over ? C.red : near ? C.yellow : C.green;
+  const extraCost = extra * IOL_EXTRA_CALL_COST_ARS;
+
+  // Proyección lineal simple: a este ritmo, ¿el cupo del mes alcanza?
+  // period_start es el 1ro del mes (UTC). Estimamos días transcurridos y
+  // proyectamos el total a fin de mes. Es orientativo, no contable.
+  const periodStart = quota.period_start
+    ? new Date(quota.period_start + "T00:00:00")
+    : null;
+  let projection = null;
+  if (periodStart) {
+    const now = new Date();
+    const daysElapsed = Math.max(1, Math.floor((now - periodStart) / 86400000) + 1);
+    const daysInMonth = new Date(
+      periodStart.getFullYear(),
+      periodStart.getMonth() + 1,
+      0
+    ).getDate();
+    const dailyRate = made / daysElapsed;
+    const projectedTotal = Math.round(dailyRate * daysInMonth);
+    const daysToLimit =
+      dailyRate > 0 ? Math.ceil((limit - made) / dailyRate) : null;
+    projection = { dailyRate, projectedTotal, daysToLimit, daysInMonth };
+  }
+
+  const fmt = (n) => Number(n).toLocaleString("es-AR");
+  const periodLabel = quota.period_start
+    ? new Date(quota.period_start + "T00:00:00").toLocaleDateString("es-AR", {
+        month: "long",
+        year: "numeric",
+      })
+    : "este mes";
+
+  return (
+    <div
+      style={{
+        border: `1px solid ${C.border}`,
+        borderRadius: 6,
+        padding: "20px 22px",
+        background: C.panel,
+        maxWidth: 560,
+      }}
+    >
+      {/* Encabezado */}
+      <div className="flex items-baseline justify-between" style={{ marginBottom: 16 }}>
+        <div>
+          <div style={{ fontSize: 13, fontWeight: 600, color: C.text }}>
+            Cupo de API · IOL
+          </div>
+          <div style={{ fontSize: 10, color: C.dim, marginTop: 2, textTransform: "capitalize" }}>
+            {periodLabel}
+          </div>
+        </div>
+        <div style={{ textAlign: "right" }}>
+          <span style={{ fontSize: 20, fontWeight: 700, color: C.text, fontVariantNumeric: "tabular-nums" }}>
+            {fmt(made)}
+          </span>
+          <span style={{ fontSize: 12, color: C.muted }}> / {fmt(limit)}</span>
+        </div>
+      </div>
+
+      {/* Barra de progreso */}
+      <div
+        style={{
+          height: 8,
+          borderRadius: 4,
+          background: C.deep,
+          overflow: "hidden",
+          marginBottom: 8,
+        }}
+      >
+        <div
+          style={{
+            width: `${pct}%`,
+            height: "100%",
+            background: barColor,
+            transition: "width 0.3s, background 0.3s",
+          }}
+        />
+      </div>
+      <div className="flex items-center justify-between" style={{ marginBottom: 16 }}>
+        <span style={{ fontSize: 11, color: barColor }}>
+          {pct.toFixed(1)}% usado
+        </span>
+        <span style={{ fontSize: 11, color: C.muted }}>
+          {over ? "cupo agotado" : `${fmt(Math.max(0, limit - made))} disponibles`}
+        </span>
+      </div>
+
+      {/* Calls extra (sobre el cupo, pagas) */}
+      {extra > 0 && (
+        <div
+          className="flex items-center justify-between"
+          style={{
+            padding: "8px 12px",
+            borderRadius: 4,
+            background: C.deep,
+            marginBottom: 12,
+          }}
+        >
+          <span style={{ fontSize: 11, color: C.muted }}>
+            {fmt(extra)} calls extra (pagas)
+          </span>
+          <span style={{ fontSize: 12, color: C.red, fontWeight: 600 }}>
+            ${fmt(extraCost)}
+          </span>
+        </div>
+      )}
+
+      {/* Proyección + última call */}
+      <div style={{ fontSize: 11, color: C.muted, lineHeight: 1.6 }}>
+        {projection && (
+          <div>
+            Ritmo: ~{fmt(Math.round(projection.dailyRate))} calls/día ·{" "}
+            {projection.projectedTotal > limit ? (
+              <span style={{ color: C.yellow }}>
+                proyección fin de mes ~{fmt(projection.projectedTotal)} (supera el cupo
+                {projection.daysToLimit != null
+                  ? `, límite en ~${projection.daysToLimit} días`
+                  : ""}
+                )
+              </span>
+            ) : (
+              <span>proyección fin de mes ~{fmt(projection.projectedTotal)}, dentro del cupo</span>
+            )}
+          </div>
+        )}
+        {quota.last_call_at && (
+          <div style={{ color: C.dim }}>
+            Última call: {new Date(quota.last_call_at).toLocaleString("es-AR")}
+          </div>
+        )}
+      </div>
+
+      <div
+        style={{
+          fontSize: 10,
+          color: C.dim,
+          marginTop: 14,
+          paddingTop: 12,
+          borderTop: `1px solid ${C.border}`,
+          lineHeight: 1.5,
+        }}
+      >
+        Cuenta el consumo mensual del cupo IOL (25.000 calls gratis; cada extra
+        cuesta ${fmt(IOL_EXTRA_CALL_COST_ARS)} ARS). El desglose por endpoint y el
+        corte automático al límite se habilitan en una próxima iteración.
+      </div>
+    </div>
   );
 }
 
