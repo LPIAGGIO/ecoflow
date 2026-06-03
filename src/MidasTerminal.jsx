@@ -216,6 +216,7 @@ const NAV = [
       { id: "sintetico-dlr", label: "Sintético DLR", icon: Layers },
       { id: "curva-tasas", label: "Curva de Tasas", icon: Spline },
       { id: "spread-cer-fija", label: "Spread CER / Fija", icon: Diff },
+      { id: "desarbitrajes", label: "Desarbitrajes MEP", icon: Repeat },
     ],
   },
   {
@@ -923,6 +924,8 @@ export default function MidasTerminal() {
                 seriesId="89.2_TS_INTE_PM_0_D_16"
                 units="% TNA"
               />
+            ) : active === "desarbitrajes" ? (
+              <DesarbitrajesModule key={active} />
             ) : active === "dashboard" ? (
               <DashboardModule />
             ) : (
@@ -20287,6 +20290,212 @@ function useMacroSeries(seriesId) {
   }, [seriesId]);
 
   return { data, loading, error };
+}
+
+/* ─────────────── useSovereignMep ───────────────
+ * Lee el detector de desarbitraje MEP de soberanos (vistas creadas en
+ * la migración 015): `sovereign_mep_live` (MEP implícito por bono/plazo)
+ * y `sovereign_mep_canje` (dispersión entre bonos del mismo plazo).
+ * Refresca al entrar + cada 60s mientras la pestaña está visible.
+ */
+function useSovereignMep() {
+  const [live, setLive] = useState([]);
+  const [canje, setCanje] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+  const [refreshKey, setRefreshKey] = useState(0);
+  const hasLoadedRef = useRef(false);
+
+  const refetch = useCallback(() => setRefreshKey((k) => k + 1), []);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!hasLoadedRef.current) setLoading(true);
+    setError(null);
+    Promise.all([
+      supabase
+        .from("sovereign_mep_live")
+        .select("ticker,plazo,p_ars,p_mep,mep,td_ars,td_mep,patas_mismo_dia"),
+      supabase
+        .from("sovereign_mep_canje")
+        .select("plazo,n_bonos,comprar_pesos_vender_dolar,mep_min,vender_dolar_caro,mep_max,spread_pct"),
+    ]).then(([liveRes, canjeRes]) => {
+      if (cancelled) return;
+      const err = liveRes.error || canjeRes.error;
+      if (err) setError(err.message);
+      setLive(liveRes.data || []);
+      setCanje(canjeRes.data || []);
+      setLoading(false);
+      hasLoadedRef.current = true;
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [refreshKey]);
+
+  // Refresco automático cada 60s + al volver a la pestaña.
+  useEffect(() => {
+    const interval = setInterval(() => setRefreshKey((k) => k + 1), 60000);
+    const onVisible = () => {
+      if (document.visibilityState === "visible") setRefreshKey((k) => k + 1);
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      clearInterval(interval);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
+  }, []);
+
+  return { live, canje, loading, error, refetch };
+}
+
+const PLAZO_LABELS = { "000": "Contado inmediato (CI)", "001": "24 horas" };
+
+/* ─────────────── DesarbitrajesModule ───────────────
+ * Detector INDICATIVO de desarbitraje MEP en soberanos hard-dollar.
+ * MEP implícito de cada bono = precio_en_pesos / precio_en_dólares.
+ * El "canje" es la dispersión del MEP entre bonos del mismo plazo.
+ *
+ * CAVEAT (mostrado en pantalla): con la data actual (cierres MAE, sin
+ * puntas bid/offer y con patas que se actualizan en momentos distintos)
+ * esto NO confirma un rulo ejecutable — un spread grande es casi siempre
+ * ruido de asincronía, no plata. Sirve para detectar y juntar estadística.
+ * Para volverlo ejecutable falta snapshot intradía sincrónico + puntas.
+ */
+function DesarbitrajesModule() {
+  const { live, canje, loading, error, refetch } = useSovereignMep();
+  const fmt = (n, d = 2) =>
+    n == null ? "—" : Number(n).toLocaleString("es-AR", { minimumFractionDigits: d, maximumFractionDigits: d });
+
+  const plazos = ["000", "001"];
+  const byPlazo = (p) =>
+    live.filter((r) => r.plazo === p).slice().sort((a, b) => Number(a.mep) - Number(b.mep));
+  const canjeFor = (p) => canje.find((c) => c.plazo === p);
+
+  return (
+    <div style={{ padding: "24px 32px", maxWidth: 1100, margin: "0 auto" }}>
+      <div style={{ marginBottom: 20 }} className="flex items-start justify-between">
+        <div>
+          <h1 style={{ fontSize: 22, fontWeight: 600, color: C.text, letterSpacing: "-0.01em", margin: 0 }}>
+            Desarbitrajes — MEP Soberanos
+          </h1>
+          <p style={{ fontSize: 12, color: C.muted, margin: "6px 0 0 0", letterSpacing: "0.02em" }}>
+            MEP implícito por bono (precio en $ / precio en USD) · fuente: MAE · AL/GD/AE/GE
+          </p>
+        </div>
+        <button
+          onClick={refetch}
+          className="flex items-center gap-2"
+          style={{
+            border: `1px solid ${C.border}`,
+            borderRadius: 6,
+            background: C.panel,
+            color: C.muted,
+            padding: "6px 12px",
+            fontSize: 12,
+            cursor: "pointer",
+          }}
+        >
+          <RefreshCw size={13} strokeWidth={1.5} className={loading ? "eco-spin" : ""} />
+          Actualizar
+        </button>
+      </div>
+
+      {/* Banner de honestidad: esto es indicativo, no ejecutable */}
+      <div
+        className="flex items-start gap-2"
+        style={{
+          border: `1px solid rgba(248, 113, 113, 0.25)`,
+          background: "rgba(248, 113, 113, 0.06)",
+          borderRadius: 6,
+          padding: "10px 14px",
+          marginBottom: 18,
+        }}
+      >
+        <AlertTriangle size={15} color={C.red} strokeWidth={1.6} style={{ marginTop: 1, flexShrink: 0 }} />
+        <span style={{ fontSize: 11.5, color: C.muted, lineHeight: 1.5 }}>
+          <b style={{ color: C.text }}>Detector indicativo, no confirma rulo ejecutable.</b> Los precios son el
+          último operado en MAE (no puntas bid/offer) y las patas $/USD se actualizan en momentos distintos. Un
+          spread grande entre patas no sincrónicas (<b>frescas = no</b>) es casi siempre ruido de horario, no una
+          ganancia real. Antes de operar, confirmá las puntas en vivo.
+        </span>
+      </div>
+
+      {loading && live.length === 0 ? (
+        <div className="flex items-center justify-center" style={{ height: 300 }}>
+          <Loader2 size={24} color={C.muted} className="eco-spin" strokeWidth={1.5} />
+        </div>
+      ) : error ? (
+        <div className="flex items-center justify-center" style={{ height: 300, fontSize: 12, color: C.red }}>
+          Error leyendo el detector: {error}
+        </div>
+      ) : (
+        plazos.map((p) => {
+          const rows = byPlazo(p);
+          if (!rows.length) return null;
+          const cj = canjeFor(p);
+          return (
+            <div key={p} style={{ marginBottom: 22 }}>
+              <div className="flex items-baseline justify-between" style={{ marginBottom: 8 }}>
+                <h2 style={{ fontSize: 14, fontWeight: 600, color: C.text, margin: 0 }}>{PLAZO_LABELS[p]}</h2>
+                {cj && (
+                  <span style={{ fontSize: 11.5, color: C.muted }}>
+                    Canje: comprar <b style={{ color: C.green }}>{cj.comprar_pesos_vender_dolar}</b> (
+                    {fmt(cj.mep_min)}) · vender <b style={{ color: C.accent }}>{cj.vender_dolar_caro}</b> (
+                    {fmt(cj.mep_max)}) · spread{" "}
+                    <b style={{ color: Number(cj.spread_pct) > 1 ? C.red : C.green }}>{fmt(cj.spread_pct, 2)}%</b>
+                  </span>
+                )}
+              </div>
+
+              <div style={{ border: `1px solid ${C.border}`, borderRadius: 6, background: C.panel, overflow: "hidden" }}>
+                <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12.5 }}>
+                  <thead>
+                    <tr style={{ color: C.dim, fontSize: 10.5, letterSpacing: "0.08em", textTransform: "uppercase" }}>
+                      <th style={{ textAlign: "left", padding: "8px 14px", fontWeight: 500 }}>Bono</th>
+                      <th style={{ textAlign: "right", padding: "8px 14px", fontWeight: 500 }}>Precio $</th>
+                      <th style={{ textAlign: "right", padding: "8px 14px", fontWeight: 500 }}>Precio USD</th>
+                      <th style={{ textAlign: "right", padding: "8px 14px", fontWeight: 500 }}>MEP impl.</th>
+                      <th style={{ textAlign: "center", padding: "8px 14px", fontWeight: 500 }}>Frescas</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {rows.map((r) => (
+                      <tr key={r.ticker} style={{ borderTop: `1px solid ${C.border}` }}>
+                        <td style={{ padding: "8px 14px", color: C.text, fontWeight: 600 }}>{r.ticker}</td>
+                        <td style={{ padding: "8px 14px", textAlign: "right", color: C.muted, fontVariantNumeric: "tabular-nums" }}>
+                          {fmt(r.p_ars)}
+                        </td>
+                        <td style={{ padding: "8px 14px", textAlign: "right", color: C.muted, fontVariantNumeric: "tabular-nums" }}>
+                          {fmt(r.p_mep, 4)}
+                        </td>
+                        <td style={{ padding: "8px 14px", textAlign: "right", color: C.text, fontWeight: 600, fontVariantNumeric: "tabular-nums" }}>
+                          {fmt(r.mep)}
+                        </td>
+                        <td style={{ padding: "8px 14px", textAlign: "center" }}>
+                          {r.patas_mismo_dia ? (
+                            <span style={{ color: C.green, fontSize: 11 }} title="Ambas patas del mismo día">●</span>
+                          ) : (
+                            <span style={{ color: C.dim, fontSize: 11 }} title={`Patas desfasadas: $ ${r.td_ars} / USD ${r.td_mep}`}>
+                              ○
+                            </span>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          );
+        })
+      )}
+
+      <p style={{ fontSize: 10.5, color: C.dim, marginTop: 4, letterSpacing: "0.02em" }}>
+        ● frescas = las dos patas operaron el mismo día · ○ = desfasadas (MEP poco confiable). Fase 1 (detección).
+      </p>
+    </div>
+  );
 }
 
 /* ─────────────── MacroChartModule ───────────────
