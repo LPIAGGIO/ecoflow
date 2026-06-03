@@ -899,6 +899,30 @@ export default function MidasTerminal() {
                 defaultTicker="AMZN"
                 quickPicks={["AMZN", "GOOGL", "MSTR", "NU", "GLOB"]}
               />
+            ) : active === "reservas" ? (
+              <MacroChartModule
+                key={active}
+                title="Reservas Internacionales BCRA"
+                subtitle="Saldos mensuales"
+                seriesId="92.1_RID_0_0_32"
+                units="Millones de USD"
+              />
+            ) : active === "base-monetaria" ? (
+              <MacroChartModule
+                key={active}
+                title="Base Monetaria"
+                subtitle="Saldo diario"
+                seriesId="331.2_SALDO_BASERIA__15"
+                units="Millones de $"
+              />
+            ) : active === "tasas" ? (
+              <MacroChartModule
+                key={active}
+                title="Tasa de Política Monetaria"
+                subtitle="BCRA · TNA"
+                seriesId="89.2_TS_INTE_PM_0_D_16"
+                units="% TNA"
+              />
             ) : active === "dashboard" ? (
               <DashboardModule />
             ) : (
@@ -20213,6 +20237,108 @@ function PriceHistoryModule({ title, defaultTicker, quickPicks = [], source = "m
         {ranged.line.length > 0 && (
           <div style={{ fontSize: 11, color: C.dim, marginTop: 10, letterSpacing: "0.02em" }}>
             {ranged.line.length} ruedas · {ranged.line[0].time} → {ranged.line[ranged.line.length - 1].time}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/* ─────────────── useMacroSeries ───────────────
+ * Lee una serie de tiempo macro de la API pública de datos.gob.ar
+ * (apis.datos.gob.ar/series, CORS abierto, sin key). Devuelve [{time, value}]
+ * ascendente. Fuente original: BCRA / SSPM.
+ */
+function useMacroSeries(seriesId) {
+  const [data, setData] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+
+  useEffect(() => {
+    if (!seriesId) {
+      setData([]);
+      setLoading(false);
+      return;
+    }
+    let cancelled = false;
+    setLoading(true);
+    setError(null);
+    fetch(
+      `https://apis.datos.gob.ar/series/api/series/?ids=${encodeURIComponent(seriesId)}&format=json&limit=5000`
+    )
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error("HTTP " + r.status))))
+      .then((j) => {
+        if (cancelled) return;
+        const rows = (j.data || [])
+          .map((row) => ({ time: row[0], value: Number(row[1]) }))
+          .filter((p) => p.time && Number.isFinite(p.value))
+          .sort((a, b) => (a.time < b.time ? -1 : 1));
+        setData(rows);
+        setLoading(false);
+      })
+      .catch((e) => {
+        if (cancelled) return;
+        setError(String(e.message || e));
+        setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [seriesId]);
+
+  return { data, loading, error };
+}
+
+/* ─────────────── MacroChartModule ───────────────
+ * Vista de una serie macro (Reservas, Base Monetaria, Tasas) en gráfico.
+ * Fuente: datos.gob.ar (BCRA). Reusa el chart de la curva de precios.
+ */
+function MacroChartModule({ title, subtitle, seriesId, units }) {
+  const { data, loading, error } = useMacroSeries(seriesId);
+  const last = data.length ? data[data.length - 1] : null;
+  const first = data.length ? data[0] : null;
+  const fmt = (n) => Number(n).toLocaleString("es-AR", { maximumFractionDigits: 2 });
+
+  return (
+    <div style={{ padding: "24px 32px", maxWidth: 1100, margin: "0 auto" }}>
+      <div style={{ marginBottom: 20 }}>
+        <h1 style={{ fontSize: 22, fontWeight: 600, color: C.text, letterSpacing: "-0.01em", margin: 0 }}>
+          {title}
+        </h1>
+        <p style={{ fontSize: 12, color: C.muted, margin: "6px 0 0 0", letterSpacing: "0.02em" }}>
+          {subtitle} · fuente: datos.gob.ar (BCRA)
+        </p>
+      </div>
+
+      <div style={{ border: `1px solid ${C.border}`, borderRadius: 6, background: C.panel, padding: 16 }}>
+        <div className="flex items-baseline justify-between" style={{ marginBottom: 12 }}>
+          <span style={{ fontSize: 12, color: C.muted }}>{units}</span>
+          {last && (
+            <span style={{ fontSize: 18, fontWeight: 700, color: C.text, fontVariantNumeric: "tabular-nums" }}>
+              {fmt(last.value)}
+            </span>
+          )}
+        </div>
+
+        {loading ? (
+          <div className="flex items-center justify-center" style={{ height: 420 }}>
+            <Loader2 size={24} color={C.muted} className="eco-spin" strokeWidth={1.5} />
+          </div>
+        ) : error ? (
+          <div className="flex items-center justify-center" style={{ height: 420, fontSize: 12, color: C.red }}>
+            Error leyendo la serie: {error}
+          </div>
+        ) : data.length < 2 ? (
+          <div className="flex items-center justify-center" style={{ height: 420, fontSize: 12, color: C.muted }}>
+            Sin datos para esta serie.
+          </div>
+        ) : (
+          <PriceHistoryChart type="area" data={data} height={420} />
+        )}
+
+        {data.length >= 2 && (
+          <div style={{ fontSize: 11, color: C.dim, marginTop: 10, letterSpacing: "0.02em" }}>
+            {data.length} puntos · {first.time} → {last.time}
           </div>
         )}
       </div>
