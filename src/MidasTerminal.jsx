@@ -19325,11 +19325,15 @@ function DashboardModule() {
   const futurePrices = futurePricesState?.prices || {};
   const futuresLoading = futurePricesState?.loading;
 
+  // Spot mayorista: ancla inicial de la curva (lo que vale el dólar hoy).
+  const { fx } = useDashboardFx();
+  const spotMayorista = fx?.mayorista?.mid;
+
   // Construcción de la curva. Reusa el helper global que también usa el
   // Sintético DLR — misma lógica de filtrado y mismo umbral de basis.
   const dlrCurve = useMemo(
-    () => buildDlrCurveFromFuturePrices(futurePrices),
-    [futurePrices]
+    () => buildDlrCurveFromFuturePrices(futurePrices, 0.003, spotMayorista),
+    [futurePrices, spotMayorista]
   );
 
   // Placeholders de widgets futuros. Cada uno reserva espacio en el grid
@@ -23558,7 +23562,7 @@ function findBestSingleHedgeForHorizon(futuresList, horizonDays) {
  *                          monthlyDevRate, annualDevRate } o null si no hay
  *                          datos suficientes (necesita >= 2 DLRs con precio).
  */
-function buildDlrCurve(futuresList, thresholdPct = 0.003) {
+function buildDlrCurve(futuresList, thresholdPct = 0.003, spotAnchor = null) {
   if (!Array.isArray(futuresList) || futuresList.length < 2) return null;
 
   // Filtrar solo DLRs con precio válido y días al vto válidos.
@@ -23570,7 +23574,19 @@ function buildDlrCurve(futuresList, thresholdPct = 0.003) {
   if (valid.length < 2) return null;
 
   // Sort por días al vto ascendente (por las dudas)
-  const sorted = [...valid].sort((a, b) => a.expiryDays - b.expiryDays);
+  const sortedFutures = [...valid].sort((a, b) => a.expiryDays - b.expiryDays);
+
+  // Ancla inicial: el SPOT mayorista (t=0) si está disponible. Es lo que vale
+  // el dólar HOY, y desde ahí se forma la curva. Anclar en el primer futuro
+  // (JUN26) sesga toda la curva si ese futuro está caro/barato, y además lo
+  // deja con basis 0 ocultando su propio mispricing. Con el spot como ancla,
+  // cada futuro (incluido el primero) tiene basis real vs la devaluación
+  // implícita spot→último DLR. Sin spot, cae al comportamiento viejo.
+  const useSpot =
+    spotAnchor && Number.isFinite(spotAnchor.price) && spotAnchor.price > 0;
+  const sorted = useSpot
+    ? [{ ...spotAnchor, expiryDays: 0 }, ...sortedFutures]
+    : sortedFutures;
 
   const anchorFirst = sorted[0];
   const anchorLast = sorted[sorted.length - 1];
@@ -23606,7 +23622,7 @@ function buildDlrCurve(futuresList, thresholdPct = 0.003) {
 
     return {
       ticker: f.ticker,
-      shortTicker: f.ticker.replace(/^DLR/, ""), // "DLRJUN26" → "JUN26"
+      shortTicker: f.shortTicker || f.ticker.replace(/^DLR/, ""), // "DLRJUN26" → "JUN26"
       expiryDays: f.expiryDays,
       price: f.price,
       priceTheoric,
@@ -23616,6 +23632,7 @@ function buildDlrCurve(futuresList, thresholdPct = 0.003) {
       isAnchor,
       isAnchorFirst,
       isAnchorLast,
+      isSpot: !!f.isSpot,
     };
   });
 
@@ -23650,7 +23667,7 @@ function buildDlrCurve(futuresList, thresholdPct = 0.003) {
  * @param {number} thresholdPct — umbral basis (default 0.003 = 0.3%)
  * @returns {Object|null} resultado de buildDlrCurve, o null si no hay datos
  */
-function buildDlrCurveFromFuturePrices(futurePrices, thresholdPct = 0.003) {
+function buildDlrCurveFromFuturePrices(futurePrices, thresholdPct = 0.003, spotPrice = null) {
   if (!futurePrices || typeof futurePrices !== "object") return null;
 
   const futuresLive = DLR_REGISTRY
@@ -23666,7 +23683,12 @@ function buildDlrCurveFromFuturePrices(futurePrices, thresholdPct = 0.003) {
     .filter((f) => Number.isFinite(f.price) && f.price > 0)
     .sort((a, b) => a.expiryDays - b.expiryDays);
 
-  return buildDlrCurve(futuresLive, thresholdPct);
+  const spotAnchor =
+    Number.isFinite(spotPrice) && spotPrice > 0
+      ? { ticker: "SPOT", shortTicker: "SPOT", price: Number(spotPrice), isSpot: true }
+      : null;
+
+  return buildDlrCurve(futuresLive, thresholdPct, spotAnchor);
 }
 
 /**
@@ -23967,6 +23989,8 @@ function DlrCurveSection({ dlrCurve, C, compact = false, hideTitle = false }) {
 
   const baratos = dlrCurve.points.filter((p) => p.status === "barato");
   const caros = dlrCurve.points.filter((p) => p.status === "caro");
+  const hasSpotAnchor = !!dlrCurve.points[0]?.isSpot;
+  const anchorLabel = hasSpotAnchor ? "el spot mayorista y el último DLR" : "el primer y último DLR";
 
   return (
     <div style={{ marginTop: compact ? 0 : 24, padding: compact ? "10px 12px" : "18px 22px 16px 22px", background: compact ? "transparent" : C.panel, border: compact ? "none" : `1px solid ${C.border}` }}>
@@ -24120,7 +24144,7 @@ function DlrCurveSection({ dlrCurve, C, compact = false, hideTitle = false }) {
       {/* Nota explicativa al pie — OCULTA en modo compact */}
       {!compact && (
         <div style={{ marginTop: 14, padding: "10px 14px", background: "rgba(91, 141, 214, 0.06)", borderLeft: `2px solid ${C.accentBorder}`, fontSize: 11, color: C.muted, lineHeight: 1.6 }}>
-          <strong style={{ color: C.text }}>Lectura:</strong> la <strong style={{ color: C.text }}>curva lisa teórica</strong> asume devaluación mensual constante entre el primer y último DLR. Un DLR <strong style={{ color: C.green }}>verde</strong> cotiza por debajo de la curva (basis &lt; -0.3%) — hedgear con él captura alfa extra. Un DLR <strong style={{ color: C.red }}>rojo</strong> cotiza encima (basis &gt; +0.3%), se evita como hedge cuando hay alternativa. Las <strong style={{ color: C.accent }}>anclas</strong> (primer y último DLR) definen la curva por construcción.
+          <strong style={{ color: C.text }}>Lectura:</strong> la <strong style={{ color: C.text }}>curva lisa teórica</strong> asume devaluación mensual constante entre {anchorLabel}. Un DLR <strong style={{ color: C.green }}>verde</strong> cotiza por debajo de la curva (basis &lt; -0.3%) — hedgear con él captura alfa extra. Un DLR <strong style={{ color: C.red }}>rojo</strong> cotiza encima (basis &gt; +0.3%), se evita como hedge cuando hay alternativa. Las <strong style={{ color: C.accent }}>anclas</strong> ({hasSpotAnchor ? "spot mayorista y último DLR" : "primer y último DLR"}) definen la curva por construcción.{hasSpotAnchor ? " El spot es el valor real del dólar hoy: desde ahí se mide el basis de cada futuro, incluido el primero." : ""}
         </div>
       )}
     </div>
@@ -24505,7 +24529,17 @@ function SinteticoDolarModule() {
   // Se muestra en el menú principal debajo de la tabla de bonos, siempre
   // visible. El mismo objeto se pasa al modal del bono para mostrar
   // mini-badges de basis junto a cada DLR usado en el hedge.
-  const dlrCurve = useMemo(() => buildDlrCurve(futuresLive, 0.003), [futuresLive]);
+  const dlrCurve = useMemo(
+    () =>
+      buildDlrCurve(
+        futuresLive,
+        0.003,
+        Number.isFinite(spotMayorista) && spotMayorista > 0
+          ? { ticker: "SPOT", shortTicker: "SPOT", price: spotMayorista, isSpot: true }
+          : null
+      ),
+    [futuresLive, spotMayorista]
+  );
 
   // Sort dinamico: aplica sortKey/sortDir sobre rows. Las filas con
   // valor null/undefined en la columna activa caen al fondo siempre
