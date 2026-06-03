@@ -20351,6 +20351,196 @@ function useSovereignMep() {
 
 const PLAZO_LABELS = { "000": "Contado inmediato (CI)", "001": "24 horas" };
 
+/* ─────────────── useCanjeMonitor + CanjeMonitorSection ───────────────
+ * Monitor del canje MEP-CCL EN VIVO + banda de percentil histórico.
+ *   - Vivo: data912 /arg_bonds expone las especies $, D (MEP) y C (CCL)
+ *     de AL30/GD30 con puntas → canje = precioD / precioC − 1 (la pata en
+ *     pesos se cancela). Se usa el mid de las puntas, con fallback a último.
+ *   - Histórico: tabla canje_history (backfill diario desde IOL, serie AL30)
+ *     para ubicar el canje de hoy en su percentil de los últimos 2 años.
+ * A diferencia del detector MEP de abajo (indicativo, ruido de asincronía),
+ * el canje MEP-CCL es un spread estructural REAL: el costo de mover dólares
+ * al exterior (parking/controles). No es arbitraje gratis, es termómetro.
+ */
+const CANJE_PAIRS = [
+  { label: "AL30", ars: "AL30", mep: "AL30D", ccl: "AL30C" },
+  { label: "GD30", ars: "GD30", mep: "GD30D", ccl: "GD30C" },
+];
+
+function useCanjeMonitor() {
+  const [live, setLive] = useState([]);
+  const [hist, setHist] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+  const [refreshKey, setRefreshKey] = useState(0);
+  const hasLoadedRef = useRef(false);
+  const refetch = useCallback(() => setRefreshKey((k) => k + 1), []);
+
+  // Histórico (una vez): serie diaria del canje de AL30 para la banda.
+  useEffect(() => {
+    let cancelled = false;
+    supabase
+      .from("canje_history")
+      .select("canje_pct")
+      .eq("ticker", "AL30")
+      .order("trade_date", { ascending: true })
+      .then(({ data, error: e }) => {
+        if (cancelled) return;
+        if (!e) setHist((data || []).map((r) => Number(r.canje_pct)).filter((v) => Number.isFinite(v)));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // Vivo: data912 cada 60s + al volver a la pestaña.
+  useEffect(() => {
+    let cancelled = false;
+    if (!hasLoadedRef.current) setLoading(true);
+    fetch(`/api/data912?type=bonos&_=${Date.now()}`)
+      .then((r) => r.json())
+      .then((rows) => {
+        if (cancelled) return;
+        const bySym = {};
+        for (const x of rows || []) bySym[x.symbol] = x;
+        const px = (s) => {
+          const r = bySym[s];
+          if (!r) return null;
+          const bid = Number(r.px_bid),
+            ask = Number(r.px_ask);
+          if (bid > 0 && ask > 0) return (bid + ask) / 2;
+          const c = Number(r.c);
+          return c > 0 ? c : null;
+        };
+        const out = [];
+        for (const p of CANJE_PAIRS) {
+          const a = px(p.ars),
+            m = px(p.mep),
+            c = px(p.ccl);
+          if (m && c) out.push({ label: p.label, mep: a ? a / m : null, ccl: a ? a / c : null, canje: (m / c - 1) * 100 });
+        }
+        setLive(out);
+        setError(null);
+        setLoading(false);
+        hasLoadedRef.current = true;
+      })
+      .catch((e) => {
+        if (!cancelled) {
+          setError(e.message);
+          setLoading(false);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [refreshKey]);
+
+  useEffect(() => {
+    const interval = setInterval(() => setRefreshKey((k) => k + 1), 60000);
+    const onVisible = () => {
+      if (document.visibilityState === "visible") setRefreshKey((k) => k + 1);
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      clearInterval(interval);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
+  }, []);
+
+  return { live, hist, loading, error, refetch };
+}
+
+function CanjeMonitorSection() {
+  const { live, hist, loading } = useCanjeMonitor();
+  const fmt = (n, d = 2) =>
+    n == null || !Number.isFinite(n) ? "—" : Number(n).toLocaleString("es-AR", { minimumFractionDigits: d, maximumFractionDigits: d });
+
+  const vals = hist.slice().sort((a, b) => a - b);
+  const q = (p) => (vals.length ? vals[Math.min(vals.length - 1, Math.floor(p * vals.length))] : null);
+  const mn = vals.length ? vals[0] : null;
+  const mx = vals.length ? vals[vals.length - 1] : null;
+  const median = q(0.5);
+  const primary = live.find((l) => l.label === "AL30") || live[0] || null;
+  const liveCanje = primary ? primary.canje : null;
+  const pct = liveCanje != null && vals.length ? (vals.filter((x) => x <= liveCanje).length / vals.length) * 100 : null;
+
+  let verdict = null,
+    vColor = C.muted;
+  if (pct != null) {
+    if (pct >= 70) {
+      verdict = "Caro sacar dólares afuera (CCL) · barato traerlos";
+      vColor = C.red;
+    } else if (pct <= 30) {
+      verdict = "Barato sacar dólares afuera (CCL)";
+      vColor = C.green;
+    } else {
+      verdict = "Canje en zona media";
+      vColor = C.muted;
+    }
+  }
+  const posPct = (v) => (mn != null && mx != null && mx > mn ? Math.max(0, Math.min(100, ((v - mn) / (mx - mn)) * 100)) : 50);
+
+  return (
+    <div style={{ border: `1px solid ${C.accentBorder}`, borderRadius: 6, background: C.panel, padding: "16px 18px", marginBottom: 18 }}>
+      <div className="flex items-baseline justify-between" style={{ marginBottom: 4 }}>
+        <h2 style={{ fontSize: 14, fontWeight: 600, color: C.text, margin: 0 }}>Canje MEP-CCL — en vivo</h2>
+        <span style={{ fontSize: 10.5, color: C.dim, letterSpacing: "0.02em" }}>data912 (puntas) · histórico IOL</span>
+      </div>
+      <p style={{ fontSize: 11, color: C.muted, margin: "0 0 14px 0", lineHeight: 1.5 }}>
+        Spread estructural entre dólar local (MEP, especie D) y dólar afuera (CCL, especie C) = precio D / precio C − 1. Es el costo de
+        mover dólares al exterior (parking/controles), no un arbitraje gratis.
+      </p>
+
+      {loading && !live.length ? (
+        <div className="flex items-center justify-center" style={{ height: 90 }}>
+          <Loader2 size={20} color={C.muted} className="eco-spin" strokeWidth={1.5} />
+        </div>
+      ) : (
+        <>
+          <div className="flex items-end gap-8" style={{ marginBottom: 16 }}>
+            {live.map((l) => (
+              <div key={l.label}>
+                <div style={{ fontSize: 10.5, color: C.dim, letterSpacing: "0.06em", textTransform: "uppercase", marginBottom: 2 }}>{l.label}</div>
+                <div style={{ fontSize: 26, fontWeight: 700, color: C.text, fontVariantNumeric: "tabular-nums", lineHeight: 1 }}>
+                  {fmt(l.canje, 2)}
+                  <span style={{ fontSize: 15, color: C.muted }}>%</span>
+                </div>
+                <div style={{ fontSize: 10.5, color: C.dim, marginTop: 3, fontVariantNumeric: "tabular-nums" }}>
+                  MEP {fmt(l.mep, 0)} · CCL {fmt(l.ccl, 0)}
+                </div>
+              </div>
+            ))}
+            {pct != null && (
+              <div style={{ marginLeft: "auto", textAlign: "right" }}>
+                <div style={{ fontSize: 20, fontWeight: 700, color: vColor, fontVariantNumeric: "tabular-nums", lineHeight: 1 }}>P{Math.round(pct)}</div>
+                <div style={{ fontSize: 10, color: C.dim, marginTop: 2 }}>percentil 2 años</div>
+              </div>
+            )}
+          </div>
+
+          {verdict && <div style={{ fontSize: 11.5, color: vColor, fontWeight: 600, marginBottom: 12 }}>{verdict}</div>}
+
+          {vals.length > 0 && liveCanje != null && (
+            <div>
+              <div style={{ position: "relative", height: 6, background: C.border, borderRadius: 3, marginBottom: 6 }}>
+                <div style={{ position: "absolute", left: `${posPct(median)}%`, top: -2, width: 1, height: 10, background: C.dim }} />
+                <div
+                  style={{ position: "absolute", left: `${posPct(liveCanje)}%`, top: -3, width: 3, height: 12, background: vColor, borderRadius: 2, transform: "translateX(-1px)" }}
+                />
+              </div>
+              <div className="flex justify-between" style={{ fontSize: 10, color: C.dim, fontVariantNumeric: "tabular-nums" }}>
+                <span>mín {fmt(mn, 1)}%</span>
+                <span>mediana {fmt(median, 1)}%</span>
+                <span>máx {fmt(mx, 1)}%</span>
+              </div>
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
 /* ─────────────── DesarbitrajesModule ───────────────
  * Detector INDICATIVO de desarbitraje MEP en soberanos hard-dollar.
  * MEP implícito de cada bono = precio_en_pesos / precio_en_dólares.
@@ -20400,6 +20590,9 @@ function DesarbitrajesModule() {
           Actualizar
         </button>
       </div>
+
+      {/* Monitor de canje MEP-CCL en vivo (spread estructural real) */}
+      <CanjeMonitorSection />
 
       {/* Banner de honestidad: esto es indicativo, no ejecutable */}
       <div
