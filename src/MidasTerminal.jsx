@@ -18797,6 +18797,32 @@ function PortfolioSummaryWidget({ expanded }) {
     return convertValue(totalUsd, valuationCurrency, "ARS", fx);
   }, [totalUsd, fx]);
 
+  // Snapshot del NAV del día (acumulación hacia adelante para la curva de
+  // patrimonio). Escribe una vez por sesión cuando el total está listo;
+  // upsert por (user, día), la última lectura del día gana. RLS: owner.
+  const navSnapshotRef = useRef(false);
+  useEffect(() => {
+    if (navSnapshotRef.current) return;
+    if (!user?.id || totalUsd == null || totalArs == null) return;
+    navSnapshotRef.current = true;
+    supabase
+      .from("portfolio_nav_history")
+      .upsert(
+        {
+          user_id: user.id,
+          snapshot_date: getTodayStringAR(),
+          nav_usd: totalUsd,
+          nav_ars: totalArs,
+          updated_at: new Date().toISOString(),
+        },
+        { onConflict: "user_id,snapshot_date" }
+      )
+      .then(
+        () => {},
+        () => {}
+      );
+  }, [user, totalUsd, totalArs]);
+
   // P&L del día (replica la lógica de TotalCard exactamente)
   const dailyTotals = useMemo(() => {
     if (!fx || !positions) return { pnl: null };
@@ -19311,6 +19337,146 @@ function DashboardWidget({ title, children, minHeight = 240 }) {
 // En el futuro este módulo va a crecer con más secciones: totales de
 // portfolio, FX, alerts, etc. Por ahora solo la curva.
 // ═══════════════════════════════════════════════════════════════════════
+/* ─────────────── useNavHistory ───────────────
+ * Lee el histórico de NAV del usuario desde portfolio_nav_history (lo escribe
+ * el frontend al calcular el total — acumulación hacia adelante). RLS owner.
+ */
+function useNavHistory(userId) {
+  const [data, setData] = useState([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    if (!userId) {
+      setData([]);
+      setLoading(false);
+      return;
+    }
+    let cancelled = false;
+    setLoading(true);
+    supabase
+      .from("portfolio_nav_history")
+      .select("snapshot_date, nav_usd, nav_ars")
+      .eq("user_id", userId)
+      .order("snapshot_date", { ascending: true })
+      .limit(3000)
+      .then(({ data: rows, error }) => {
+        if (cancelled) return;
+        setData(error ? [] : rows || []);
+        setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [userId]);
+
+  return { data, loading };
+}
+
+/* ─────────────── NavCurveSection ───────────────
+ * Curva de evolución del patrimonio (NAV) en el tiempo. Toggle ARS / USD-MEP.
+ * Acumula desde hoy (un punto por día que el usuario abre la app).
+ */
+function NavCurveSection({ userId, C, compact = false }) {
+  const { data, loading } = useNavHistory(userId);
+  const [ccy, setCcy] = useState("ars");
+
+  const series = useMemo(
+    () =>
+      (data || [])
+        .map((r) => ({
+          time: r.snapshot_date,
+          value: ccy === "usd" ? Number(r.nav_usd) : Number(r.nav_ars),
+        }))
+        .filter((p) => Number.isFinite(p.value) && p.value > 0),
+    [data, ccy]
+  );
+
+  const last = series.length ? series[series.length - 1] : null;
+  const first = series.length ? series[0] : null;
+  const changePct =
+    series.length >= 2 && first.value > 0
+      ? ((last.value - first.value) / first.value) * 100
+      : null;
+  const fmtN = (n) => Number(n).toLocaleString("es-AR", { maximumFractionDigits: 0 });
+  const sym = ccy === "usd" ? "US$ " : "$ ";
+
+  const ccyBtn = (k, label) => {
+    const on = ccy === k;
+    return (
+      <button
+        key={k}
+        onClick={() => setCcy(k)}
+        style={{
+          padding: "3px 9px",
+          fontSize: 10.5,
+          fontWeight: 600,
+          color: on ? C.bg : C.muted,
+          background: on ? C.accent : "transparent",
+          border: "none",
+          cursor: "pointer",
+        }}
+      >
+        {label}
+      </button>
+    );
+  };
+
+  return (
+    <div style={{ padding: compact ? "8px 10px" : "4px 6px" }}>
+      <div className="flex items-center justify-between" style={{ marginBottom: 10 }}>
+        <div
+          className="flex items-center"
+          style={{ border: `1px solid ${C.border}`, borderRadius: 4, overflow: "hidden" }}
+        >
+          {ccyBtn("ars", "ARS")}
+          {ccyBtn("usd", "USD-MEP")}
+        </div>
+        <div className="flex items-baseline" style={{ gap: 8 }}>
+          {last && (
+            <span style={{ fontSize: 16, fontWeight: 700, color: C.text, fontVariantNumeric: "tabular-nums" }}>
+              {sym}
+              {fmtN(last.value)}
+            </span>
+          )}
+          {changePct != null && (
+            <span
+              style={{
+                fontSize: 11,
+                fontWeight: 600,
+                color: changePct >= 0 ? C.green : C.red,
+              }}
+            >
+              {changePct >= 0 ? "+" : ""}
+              {changePct.toFixed(2)}%
+            </span>
+          )}
+        </div>
+      </div>
+
+      {loading ? (
+        <div className="flex items-center justify-center" style={{ height: compact ? 200 : 320 }}>
+          <Loader2 size={22} color={C.muted} className="eco-spin" strokeWidth={1.5} />
+        </div>
+      ) : series.length < 2 ? (
+        <div
+          className="flex items-center justify-center"
+          style={{ height: compact ? 200 : 320, fontSize: 12, color: C.muted, textAlign: "center", padding: "0 30px", lineHeight: 1.6 }}
+        >
+          Acumulando patrimonio ({series.length} día). La curva se llena con un punto por día que abrís la app.
+        </div>
+      ) : (
+        <PriceHistoryChart type="area" data={series} height={compact ? 200 : 320} />
+      )}
+
+      {series.length >= 2 && (
+        <div style={{ fontSize: 10.5, color: C.dim, marginTop: 8 }}>
+          {series.length} días · {first.time} → {last.time}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function DashboardModule() {
   // Tickers DLR vivos (con vencimiento futuro). Memoizado para que el hook
   // de polling no se reinicie en cada render.
@@ -19328,6 +19494,8 @@ function DashboardModule() {
   // Spot mayorista: ancla inicial de la curva (lo que vale el dólar hoy).
   const { fx } = useDashboardFx();
   const spotMayorista = fx?.mayorista?.mid;
+
+  const { user } = useAuth();
 
   // Construcción de la curva. Reusa el helper global que también usa el
   // Sintético DLR — misma lógica de filtrado y mismo umbral de basis.
@@ -19387,6 +19555,11 @@ function DashboardModule() {
         {/* Widget 3: Resumen Portfolio (real) */}
         <DashboardWidget title="Resumen Portfolio" minHeight={280}>
           {({ expanded }) => <PortfolioSummaryWidget expanded={expanded} />}
+        </DashboardWidget>
+
+        {/* Widget: Evolución del patrimonio (NAV en el tiempo) */}
+        <DashboardWidget title="Evolución del patrimonio" minHeight={280}>
+          {({ expanded }) => <NavCurveSection userId={user?.id} C={C} compact={!expanded} />}
         </DashboardWidget>
 
         {/* Widget 4: Carry Trade (real) */}
@@ -19755,7 +19928,7 @@ function TickerCombobox({ value, options, onSelect }) {
  * Wrapper de TradingView Lightweight Charts (area series) sobre nuestra data.
  * autoSize sigue el tamaño del contenedor; el contenedor define la altura.
  */
-function PriceHistoryChart({ type, data }) {
+function PriceHistoryChart({ type, data, height = 420 }) {
   const containerRef = useRef(null);
   const chartRef = useRef(null);
   const seriesRef = useRef(null);
@@ -19815,7 +19988,7 @@ function PriceHistoryChart({ type, data }) {
     if (data && data.length && chartRef.current) chartRef.current.timeScale().fitContent();
   }, [data, type]);
 
-  return <div ref={containerRef} style={{ width: "100%", height: 420 }} />;
+  return <div ref={containerRef} style={{ width: "100%", height }} />;
 }
 
 /* ─────────────── PriceHistoryModule ───────────────
