@@ -4909,6 +4909,10 @@ function detectPlaza(ticker, baseRegistry) {
 
 
 function getTickerOptions(instrumentType, currentTicker, catalog) {
+  // Fecha de hoy (AR) para no listar instrumentos ya vencidos (no se pueden
+  // operar). Se filtran lecaps/boncaps/duales/soberanos/futuros con
+  // maturityDate < hoy.
+  const todayStr = getTodayStringAR();
   // ─── Bonos: agrupados con optgroup por subtipo ─────────────────────
   // Lecaps / Boncaps / Duales vienen del registry hardcoded (BOND_REGISTRY).
   // Bonares / Globales / otros hard-dollar vienen del catálogo dinámico
@@ -4921,6 +4925,7 @@ function getTickerOptions(instrumentType, currentTicker, catalog) {
     const duales = [];
     for (const [t, info] of Object.entries(BOND_REGISTRY)) {
       if (shouldIgnoreTicker(t)) continue;
+      if (info.maturityDate && info.maturityDate < todayStr) continue; // ya vencido
       const opt = {
         value: t,
         label: `${t} — ${info.type.toUpperCase()} · vto ${fmtMaturityShort(info.maturityDate)}`,
@@ -4948,6 +4953,7 @@ function getTickerOptions(instrumentType, currentTicker, catalog) {
     for (const b of usdSource) {
       const t = (b.ticker || "").toUpperCase();
       const maturity = b.metadata?.maturityDate;
+      if (maturity && maturity < todayStr) continue; // ya vencido
       const desc = b.description;
       let label;
       if (desc && maturity) {
@@ -5010,7 +5016,9 @@ function getTickerOptions(instrumentType, currentTicker, catalog) {
   // ─── Futuros: hardcoded en DLR_REGISTRY ─────────────────────────────
   // No usa catálogo dinámico, así que no hay riesgo de tickers extraños.
   if (instrumentType === "future") {
-    const opts = DLR_REGISTRY.map((c) => ({
+    const opts = DLR_REGISTRY
+      .filter((c) => !c.maturityDate || c.maturityDate >= todayStr) // sin vencidos
+      .map((c) => ({
       ticker: c.ticker,
       sortKey: c.maturityDate,
       label: `${c.displayTicker} — vto ${fmtMaturityShort(c.maturityDate)}`,
@@ -19687,6 +19695,10 @@ function TickerCombobox({ value, options, onSelect }) {
         >
           {filtered.map((o) => {
             const isSel = o.ticker === value;
+            const reg = BOND_REGISTRY[o.ticker];
+            const detail = reg
+              ? `${reg.type.toUpperCase()} · vto ${fmtMaturityShort(reg.maturityDate)}`
+              : o.name;
             return (
               <div
                 key={o.ticker}
@@ -19713,7 +19725,7 @@ function TickerCombobox({ value, options, onSelect }) {
                 <span style={{ color: isSel ? C.accent : C.text, fontWeight: 600, flex: "0 0 60px" }}>
                   {o.ticker}
                 </span>
-                {o.name && (
+                {detail && (
                   <span
                     style={{
                       color: C.muted,
@@ -19723,7 +19735,7 @@ function TickerCombobox({ value, options, onSelect }) {
                       whiteSpace: "nowrap",
                     }}
                   >
-                    {o.name}
+                    {detail}
                   </span>
                 )}
               </div>
@@ -19839,7 +19851,10 @@ function PriceHistoryModule({ title, defaultTicker, quickPicks = [], source = "m
   const last = data.length ? data[data.length - 1] : null;
   const fmt = (n) =>
     Number(n).toLocaleString("es-AR", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-  const tickerName = tickerOptions.find((o) => o.ticker === ticker)?.name || null;
+  const _reg = BOND_REGISTRY[ticker];
+  const tickerName = _reg
+    ? `${_reg.type.toUpperCase()} · vto ${fmtMaturityShort(_reg.maturityDate)}`
+    : tickerOptions.find((o) => o.ticker === ticker)?.name || null;
   // Variación % sobre el rango visible (primer punto vs último).
   const rangeChange =
     ranged.line.length >= 2
