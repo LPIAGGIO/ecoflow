@@ -20663,6 +20663,12 @@ function AlertInput({ value, onCommit, placeholder }) {
 }
 
 /* Helpers compartidos entre el panel y el chequeo global de alertas. */
+const FLOW_MONTHS = { ENE: 1, FEB: 2, MAR: 3, ABR: 4, MAY: 5, JUN: 6, JUL: 7, AGO: 8, SEP: 9, OCT: 10, NOV: 11, DIC: 12 };
+function flowExpiryKey(ticker) {
+  const m = (ticker || "").toUpperCase().match(/([A-Z]{3})(\d{2})$/);
+  if (m && FLOW_MONTHS[m[1]]) return Number(m[2]) * 100 + FLOW_MONTHS[m[1]];
+  return null;
+}
 function flowConsolidate(positions) {
   const g = {};
   for (const p of positions || []) {
@@ -20679,7 +20685,12 @@ function flowConsolidate(positions) {
       return { type: x.type, ticker: x.ticker, net, ppp };
     })
     .filter((x) => Math.abs(x.net) > 0.0001 && x.type !== "fci")
-    .sort((a, b) => (a.type === "future" ? -1 : 1) - (b.type === "future" ? -1 : 1));
+    .sort((a, b) => {
+      const af = a.type === "future", bf = b.type === "future";
+      if (af !== bf) return af ? -1 : 1; // futuros primero
+      if (af && bf) return (flowExpiryKey(a.ticker) ?? 9e9) - (flowExpiryKey(b.ticker) ?? 9e9); // por vencimiento (jun antes que jul)
+      return a.ticker.localeCompare(b.ticker); // resto alfabético
+    });
 }
 function flowResolve(p, futPrices, d912) {
   if (p.type === "future") {
@@ -20806,7 +20817,7 @@ function PositionFlowModule({ alertsSys }) {
       const price = live ? live.price : null;
       const isLong = p.net > 0;
       switch (sort.key) {
-        case "ticker": return p.ticker;
+        case "ticker": { const ek = flowExpiryKey(p.ticker); return p.type === "future" && ek != null ? `0_${String(ek).padStart(6, "0")}` : `1_${p.ticker}`; }
         case "pos": return p.net;
         case "ppp": return p.ppp ?? -Infinity;
         case "price": return price ?? -Infinity;
