@@ -20664,13 +20664,69 @@ function PositionFlowModule() {
     return { price: Number(d.c), bidSz: Number(d.q_bid), askSz: Number(d.q_ask), vol: Number(d.v), pct: Number(d.pct_change) };
   };
 
+  // ── Notificación del SO + sonido al tocar un nivel (sin re-disparar) ──
+  const firedRef = useRef(new Set());
+  const [notifPerm, setNotifPerm] = useState(typeof Notification !== "undefined" ? Notification.permission : "unsupported");
+
+  const beep = useCallback(() => {
+    try {
+      const Ctx = window.AudioContext || window.webkitAudioContext;
+      if (!Ctx) return;
+      const ctx = new Ctx();
+      const mk = (freq, t0) => {
+        const o = ctx.createOscillator(), g = ctx.createGain();
+        o.connect(g); g.connect(ctx.destination);
+        o.type = "sine"; o.frequency.value = freq;
+        g.gain.setValueAtTime(0.0001, ctx.currentTime + t0);
+        g.gain.exponentialRampToValueAtTime(0.35, ctx.currentTime + t0 + 0.02);
+        g.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + t0 + 0.35);
+        o.start(ctx.currentTime + t0); o.stop(ctx.currentTime + t0 + 0.35);
+      };
+      mk(880, 0); mk(1175, 0.18);
+    } catch (e) { /* noop */ }
+  }, []);
+
+  const fire = useCallback((title, body) => {
+    if (typeof Notification !== "undefined" && Notification.permission === "granted") {
+      try { new Notification(title, { body }); } catch (e) { /* noop */ }
+    }
+    beep();
+  }, [beep]);
+
+  useEffect(() => {
+    for (const p of consolidated) {
+      const live = resolve(p);
+      if (!live || live.price == null) continue;
+      const isLong = p.net > 0, al = alerts[p.ticker] || {}, price = live.price;
+      const sk = `${p.ticker}|stop|${al.stop}`, tk = `${p.ticker}|target|${al.target}`;
+      const stopHit = al.stop != null && (isLong ? price <= al.stop : price >= al.stop);
+      const targetHit = al.target != null && (isLong ? price >= al.target : price <= al.target);
+      if (stopHit) { if (!firedRef.current.has(sk)) { firedRef.current.add(sk); fire(`STOP ${p.ticker}`, `${fmt(price, 2)} tocó tu stop ${fmt(al.stop, 2)}`); } }
+      else firedRef.current.delete(sk);
+      if (targetHit) { if (!firedRef.current.has(tk)) { firedRef.current.add(tk); fire(`TARGET ${p.ticker}`, `${fmt(price, 2)} tocó tu target ${fmt(al.target, 2)}`); } }
+      else firedRef.current.delete(tk);
+    }
+  }, [consolidated, futPrices, d912, alerts]); // eslint-disable-line
+
   return (
     <div style={{ padding: "24px 32px", maxWidth: 1280, margin: "0 auto" }}>
-      <div style={{ marginBottom: 16 }}>
-        <h1 style={{ fontSize: 22, fontWeight: 600, color: C.text, letterSpacing: "-0.01em", margin: 0 }}>Flujo de Posiciones</h1>
-        <p style={{ fontSize: 12, color: C.muted, margin: "6px 0 0 0", letterSpacing: "0.02em" }}>
-          Desbalance del libro (compra vs venta) + precio en vivo de cada posición abierta · futuros (MTR) y bonos/acciones (data912)
-        </p>
+      <div style={{ marginBottom: 16 }} className="flex items-start justify-between gap-4">
+        <div>
+          <h1 style={{ fontSize: 22, fontWeight: 600, color: C.text, letterSpacing: "-0.01em", margin: 0 }}>Flujo de Posiciones</h1>
+          <p style={{ fontSize: 12, color: C.muted, margin: "6px 0 0 0", letterSpacing: "0.02em" }}>
+            Desbalance del libro (compra vs venta) + precio en vivo de cada posición abierta · futuros (MTR) y bonos/acciones (data912)
+          </p>
+        </div>
+        {notifPerm === "default" || notifPerm === "denied" ? (
+          <button
+            onClick={() => { if (typeof Notification !== "undefined") Notification.requestPermission().then((p) => { setNotifPerm(p); if (p === "granted") beep(); }); }}
+            style={{ flexShrink: 0, border: `1px solid ${C.accentBorder}`, borderRadius: 6, background: C.panel, color: C.accent, padding: "7px 13px", fontSize: 12, cursor: "pointer", fontWeight: 600 }}
+          >
+            🔔 Activar avisos + sonido
+          </button>
+        ) : notifPerm === "granted" ? (
+          <span style={{ flexShrink: 0, fontSize: 11.5, color: C.green, border: `1px solid ${C.green}`, borderRadius: 6, padding: "7px 13px" }}>🔔 Avisos activos</span>
+        ) : null}
       </div>
 
       <div className="flex items-start gap-2" style={{ border: `1px solid rgba(248,113,113,0.25)`, background: "rgba(248,113,113,0.06)", borderRadius: 6, padding: "10px 14px", marginBottom: 18 }}>
