@@ -293,6 +293,13 @@ export default function MidasTerminal() {
   const [active, setActive] = useState("dashboard");
   const globalAlerts = useGlobalAlerts();
   const [bellOpen, setBellOpen] = useState(false);
+  const bellRef = useRef(null);
+  useEffect(() => {
+    if (!bellOpen) return;
+    const onDown = (e) => { if (bellRef.current && !bellRef.current.contains(e.target)) setBellOpen(false); };
+    document.addEventListener("mousedown", onDown);
+    return () => document.removeEventListener("mousedown", onDown);
+  }, [bellOpen]);
 
   // Estado de brokers vinculados — alimenta el badge del engranaje y el
   // banner global que invita a vincular IOL.
@@ -689,7 +696,7 @@ export default function MidasTerminal() {
           <div className="flex items-stretch" style={{ borderLeft: `1px solid ${C.border}` }}>
             <GlobalRefreshButton />
             <PrivacyToggleButton />
-            <div style={{ position: "relative", display: "flex" }}>
+            <div ref={bellRef} style={{ position: "relative", display: "flex" }}>
               <button
                 className="eco-icon-btn"
                 aria-label="Notificaciones"
@@ -20733,6 +20740,8 @@ function useGlobalAlerts() {
   const [log, setLog] = useState([]);
   const [seen, setSeen] = useState(0); // alertas ya vistas (para el badge)
   const [notifPerm, setNotifPerm] = useState(typeof Notification !== "undefined" ? Notification.permission : "unsupported");
+  const [muted, setMuted] = useState(() => { try { return localStorage.getItem("midas:alerts-muted") === "1"; } catch (e) { return false; } });
+  const toggleMute = useCallback(() => setMuted((m) => { const nm = !m; try { localStorage.setItem("midas:alerts-muted", nm ? "1" : "0"); } catch (e) { /* noop */ } return nm; }), []);
   const firedRef = useRef(new Set());
 
   const fire = useCallback((title, body) => {
@@ -20755,15 +20764,15 @@ function useGlobalAlerts() {
       const targetHit = al.target != null && (isLong ? price >= al.target : price <= al.target);
       const ts = new Date().toLocaleTimeString("es-AR", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
       if (stopHit) {
-        if (!firedRef.current.has(sk)) { firedRef.current.add(sk); fire(`🛑 STOP ${p.ticker}`, `${price} tocó tu stop ${al.stop}`); setLog((l) => [{ id: sk + Date.now(), ts, ticker: p.ticker, kind: "stop", price, level: al.stop }, ...l].slice(0, 40)); }
+        if (!firedRef.current.has(sk)) { firedRef.current.add(sk); if (!muted) fire(`🛑 STOP ${p.ticker}`, `${price} tocó tu stop ${al.stop}`); setLog((l) => [{ id: sk + Date.now(), ts, ticker: p.ticker, kind: "stop", price, level: al.stop }, ...l].slice(0, 40)); }
       } else firedRef.current.delete(sk);
       if (targetHit) {
-        if (!firedRef.current.has(tk)) { firedRef.current.add(tk); fire(`🎯 TARGET ${p.ticker}`, `${price} tocó tu target ${al.target}`); setLog((l) => [{ id: tk + Date.now(), ts, ticker: p.ticker, kind: "target", price, level: al.target }, ...l].slice(0, 40)); }
+        if (!firedRef.current.has(tk)) { firedRef.current.add(tk); if (!muted) fire(`🎯 TARGET ${p.ticker}`, `${price} tocó tu target ${al.target}`); setLog((l) => [{ id: tk + Date.now(), ts, ticker: p.ticker, kind: "target", price, level: al.target }, ...l].slice(0, 40)); }
       } else firedRef.current.delete(tk);
     }
-  }, [consolidated, futPrices, d912, alerts, fire]);
+  }, [consolidated, futPrices, d912, alerts, fire, muted]);
 
-  return { log, unseen: Math.max(0, log.length - seen), markSeen: () => setSeen(log.length), clearLog: () => { setLog([]); setSeen(0); }, notifPerm, requestPerm };
+  return { log, unseen: Math.max(0, log.length - seen), markSeen: () => setSeen(log.length), clearLog: () => { setLog([]); setSeen(0); }, notifPerm, requestPerm, muted, toggleMute };
 }
 
 function PositionFlowModule({ alertsSys }) {
@@ -20803,7 +20812,13 @@ function PositionFlowModule({ alertsSys }) {
             🔔 Activar avisos + sonido
           </button>
         ) : notifPerm === "granted" ? (
-          <span style={{ flexShrink: 0, fontSize: 11.5, color: C.green, border: `1px solid ${C.green}`, borderRadius: 6, padding: "7px 13px" }}>🔔 Avisos activos</span>
+          <button
+            onClick={() => alertsSys && alertsSys.toggleMute()}
+            title="Pausar / reanudar avisos"
+            style={{ flexShrink: 0, fontSize: 11.5, fontWeight: 600, cursor: "pointer", background: C.panel, color: alertsSys && alertsSys.muted ? C.muted : C.green, border: `1px solid ${alertsSys && alertsSys.muted ? C.border : C.green}`, borderRadius: 6, padding: "7px 13px" }}
+          >
+            {alertsSys && alertsSys.muted ? "🔕 Avisos en pausa" : "🔔 Avisos activos"}
+          </button>
         ) : null}
       </div>
 
