@@ -291,6 +291,8 @@ export default function MidasTerminal() {
   const [now, setNow] = useState(new Date());
   const [open, setOpen] = useState({ bcra: false, mercado: false, analizadores: false, calculadoras: false, reportes: false });
   const [active, setActive] = useState("dashboard");
+  const globalAlerts = useGlobalAlerts();
+  const [bellOpen, setBellOpen] = useState(false);
 
   // Estado de brokers vinculados — alimenta el badge del engranaje y el
   // banner global que invita a vincular IOL.
@@ -687,9 +689,39 @@ export default function MidasTerminal() {
           <div className="flex items-stretch" style={{ borderLeft: `1px solid ${C.border}` }}>
             <GlobalRefreshButton />
             <PrivacyToggleButton />
-            <button className="eco-icon-btn" aria-label="Notificaciones">
-              <Bell size={15} strokeWidth={1.6} />
-            </button>
+            <div style={{ position: "relative", display: "flex" }}>
+              <button
+                className="eco-icon-btn"
+                aria-label="Notificaciones"
+                onClick={() => { setBellOpen((o) => !o); globalAlerts.markSeen(); }}
+                style={{ position: "relative" }}
+              >
+                <Bell size={15} strokeWidth={1.6} color={globalAlerts.unseen > 0 ? C.red : undefined} />
+                {globalAlerts.unseen > 0 && (
+                  <span style={{ position: "absolute", top: 5, right: 5, minWidth: 14, height: 14, padding: "0 3px", borderRadius: 7, background: C.red, color: "#fff", fontSize: 9, fontWeight: 700, display: "flex", alignItems: "center", justifyContent: "center", lineHeight: 1 }}>{globalAlerts.unseen}</span>
+                )}
+              </button>
+              {bellOpen && (
+                <div style={{ position: "absolute", top: "100%", right: 0, marginTop: 4, width: 320, maxHeight: 360, overflowY: "auto", background: C.panel, border: `1px solid ${C.border}`, borderRadius: 8, boxShadow: "0 8px 30px rgba(0,0,0,0.5)", zIndex: 50 }}>
+                  <div className="flex items-center justify-between" style={{ padding: "10px 14px", borderBottom: `1px solid ${C.border}` }}>
+                    <span style={{ fontSize: 12, fontWeight: 600, color: C.text }}>Alertas</span>
+                    <button onClick={() => globalAlerts.clearLog()} style={{ fontSize: 10.5, color: C.dim, background: "none", border: "none", cursor: "pointer" }}>limpiar</button>
+                  </div>
+                  {globalAlerts.log.length === 0 ? (
+                    <div style={{ padding: "18px 14px", fontSize: 11.5, color: C.muted, textAlign: "center", lineHeight: 1.5 }}>Sin alertas todavía. Cargá Stop/Target en Analizadores → Flujo de Posiciones.</div>
+                  ) : (
+                    globalAlerts.log.map((a) => (
+                      <div key={a.id} className="flex items-center gap-2" style={{ padding: "8px 14px", borderTop: `1px solid ${C.border}`, fontSize: 11.5 }}>
+                        <span style={{ color: C.dim, fontVariantNumeric: "tabular-nums" }}>{a.ts}</span>
+                        <span style={{ fontWeight: 700, fontSize: 9, color: a.kind === "stop" ? C.red : C.green, border: `1px solid ${a.kind === "stop" ? C.red : C.green}`, borderRadius: 3, padding: "1px 4px" }}>{a.kind === "stop" ? "STOP" : "TGT"}</span>
+                        <span style={{ color: C.text, fontWeight: 600 }}>{a.ticker}</span>
+                        <span style={{ color: C.muted, fontVariantNumeric: "tabular-nums" }}>@ {a.level}</span>
+                      </div>
+                    ))
+                  )}
+                </div>
+              )}
+            </div>
             <button
               className="eco-icon-btn"
               aria-label="Configuración"
@@ -928,7 +960,7 @@ export default function MidasTerminal() {
             ) : active === "desarbitrajes" ? (
               <DesarbitrajesModule key={active} />
             ) : active === "flujo-posiciones" ? (
-              <PositionFlowModule key={active} />
+              <PositionFlowModule key={active} alertsSys={globalAlerts} />
             ) : active === "dashboard" ? (
               <DashboardModule />
             ) : (
@@ -20623,28 +20655,122 @@ function AlertInput({ value, onCommit, placeholder }) {
   );
 }
 
-function PositionFlowModule() {
+/* Helpers compartidos entre el panel y el chequeo global de alertas. */
+function flowConsolidate(positions) {
+  const g = {};
+  for (const p of positions || []) {
+    const key = `${p.instrument_type}|${p.ticker}`;
+    if (!g[key]) g[key] = { type: p.instrument_type, ticker: p.ticker, buyQty: 0, buyVal: 0, sellQty: 0, sellVal: 0 };
+    const q = Number(p.quantity) || 0, pr = Number(p.entry_price) || 0;
+    if (p.operation_type === "sell") { g[key].sellQty += q; g[key].sellVal += q * pr; }
+    else { g[key].buyQty += q; g[key].buyVal += q * pr; }
+  }
+  return Object.values(g)
+    .map((x) => {
+      const net = x.buyQty - x.sellQty;
+      const ppp = net > 0 ? x.buyVal / x.buyQty : net < 0 ? x.sellVal / x.sellQty : null;
+      return { type: x.type, ticker: x.ticker, net, ppp };
+    })
+    .filter((x) => Math.abs(x.net) > 0.0001 && x.type !== "fci")
+    .sort((a, b) => (a.type === "future" ? -1 : 1) - (b.type === "future" ? -1 : 1));
+}
+function flowResolve(p, futPrices, d912) {
+  if (p.type === "future") {
+    const f = futPrices[p.ticker];
+    if (!f) return null;
+    const price = f.price ?? f.last;
+    return { price, bidSz: f.bidSize, askSz: f.askSize, vol: f.volume, pct: price != null && f.settlement ? (price / f.settlement - 1) * 100 : null };
+  }
+  const d = d912[p.ticker];
+  if (!d) return null;
+  return { price: Number(d.c), bidSz: Number(d.q_bid), askSz: Number(d.q_ask), vol: Number(d.v), pct: Number(d.pct_change) };
+}
+function flowBeep() {
+  try {
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    if (!Ctx) return;
+    const ctx = new Ctx();
+    const mk = (freq, t0) => {
+      const o = ctx.createOscillator(), g = ctx.createGain();
+      o.connect(g); g.connect(ctx.destination);
+      o.type = "sine"; o.frequency.value = freq;
+      g.gain.setValueAtTime(0.0001, ctx.currentTime + t0);
+      g.gain.exponentialRampToValueAtTime(0.35, ctx.currentTime + t0 + 0.02);
+      g.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + t0 + 0.35);
+      o.start(ctx.currentTime + t0); o.stop(ctx.currentTime + t0 + 0.35);
+    };
+    mk(880, 0); mk(1175, 0.18);
+  } catch (e) { /* noop */ }
+}
+
+/* Chequeo GLOBAL de alertas — corre siempre (montado en MidasTerminal), dispara
+ * sonido + notificación del SO en cualquier pantalla, y mantiene el log + el
+ * contador para la campanita del header. */
+function useGlobalAlerts() {
+  const { user } = useAuth();
+  const { positions } = useUserPositions();
+  const [alerts, setAlerts] = useState({});
+  useEffect(() => {
+    if (!user) { setAlerts({}); return; }
+    let cancelled = false;
+    const load = () =>
+      supabase.from("position_alerts").select("ticker,stop,target").eq("user_id", user.id).then(({ data }) => {
+        if (cancelled) return;
+        const m = {};
+        for (const r of data || []) m[r.ticker] = { stop: r.stop != null ? Number(r.stop) : null, target: r.target != null ? Number(r.target) : null };
+        setAlerts(m);
+      });
+    load();
+    const iv = setInterval(load, 15000);
+    return () => { cancelled = true; clearInterval(iv); };
+  }, [user]);
+
+  const consolidated = useMemo(() => flowConsolidate(positions), [positions]);
+  const futureTickers = useMemo(() => consolidated.filter((p) => p.type === "future").map((p) => p.ticker), [consolidated]);
+  const { prices: futPrices } = useFuturePrices(futureTickers);
+  const d912 = useFlowData912();
+
+  const [log, setLog] = useState([]);
+  const [seen, setSeen] = useState(0); // alertas ya vistas (para el badge)
+  const [notifPerm, setNotifPerm] = useState(typeof Notification !== "undefined" ? Notification.permission : "unsupported");
+  const firedRef = useRef(new Set());
+
+  const fire = useCallback((title, body) => {
+    if (typeof Notification !== "undefined" && Notification.permission === "granted") {
+      try { new Notification(title, { body }); } catch (e) { /* noop */ }
+    }
+    flowBeep();
+  }, []);
+  const requestPerm = useCallback(() => {
+    if (typeof Notification !== "undefined") Notification.requestPermission().then((p) => { setNotifPerm(p); if (p === "granted") flowBeep(); });
+  }, []);
+
+  useEffect(() => {
+    for (const p of consolidated) {
+      const live = flowResolve(p, futPrices, d912);
+      if (!live || live.price == null) continue;
+      const isLong = p.net > 0, al = alerts[p.ticker] || {}, price = live.price;
+      const sk = `${p.ticker}|stop|${al.stop}`, tk = `${p.ticker}|target|${al.target}`;
+      const stopHit = al.stop != null && (isLong ? price <= al.stop : price >= al.stop);
+      const targetHit = al.target != null && (isLong ? price >= al.target : price <= al.target);
+      const ts = new Date().toLocaleTimeString("es-AR", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+      if (stopHit) {
+        if (!firedRef.current.has(sk)) { firedRef.current.add(sk); fire(`🛑 STOP ${p.ticker}`, `${price} tocó tu stop ${al.stop}`); setLog((l) => [{ id: sk + Date.now(), ts, ticker: p.ticker, kind: "stop", price, level: al.stop }, ...l].slice(0, 40)); }
+      } else firedRef.current.delete(sk);
+      if (targetHit) {
+        if (!firedRef.current.has(tk)) { firedRef.current.add(tk); fire(`🎯 TARGET ${p.ticker}`, `${price} tocó tu target ${al.target}`); setLog((l) => [{ id: tk + Date.now(), ts, ticker: p.ticker, kind: "target", price, level: al.target }, ...l].slice(0, 40)); }
+      } else firedRef.current.delete(tk);
+    }
+  }, [consolidated, futPrices, d912, alerts, fire]);
+
+  return { log, unseen: Math.max(0, log.length - seen), markSeen: () => setSeen(log.length), clearLog: () => { setLog([]); setSeen(0); }, notifPerm, requestPerm };
+}
+
+function PositionFlowModule({ alertsSys }) {
   const { positions, loading } = useUserPositions();
   const { alerts, saveAlert } = usePositionAlerts();
 
-  const consolidated = useMemo(() => {
-    const g = {};
-    for (const p of positions || []) {
-      const key = `${p.instrument_type}|${p.ticker}`;
-      if (!g[key]) g[key] = { type: p.instrument_type, ticker: p.ticker, buyQty: 0, buyVal: 0, sellQty: 0, sellVal: 0 };
-      const q = Number(p.quantity) || 0, pr = Number(p.entry_price) || 0;
-      if (p.operation_type === "sell") { g[key].sellQty += q; g[key].sellVal += q * pr; }
-      else { g[key].buyQty += q; g[key].buyVal += q * pr; }
-    }
-    return Object.values(g)
-      .map((x) => {
-        const net = x.buyQty - x.sellQty;
-        const ppp = net > 0 ? x.buyVal / x.buyQty : net < 0 ? x.sellVal / x.sellQty : null;
-        return { type: x.type, ticker: x.ticker, net, ppp };
-      })
-      .filter((x) => Math.abs(x.net) > 0.0001 && x.type !== "fci")
-      .sort((a, b) => (a.type === "future" ? -1 : 1) - (b.type === "future" ? -1 : 1));
-  }, [positions]);
+  const consolidated = useMemo(() => flowConsolidate(positions), [positions]);
 
   const futureTickers = useMemo(() => consolidated.filter((p) => p.type === "future").map((p) => p.ticker), [consolidated]);
   const { prices: futPrices } = useFuturePrices(futureTickers);
@@ -20652,61 +20778,13 @@ function PositionFlowModule() {
 
   const fmt = (n, d = 2) => (n == null || !Number.isFinite(n) ? "—" : Number(n).toLocaleString("es-AR", { minimumFractionDigits: d, maximumFractionDigits: d }));
 
-  const resolve = (p) => {
-    if (p.type === "future") {
-      const f = futPrices[p.ticker];
-      if (!f) return null;
-      const price = f.price ?? f.last;
-      return { price, bidSz: f.bidSize, askSz: f.askSize, vol: f.volume, pct: price != null && f.settlement ? (price / f.settlement - 1) * 100 : null };
-    }
-    const d = d912[p.ticker];
-    if (!d) return null;
-    return { price: Number(d.c), bidSz: Number(d.q_bid), askSz: Number(d.q_ask), vol: Number(d.v), pct: Number(d.pct_change) };
-  };
+  const resolve = (p) => flowResolve(p, futPrices, d912);
 
-  // ── Notificación del SO + sonido al tocar un nivel (sin re-disparar) ──
-  const firedRef = useRef(new Set());
-  const [notifPerm, setNotifPerm] = useState(typeof Notification !== "undefined" ? Notification.permission : "unsupported");
-
-  const beep = useCallback(() => {
-    try {
-      const Ctx = window.AudioContext || window.webkitAudioContext;
-      if (!Ctx) return;
-      const ctx = new Ctx();
-      const mk = (freq, t0) => {
-        const o = ctx.createOscillator(), g = ctx.createGain();
-        o.connect(g); g.connect(ctx.destination);
-        o.type = "sine"; o.frequency.value = freq;
-        g.gain.setValueAtTime(0.0001, ctx.currentTime + t0);
-        g.gain.exponentialRampToValueAtTime(0.35, ctx.currentTime + t0 + 0.02);
-        g.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + t0 + 0.35);
-        o.start(ctx.currentTime + t0); o.stop(ctx.currentTime + t0 + 0.35);
-      };
-      mk(880, 0); mk(1175, 0.18);
-    } catch (e) { /* noop */ }
-  }, []);
-
-  const fire = useCallback((title, body) => {
-    if (typeof Notification !== "undefined" && Notification.permission === "granted") {
-      try { new Notification(title, { body }); } catch (e) { /* noop */ }
-    }
-    beep();
-  }, [beep]);
-
-  useEffect(() => {
-    for (const p of consolidated) {
-      const live = resolve(p);
-      if (!live || live.price == null) continue;
-      const isLong = p.net > 0, al = alerts[p.ticker] || {}, price = live.price;
-      const sk = `${p.ticker}|stop|${al.stop}`, tk = `${p.ticker}|target|${al.target}`;
-      const stopHit = al.stop != null && (isLong ? price <= al.stop : price >= al.stop);
-      const targetHit = al.target != null && (isLong ? price >= al.target : price <= al.target);
-      if (stopHit) { if (!firedRef.current.has(sk)) { firedRef.current.add(sk); fire(`STOP ${p.ticker}`, `${fmt(price, 2)} tocó tu stop ${fmt(al.stop, 2)}`); } }
-      else firedRef.current.delete(sk);
-      if (targetHit) { if (!firedRef.current.has(tk)) { firedRef.current.add(tk); fire(`TARGET ${p.ticker}`, `${fmt(price, 2)} tocó tu target ${fmt(al.target, 2)}`); } }
-      else firedRef.current.delete(tk);
-    }
-  }, [consolidated, futPrices, d912, alerts]); // eslint-disable-line
+  // El disparo de alertas (sonido + notificación + log) corre GLOBAL en
+  // MidasTerminal (useGlobalAlerts), así suena en cualquier pantalla. Acá solo
+  // mostramos: la edición de niveles, el resaltado de fila, y el log.
+  const notifPerm = alertsSys ? alertsSys.notifPerm : "unsupported";
+  const log = (alertsSys && alertsSys.log) || [];
 
   return (
     <div style={{ padding: "24px 32px", maxWidth: 1280, margin: "0 auto" }}>
@@ -20719,7 +20797,7 @@ function PositionFlowModule() {
         </div>
         {notifPerm === "default" || notifPerm === "denied" ? (
           <button
-            onClick={() => { if (typeof Notification !== "undefined") Notification.requestPermission().then((p) => { setNotifPerm(p); if (p === "granted") beep(); }); }}
+            onClick={() => alertsSys && alertsSys.requestPerm()}
             style={{ flexShrink: 0, border: `1px solid ${C.accentBorder}`, borderRadius: 6, background: C.panel, color: C.accent, padding: "7px 13px", fontSize: 12, cursor: "pointer", fontWeight: 600 }}
           >
             🔔 Activar avisos + sonido
@@ -20818,6 +20896,25 @@ function PositionFlowModule() {
               })}
             </tbody>
           </table>
+        </div>
+      )}
+
+      {log.length > 0 && (
+        <div style={{ marginTop: 16, border: `1px solid ${C.border}`, borderRadius: 6, background: C.panel, overflow: "hidden" }}>
+          <div className="flex items-center justify-between" style={{ padding: "8px 14px", borderBottom: `1px solid ${C.border}` }}>
+            <span style={{ fontSize: 11.5, fontWeight: 600, color: C.text }}>Alertas disparadas ({log.length})</span>
+            <button onClick={() => alertsSys && alertsSys.clearLog()} style={{ fontSize: 10.5, color: C.dim, background: "none", border: "none", cursor: "pointer" }}>limpiar</button>
+          </div>
+          <div style={{ maxHeight: 220, overflowY: "auto" }}>
+            {log.map((a) => (
+              <div key={a.id} className="flex items-center gap-3" style={{ padding: "7px 14px", borderTop: `1px solid ${C.border}`, fontSize: 12 }}>
+                <span style={{ color: C.dim, fontVariantNumeric: "tabular-nums", width: 66 }}>{a.ts}</span>
+                <span style={{ fontWeight: 700, fontSize: 9.5, color: a.kind === "stop" ? C.red : C.green, border: `1px solid ${a.kind === "stop" ? C.red : C.green}`, borderRadius: 3, padding: "1px 5px" }}>{a.kind === "stop" ? "STOP" : "TARGET"}</span>
+                <span style={{ color: C.text, fontWeight: 600 }}>{a.ticker}</span>
+                <span style={{ color: C.muted, fontVariantNumeric: "tabular-nums" }}>tocó {fmt(a.level, 2)} · precio {fmt(a.price, 2)}</span>
+              </div>
+            ))}
+          </div>
         </div>
       )}
 
