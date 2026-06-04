@@ -19616,6 +19616,11 @@ function DashboardModule() {
           )}
         </DashboardWidget>
 
+        {/* Widget: Carry DLR · Señal (operacionaliza la investigación del short-front carry) */}
+        <DashboardWidget title="Carry DLR · Señal" minHeight={280}>
+          {() => <CarryDlrWidget futurePrices={futurePrices} />}
+        </DashboardWidget>
+
         {/* Widget 2: FX en vivo (real) */}
         <DashboardWidget title="FX en vivo" minHeight={280}>
           {({ expanded }) => <FxLiveWidget expanded={expanded} />}
@@ -21066,6 +21071,45 @@ function PositionFlowWidget() {
         );
       })}
       <div style={{ padding: "8px 14px", fontSize: 10, color: C.dim, lineHeight: 1.5 }}>Flujo indicativo del libro · <span style={{ color: C.accent }}>🔔</span> = niveles de alerta activos. Detalle y carga de alertas en Analizadores → Flujo de Posiciones.</div>
+    </div>
+  );
+}
+
+/* Widget: Carry DLR · Señal — operacionaliza la investigación del short-front carry.
+ * Roll yield (lo que cosecha el short rolando) + señal + roll countdown + tamaño
+ * tope-cola. Reusa futurePrices (curva DLR) del Dashboard. Indicativo. */
+function CarryDlrWidget({ futurePrices }) {
+  const contracts = Object.entries(futurePrices || {})
+    .filter(([t, v]) => /^DLR[A-Z]{3}\d{2}$/.test(t) && v && (v.price != null || v.last != null) && flowExpiryKey(t) != null)
+    .map(([t, v]) => ({ ticker: t, ekey: flowExpiryKey(t), price: v.price ?? v.last }))
+    .sort((a, b) => a.ekey - b.ekey);
+  if (contracts.length < 2) return <div style={{ padding: "30px 20px", textAlign: "center", color: C.muted, fontSize: 11 }}>Esperando curva DLR…</div>;
+  const front = contracts[0], second = contracts[1];
+  const months = Math.max(1, second.ekey - front.ekey);
+  const rollMonthly = (second.price / front.price - 1) / months;
+  const rollAnnual = (Math.pow(second.price / front.price, 12 / months) - 1) * 100;
+  const fy = Math.floor((front.ekey - 1) / 12), fm = ((front.ekey - 1) % 12) + 1;
+  const exp = new Date(fy, fm, 0);
+  const daysToExp = Math.max(0, Math.round((exp - new Date()) / 86400000));
+  const fmt = (n, d = 2) => Number(n).toLocaleString("es-AR", { minimumFractionDigits: d, maximumFractionDigits: d });
+  const fav = rollAnnual >= 18;
+  return (
+    <div style={{ padding: "14px 16px", display: "flex", flexDirection: "column", gap: 11 }}>
+      <div>
+        <div style={{ fontSize: 10, color: C.dim, letterSpacing: "0.06em", textTransform: "uppercase" }}>Roll yield anualizado · cosecha el short</div>
+        <div style={{ fontSize: 30, fontWeight: 700, color: rollAnnual >= 0 ? C.green : C.red, fontVariantNumeric: "tabular-nums", lineHeight: 1.1 }}>{rollAnnual >= 0 ? "+" : ""}{fmt(rollAnnual, 1)}%</div>
+        <div style={{ fontSize: 11, color: C.muted, marginTop: 2, fontVariantNumeric: "tabular-nums" }}>{front.ticker} {fmt(front.price, 1)} → {second.ticker} {fmt(second.price, 1)} ({rollMonthly >= 0 ? "+" : ""}{fmt(rollMonthly * 100, 2)}%/mes)</div>
+      </div>
+      <div style={{ fontSize: 12, color: fav ? C.green : C.muted, fontWeight: 600 }}>
+        {fav ? "▼ Contango empinado — short del front favorable" : "Contango plano — carry del short flojo"}
+      </div>
+      <div className="flex" style={{ gap: 18, fontSize: 11.5 }}>
+        <div><span style={{ color: C.dim }}>Vence front en </span><b style={{ color: daysToExp <= 5 ? C.accent : C.text }}>{daysToExp}d</b>{daysToExp <= 5 ? " · rolar" : ""}</div>
+        <div><span style={{ color: C.dim }}>Tamaño tope-cola </span><b style={{ color: C.text }}>~0,5-0,75x</b></div>
+      </div>
+      <div style={{ fontSize: 10, color: C.dim, lineHeight: 1.5 }}>
+        El short del front rolando cosecha el contango (Sharpe 1,5 en régimen calmo, comisión 0 en Cocos). Riesgo: salto devaluatorio — dimensionar por la cola, no por Kelly. Esperado neto de saltos ≈ 11-17%/año según tu visión. Indicativo, no es señal de operar.
+      </div>
     </div>
   );
 }
