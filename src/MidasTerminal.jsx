@@ -20594,7 +20594,7 @@ function PositionFlowModule() {
         const ppp = net > 0 ? x.buyVal / x.buyQty : net < 0 ? x.sellVal / x.sellQty : null;
         return { type: x.type, ticker: x.ticker, net, ppp };
       })
-      .filter((x) => Math.abs(x.net) > 0.0001)
+      .filter((x) => Math.abs(x.net) > 0.0001 && x.type !== "fci")
       .sort((a, b) => (a.type === "future" ? -1 : 1) - (b.type === "future" ? -1 : 1));
   }, [positions]);
 
@@ -20704,7 +20704,7 @@ function PositionFlowModule() {
       )}
 
       <p style={{ fontSize: 10.5, color: C.dim, marginTop: 10, letterSpacing: "0.02em", lineHeight: 1.5 }}>
-        Flujo = desbalance del libro: <b style={{ color: C.green }}>C</b> compra (bid) vs <b style={{ color: C.red }}>V</b> venta (ask). El número central es el OBI (−100 a +100). Resultado = ganancia/pérdida vs tu PPP. Refresca cada 15s. FCI y otros sin libro muestran "sin libro".
+        Flujo = desbalance del libro: <b style={{ color: C.green }}>C</b> compra (bid) vs <b style={{ color: C.red }}>V</b> venta (ask). El número central es el OBI (−100 a +100). Resultado = ganancia/pérdida vs tu PPP. Refresca cada 15s. Instrumentos sin libro (ej. FCI) no se muestran.
       </p>
     </div>
   );
