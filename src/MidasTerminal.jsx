@@ -19626,6 +19626,11 @@ function DashboardModule() {
           {({ expanded }) => <PortfolioSummaryWidget expanded={expanded} />}
         </DashboardWidget>
 
+        {/* Widget: Flujo de Posiciones (compacto) — flujo del libro + alertas activas */}
+        <DashboardWidget title="Flujo de Posiciones" minHeight={280}>
+          {() => <PositionFlowWidget />}
+        </DashboardWidget>
+
         {/* Widget: Evolución del patrimonio (NAV en el tiempo) */}
         <DashboardWidget title="Evolución del patrimonio" minHeight={280}>
           {({ expanded }) => <NavCurveSection userId={user?.id} C={C} compact={!expanded} />}
@@ -20974,7 +20979,7 @@ function PositionFlowModule({ alertsSys }) {
                       )}
                     </td>
                     <td style={{ padding: "6px 10px" }}>
-                      <div className="flex items-center gap-1" style={{ flexWrap: "wrap" }}>
+                      <div className="flex items-center" style={{ flexWrap: "wrap", maxWidth: 230, gap: 4 }}>
                         {alertList.map((a) => (
                           <span key={a.id} className="flex items-center gap-1" style={{ fontSize: 10.5, fontVariantNumeric: "tabular-nums", color: a.triggered ? C.dim : a.dir === "down" ? C.red : C.green, border: `1px solid ${a.triggered ? C.border : a.dir === "down" ? C.red : C.green}`, borderRadius: 4, padding: "1px 5px", textDecoration: a.triggered ? "line-through" : "none" }}>
                             {a.dir === "down" ? "▼" : "▲"} {fmt(a.price, 2)}{a.triggered ? " ✓" : ""}
@@ -21015,6 +21020,52 @@ function PositionFlowModule({ alertsSys }) {
       <p style={{ fontSize: 10.5, color: C.dim, marginTop: 10, letterSpacing: "0.02em", lineHeight: 1.5 }}>
         Flujo = desbalance del libro: <b style={{ color: C.green }}>C</b> compra (bid) vs <b style={{ color: C.red }}>V</b> venta (ask). El número central es el OBI (−100 a +100). Resultado = ganancia/pérdida vs tu PPP. En <b style={{ color: C.text }}>Alertas</b> cargá varios niveles por instrumento (Enter): <b style={{ color: C.green }}>▲</b> dispara al subir, <b style={{ color: C.red }}>▼</b> al bajar (según dónde esté el precio al cargarlo). Cada nivel suena/notifica una vez y queda tachado (✓). Refresca cada 15s. Instrumentos sin libro (ej. FCI) no se muestran.
       </p>
+    </div>
+  );
+}
+
+/* Widget compacto del Dashboard: flujo + alertas de cada posición abierta. */
+function PositionFlowWidget() {
+  const { positions } = useUserPositions();
+  const consolidated = useMemo(() => flowConsolidate(positions), [positions]);
+  const futureTickers = useMemo(() => consolidated.filter((p) => p.type === "future").map((p) => p.ticker), [consolidated]);
+  const { prices: futPrices } = useFuturePrices(futureTickers);
+  const d912 = useFlowData912();
+  const { byTicker } = usePriceAlerts();
+  const fmt = (n, d = 2) => (n == null || !Number.isFinite(n) ? "—" : Number(n).toLocaleString("es-AR", { minimumFractionDigits: d, maximumFractionDigits: d }));
+
+  if (!consolidated.length) return <div style={{ padding: "30px 20px", textAlign: "center", color: C.muted, fontSize: 11 }}>Sin posiciones abiertas.</div>;
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column" }}>
+      {consolidated.map((p) => {
+        const live = flowResolve(p, futPrices, d912);
+        const isLong = p.net > 0;
+        const price = live ? live.price : null;
+        const resPct = price != null && p.ppp ? (isLong ? price / p.ppp - 1 : p.ppp / price - 1) * 100 : null;
+        const win = resPct != null && resPct >= 0;
+        const bs = (live && live.bidSz) || 0, as = (live && live.askSz) || 0, tot = bs + as;
+        const obi = tot > 0 ? (bs - as) / tot : null;
+        const bidPct = tot > 0 ? (bs / tot) * 100 : 50;
+        const armed = (byTicker[p.ticker] || []).filter((a) => !a.triggered).length;
+        return (
+          <div key={`${p.type}|${p.ticker}`} className="flex items-center" style={{ gap: 9, padding: "7px 14px", borderBottom: `1px solid ${C.border}`, fontSize: 12 }}>
+            <span style={{ color: C.text, fontWeight: 600, width: 76, flexShrink: 0 }}>{p.ticker}</span>
+            <span style={{ color: isLong ? C.green : C.red, fontSize: 9, fontWeight: 700, width: 34, flexShrink: 0 }}>{isLong ? "LONG" : "SHORT"}</span>
+            <span style={{ width: 54, flexShrink: 0, textAlign: "right", fontVariantNumeric: "tabular-nums", color: resPct == null ? C.dim : win ? C.green : C.red, fontWeight: 600 }}>{resPct == null ? "—" : `${resPct >= 0 ? "+" : ""}${fmt(resPct, 2)}%`}</span>
+            <div style={{ flex: 1, minWidth: 30 }}>
+              {obi == null ? <span style={{ fontSize: 10, color: C.dim }}>—</span> : (
+                <div style={{ display: "flex", height: 6, borderRadius: 3, overflow: "hidden", background: C.border }} title={`OBI ${(obi * 100).toFixed(0)}`}>
+                  <div style={{ width: `${bidPct}%`, background: C.green, opacity: 0.85 }} />
+                  <div style={{ width: `${100 - bidPct}%`, background: C.red, opacity: 0.85 }} />
+                </div>
+              )}
+            </div>
+            <span style={{ width: 32, flexShrink: 0, textAlign: "right", fontSize: 10.5, fontWeight: 600, color: armed > 0 ? C.accent : C.dim }}>{armed > 0 ? `🔔${armed}` : "—"}</span>
+          </div>
+        );
+      })}
+      <div style={{ padding: "8px 14px", fontSize: 10, color: C.dim, lineHeight: 1.5 }}>Flujo indicativo del libro · <span style={{ color: C.accent }}>🔔</span> = niveles de alerta activos. Detalle y carga de alertas en Analizadores → Flujo de Posiciones.</div>
     </div>
   );
 }
