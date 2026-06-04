@@ -217,6 +217,7 @@ const NAV = [
       { id: "curva-tasas", label: "Curva de Tasas", icon: Spline },
       { id: "spread-cer-fija", label: "Spread CER / Fija", icon: Diff },
       { id: "desarbitrajes", label: "Desarbitrajes MEP", icon: Repeat },
+      { id: "flujo-posiciones", label: "Flujo de Posiciones", icon: Activity },
     ],
   },
   {
@@ -926,6 +927,8 @@ export default function MidasTerminal() {
               />
             ) : active === "desarbitrajes" ? (
               <DesarbitrajesModule key={active} />
+            ) : active === "flujo-posiciones" ? (
+              <PositionFlowModule key={active} />
             ) : active === "dashboard" ? (
               <DashboardModule />
             ) : (
@@ -20537,6 +20540,172 @@ function CanjeMonitorSection() {
           )}
         </>
       )}
+    </div>
+  );
+}
+
+/* ─────────────── Monitor de Flujo de Posiciones ───────────────
+ * Por cada posición ABIERTA del usuario muestra el flujo del libro
+ * (order-book imbalance = desbalance compra/venta) + precio en vivo y
+ * resultado vs PPP. Es CONTEXTO indicativo, NO una señal de trading:
+ * el desbalance del libro puede engañar (medido en vivo, el precio puede
+ * subir a través de vendedores apilados). Fuentes: futuros vía /api/mtr-md
+ * (con tamaños de puntas); bonos/acciones/cedears vía data912.
+ */
+function useFlowData912() {
+  const [map, setMap] = useState({});
+  useEffect(() => {
+    let cancelled = false;
+    const types = ["bonos", "letras", "acciones", "cedears"];
+    const load = () => {
+      Promise.all(
+        types.map((t) => fetch(`/api/data912?type=${t}&_=${Date.now()}`).then((r) => r.json()).catch(() => []))
+      ).then((arrs) => {
+        if (cancelled) return;
+        const m = {};
+        for (const arr of arrs) for (const x of arr || []) if (x && x.symbol) m[x.symbol] = x;
+        setMap(m);
+      });
+    };
+    load();
+    const iv = setInterval(load, 15000);
+    const onVis = () => { if (document.visibilityState === "visible") load(); };
+    document.addEventListener("visibilitychange", onVis);
+    return () => { cancelled = true; clearInterval(iv); document.removeEventListener("visibilitychange", onVis); };
+  }, []);
+  return map;
+}
+
+function PositionFlowModule() {
+  const { positions, loading } = useUserPositions();
+
+  const consolidated = useMemo(() => {
+    const g = {};
+    for (const p of positions || []) {
+      const key = `${p.instrument_type}|${p.ticker}`;
+      if (!g[key]) g[key] = { type: p.instrument_type, ticker: p.ticker, buyQty: 0, buyVal: 0, sellQty: 0, sellVal: 0 };
+      const q = Number(p.quantity) || 0, pr = Number(p.entry_price) || 0;
+      if (p.operation_type === "sell") { g[key].sellQty += q; g[key].sellVal += q * pr; }
+      else { g[key].buyQty += q; g[key].buyVal += q * pr; }
+    }
+    return Object.values(g)
+      .map((x) => {
+        const net = x.buyQty - x.sellQty;
+        const ppp = net > 0 ? x.buyVal / x.buyQty : net < 0 ? x.sellVal / x.sellQty : null;
+        return { type: x.type, ticker: x.ticker, net, ppp };
+      })
+      .filter((x) => Math.abs(x.net) > 0.0001)
+      .sort((a, b) => (a.type === "future" ? -1 : 1) - (b.type === "future" ? -1 : 1));
+  }, [positions]);
+
+  const futureTickers = useMemo(() => consolidated.filter((p) => p.type === "future").map((p) => p.ticker), [consolidated]);
+  const { prices: futPrices } = useFuturePrices(futureTickers);
+  const d912 = useFlowData912();
+
+  const fmt = (n, d = 2) => (n == null || !Number.isFinite(n) ? "—" : Number(n).toLocaleString("es-AR", { minimumFractionDigits: d, maximumFractionDigits: d }));
+
+  const resolve = (p) => {
+    if (p.type === "future") {
+      const f = futPrices[p.ticker];
+      if (!f) return null;
+      const price = f.price ?? f.last;
+      return { price, bidSz: f.bidSize, askSz: f.askSize, vol: f.volume, pct: price != null && f.settlement ? (price / f.settlement - 1) * 100 : null };
+    }
+    const d = d912[p.ticker];
+    if (!d) return null;
+    return { price: Number(d.c), bidSz: Number(d.q_bid), askSz: Number(d.q_ask), vol: Number(d.v), pct: Number(d.pct_change) };
+  };
+
+  return (
+    <div style={{ padding: "24px 32px", maxWidth: 1100, margin: "0 auto" }}>
+      <div style={{ marginBottom: 16 }}>
+        <h1 style={{ fontSize: 22, fontWeight: 600, color: C.text, letterSpacing: "-0.01em", margin: 0 }}>Flujo de Posiciones</h1>
+        <p style={{ fontSize: 12, color: C.muted, margin: "6px 0 0 0", letterSpacing: "0.02em" }}>
+          Desbalance del libro (compra vs venta) + precio en vivo de cada posición abierta · futuros (MTR) y bonos/acciones (data912)
+        </p>
+      </div>
+
+      <div className="flex items-start gap-2" style={{ border: `1px solid rgba(248,113,113,0.25)`, background: "rgba(248,113,113,0.06)", borderRadius: 6, padding: "10px 14px", marginBottom: 18 }}>
+        <AlertTriangle size={15} color={C.red} strokeWidth={1.6} style={{ marginTop: 1, flexShrink: 0 }} />
+        <span style={{ fontSize: 11.5, color: C.muted, lineHeight: 1.5 }}>
+          <b style={{ color: C.text }}>El flujo es INDICATIVO, no es una señal de trading.</b> El desbalance del libro puede engañar — el precio puede moverse en contra de las puntas apiladas. Usalo como contexto, no como recomendación de comprar o vender.
+        </span>
+      </div>
+
+      {loading && !consolidated.length ? (
+        <div className="flex items-center justify-center" style={{ height: 200 }}>
+          <Loader2 size={24} color={C.muted} className="eco-spin" strokeWidth={1.5} />
+        </div>
+      ) : !consolidated.length ? (
+        <div className="flex items-center justify-center" style={{ height: 200, fontSize: 12.5, color: C.muted }}>No hay posiciones abiertas.</div>
+      ) : (
+        <div style={{ border: `1px solid ${C.border}`, borderRadius: 6, background: C.panel, overflow: "hidden" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12.5 }}>
+            <thead>
+              <tr style={{ color: C.dim, fontSize: 10.5, letterSpacing: "0.08em", textTransform: "uppercase" }}>
+                <th style={{ textAlign: "left", padding: "9px 14px", fontWeight: 500 }}>Instrumento</th>
+                <th style={{ textAlign: "right", padding: "9px 14px", fontWeight: 500 }}>Posición</th>
+                <th style={{ textAlign: "right", padding: "9px 14px", fontWeight: 500 }}>PPP</th>
+                <th style={{ textAlign: "right", padding: "9px 14px", fontWeight: 500 }}>Precio</th>
+                <th style={{ textAlign: "right", padding: "9px 14px", fontWeight: 500 }}>Result.</th>
+                <th style={{ textAlign: "center", padding: "9px 14px", fontWeight: 500, width: 200 }}>Flujo (libro)</th>
+                <th style={{ textAlign: "right", padding: "9px 14px", fontWeight: 500 }}>Vol.</th>
+              </tr>
+            </thead>
+            <tbody>
+              {consolidated.map((p) => {
+                const live = resolve(p);
+                const isLong = p.net > 0;
+                const win = live && live.price != null && p.ppp != null && ((isLong && live.price > p.ppp) || (!isLong && live.price < p.ppp));
+                const resPct = live && live.price != null && p.ppp ? (isLong ? live.price / p.ppp - 1 : p.ppp / live.price - 1) * 100 : null;
+                const bs = live ? live.bidSz : null, as = live ? live.askSz : null;
+                const tot = (bs || 0) + (as || 0);
+                const bidPct = tot > 0 ? (bs / tot) * 100 : 50;
+                const obi = tot > 0 ? (bs - as) / tot : null;
+                return (
+                  <tr key={`${p.type}|${p.ticker}`} style={{ borderTop: `1px solid ${C.border}` }}>
+                    <td style={{ padding: "9px 14px" }}>
+                      <span style={{ color: C.text, fontWeight: 600 }}>{p.ticker}</span>
+                      <span style={{ fontSize: 10, color: C.dim, marginLeft: 6, textTransform: "uppercase", letterSpacing: "0.04em" }}>{p.type === "future" ? "fut" : p.type}</span>
+                    </td>
+                    <td style={{ padding: "9px 14px", textAlign: "right", fontVariantNumeric: "tabular-nums" }}>
+                      <span style={{ color: isLong ? C.green : C.red, fontWeight: 600 }}>{isLong ? "LONG" : "SHORT"}</span>
+                      <span style={{ color: C.muted, marginLeft: 6 }}>{fmt(Math.abs(p.net), 0)}</span>
+                    </td>
+                    <td style={{ padding: "9px 14px", textAlign: "right", color: C.muted, fontVariantNumeric: "tabular-nums" }}>{fmt(p.ppp, 2)}</td>
+                    <td style={{ padding: "9px 14px", textAlign: "right", color: C.text, fontWeight: 600, fontVariantNumeric: "tabular-nums" }}>{live ? fmt(live.price, 2) : "—"}</td>
+                    <td style={{ padding: "9px 14px", textAlign: "right", fontVariantNumeric: "tabular-nums", color: resPct == null ? C.dim : win ? C.green : C.red, fontWeight: 600 }}>
+                      {resPct == null ? "—" : `${resPct >= 0 ? "+" : ""}${fmt(resPct, 2)}%`}
+                    </td>
+                    <td style={{ padding: "9px 14px" }}>
+                      {obi == null ? (
+                        <span style={{ fontSize: 11, color: C.dim }}>sin libro</span>
+                      ) : (
+                        <div>
+                          <div style={{ display: "flex", height: 7, borderRadius: 4, overflow: "hidden", background: C.border }}>
+                            <div style={{ width: `${bidPct}%`, background: C.green, opacity: 0.85 }} />
+                            <div style={{ width: `${100 - bidPct}%`, background: C.red, opacity: 0.85 }} />
+                          </div>
+                          <div className="flex justify-between" style={{ fontSize: 9.5, color: C.dim, marginTop: 3, fontVariantNumeric: "tabular-nums" }}>
+                            <span style={{ color: C.green }}>C {fmt(bs, 0)}</span>
+                            <span style={{ color: obi > 0.15 ? C.green : obi < -0.15 ? C.red : C.muted, fontWeight: 600 }}>{obi >= 0 ? "+" : ""}{(obi * 100).toFixed(0)}</span>
+                            <span style={{ color: C.red }}>V {fmt(as, 0)}</span>
+                          </div>
+                        </div>
+                      )}
+                    </td>
+                    <td style={{ padding: "9px 14px", textAlign: "right", color: C.dim, fontVariantNumeric: "tabular-nums" }}>{live && Number.isFinite(live.vol) ? fmt(live.vol, 0) : "—"}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      <p style={{ fontSize: 10.5, color: C.dim, marginTop: 10, letterSpacing: "0.02em", lineHeight: 1.5 }}>
+        Flujo = desbalance del libro: <b style={{ color: C.green }}>C</b> compra (bid) vs <b style={{ color: C.red }}>V</b> venta (ask). El número central es el OBI (−100 a +100). Resultado = ganancia/pérdida vs tu PPP. Refresca cada 15s. FCI y otros sin libro muestran "sin libro".
+      </p>
     </div>
   );
 }

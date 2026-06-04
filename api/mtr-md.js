@@ -58,6 +58,11 @@ function rowToPriceEntry(row, nowMs) {
   const lastDate = row.last_ts ? new Date(row.last_ts).getTime() : null;
   const lastAge = lastDate != null ? nowMs - lastDate : Infinity;
 
+  // Tamaños de las puntas (para order-book imbalance) + volumen.
+  const bidSize = row.bid_size != null ? Number(row.bid_size) : null;
+  const askSize = row.ask_size != null ? Number(row.ask_size) : null;
+  const volume = row.volume != null ? Number(row.volume) : null;
+
   let price = null;
   let priceSource = null;
   let freshness = "none";
@@ -80,7 +85,7 @@ function rowToPriceEntry(row, nowMs) {
     freshness = "stale";
   }
 
-  return { last, bid, offer, settlement, midpoint, price, priceSource, lastDate, freshness };
+  return { last, bid, offer, settlement, midpoint, price, priceSource, lastDate, freshness, bidSize, askSize, volume };
 }
 
 /** app ticker "DLRMAY26" -> security_id "rx_DDF_DLR_MAY26". null si no es DLR. */
