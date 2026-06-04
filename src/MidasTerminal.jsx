@@ -20576,8 +20576,56 @@ function useFlowData912() {
   return map;
 }
 
+/* Niveles de alerta (stop/target) por ticker, persistidos en position_alerts. */
+function usePositionAlerts() {
+  const { user } = useAuth();
+  const [alerts, setAlerts] = useState({});
+  useEffect(() => {
+    if (!user) { setAlerts({}); return; }
+    let cancelled = false;
+    supabase.from("position_alerts").select("ticker,stop,target").eq("user_id", user.id).then(({ data }) => {
+      if (cancelled) return;
+      const m = {};
+      for (const r of data || []) m[r.ticker] = { stop: r.stop != null ? Number(r.stop) : null, target: r.target != null ? Number(r.target) : null };
+      setAlerts(m);
+    });
+    return () => { cancelled = true; };
+  }, [user]);
+  const saveAlert = useCallback(async (ticker, field, value) => {
+    if (!user) return;
+    setAlerts((prev) => {
+      const next = { ...prev, [ticker]: { ...(prev[ticker] || {}), [field]: value } };
+      const row = next[ticker];
+      supabase.from("position_alerts").upsert(
+        { user_id: user.id, ticker, stop: row.stop ?? null, target: row.target ?? null, updated_at: new Date().toISOString() },
+        { onConflict: "user_id,ticker" }
+      ).then(() => {});
+      return next;
+    });
+  }, [user]);
+  return { alerts, saveAlert };
+}
+
+function AlertInput({ value, onCommit, placeholder }) {
+  const [v, setV] = useState(value == null ? "" : String(value));
+  useEffect(() => { setV(value == null ? "" : String(value)); }, [value]);
+  const commit = () => onCommit(v.trim() === "" ? null : Number(v.replace(",", ".")));
+  return (
+    <input
+      value={v}
+      onChange={(e) => setV(e.target.value)}
+      onBlur={commit}
+      onKeyDown={(e) => { if (e.key === "Enter") e.currentTarget.blur(); }}
+      placeholder={placeholder}
+      inputMode="decimal"
+      style={{ width: 62, background: "rgba(255,255,255,0.03)", border: `1px solid ${C.border}`, borderRadius: 4, color: C.text, fontSize: 11, padding: "3px 6px", textAlign: "right", fontVariantNumeric: "tabular-nums", outline: "none" }}
+    />
+  );
+}
+
 function PositionFlowModule() {
   const { positions, loading } = useUserPositions();
+  const { alerts, saveAlert } = usePositionAlerts();
 
   const consolidated = useMemo(() => {
     const g = {};
@@ -20617,7 +20665,7 @@ function PositionFlowModule() {
   };
 
   return (
-    <div style={{ padding: "24px 32px", maxWidth: 1100, margin: "0 auto" }}>
+    <div style={{ padding: "24px 32px", maxWidth: 1280, margin: "0 auto" }}>
       <div style={{ marginBottom: 16 }}>
         <h1 style={{ fontSize: 22, fontWeight: 600, color: C.text, letterSpacing: "-0.01em", margin: 0 }}>Flujo de Posiciones</h1>
         <p style={{ fontSize: 12, color: C.muted, margin: "6px 0 0 0", letterSpacing: "0.02em" }}>
@@ -20649,6 +20697,8 @@ function PositionFlowModule() {
                 <th style={{ textAlign: "right", padding: "9px 14px", fontWeight: 500 }}>Precio</th>
                 <th style={{ textAlign: "right", padding: "9px 14px", fontWeight: 500 }}>Result.</th>
                 <th style={{ textAlign: "center", padding: "9px 14px", fontWeight: 500, width: 200 }}>Flujo (libro)</th>
+                <th style={{ textAlign: "center", padding: "9px 8px", fontWeight: 500 }}>Stop</th>
+                <th style={{ textAlign: "center", padding: "9px 8px", fontWeight: 500 }}>Target</th>
                 <th style={{ textAlign: "right", padding: "9px 14px", fontWeight: 500 }}>Vol.</th>
               </tr>
             </thead>
@@ -20662,11 +20712,17 @@ function PositionFlowModule() {
                 const tot = (bs || 0) + (as || 0);
                 const bidPct = tot > 0 ? (bs / tot) * 100 : 50;
                 const obi = tot > 0 ? (bs - as) / tot : null;
+                const al = alerts[p.ticker] || {};
+                const price = live ? live.price : null;
+                const stopHit = al.stop != null && price != null && (isLong ? price <= al.stop : price >= al.stop);
+                const targetHit = al.target != null && price != null && (isLong ? price >= al.target : price <= al.target);
                 return (
-                  <tr key={`${p.type}|${p.ticker}`} style={{ borderTop: `1px solid ${C.border}` }}>
+                  <tr key={`${p.type}|${p.ticker}`} style={{ borderTop: `1px solid ${C.border}`, background: stopHit ? "rgba(248,113,113,0.12)" : targetHit ? "rgba(52,211,153,0.12)" : "transparent" }}>
                     <td style={{ padding: "9px 14px" }}>
                       <span style={{ color: C.text, fontWeight: 600 }}>{p.ticker}</span>
                       <span style={{ fontSize: 10, color: C.dim, marginLeft: 6, textTransform: "uppercase", letterSpacing: "0.04em" }}>{p.type === "future" ? "fut" : p.type}</span>
+                      {stopHit && <span style={{ marginLeft: 8, fontSize: 9.5, fontWeight: 700, color: C.red, border: `1px solid ${C.red}`, borderRadius: 3, padding: "1px 5px", letterSpacing: "0.04em" }}>STOP</span>}
+                      {targetHit && <span style={{ marginLeft: 8, fontSize: 9.5, fontWeight: 700, color: C.green, border: `1px solid ${C.green}`, borderRadius: 3, padding: "1px 5px", letterSpacing: "0.04em" }}>TARGET</span>}
                     </td>
                     <td style={{ padding: "9px 14px", textAlign: "right", fontVariantNumeric: "tabular-nums" }}>
                       <span style={{ color: isLong ? C.green : C.red, fontWeight: 600 }}>{isLong ? "LONG" : "SHORT"}</span>
@@ -20694,6 +20750,12 @@ function PositionFlowModule() {
                         </div>
                       )}
                     </td>
+                    <td style={{ padding: "6px 8px", textAlign: "center" }}>
+                      <AlertInput value={al.stop} placeholder="—" onCommit={(v) => saveAlert(p.ticker, "stop", v)} />
+                    </td>
+                    <td style={{ padding: "6px 8px", textAlign: "center" }}>
+                      <AlertInput value={al.target} placeholder="—" onCommit={(v) => saveAlert(p.ticker, "target", v)} />
+                    </td>
                     <td style={{ padding: "9px 14px", textAlign: "right", color: C.dim, fontVariantNumeric: "tabular-nums" }}>{live && Number.isFinite(live.vol) ? fmt(live.vol, 0) : "—"}</td>
                   </tr>
                 );
@@ -20704,7 +20766,7 @@ function PositionFlowModule() {
       )}
 
       <p style={{ fontSize: 10.5, color: C.dim, marginTop: 10, letterSpacing: "0.02em", lineHeight: 1.5 }}>
-        Flujo = desbalance del libro: <b style={{ color: C.green }}>C</b> compra (bid) vs <b style={{ color: C.red }}>V</b> venta (ask). El número central es el OBI (−100 a +100). Resultado = ganancia/pérdida vs tu PPP. Refresca cada 15s. Instrumentos sin libro (ej. FCI) no se muestran.
+        Flujo = desbalance del libro: <b style={{ color: C.green }}>C</b> compra (bid) vs <b style={{ color: C.red }}>V</b> venta (ask). El número central es el OBI (−100 a +100). Resultado = ganancia/pérdida vs tu PPP. <b style={{ color: C.text }}>Cargá Stop / Target</b> por posición (Enter para guardar): la fila se resalta y marca <b style={{ color: C.red }}>STOP</b> / <b style={{ color: C.green }}>TARGET</b> cuando el precio toca tu nivel. Refresca cada 15s. Instrumentos sin libro (ej. FCI) no se muestran.
       </p>
     </div>
   );
