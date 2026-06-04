@@ -20795,6 +20795,35 @@ function PositionFlowModule({ alertsSys }) {
   const notifPerm = alertsSys ? alertsSys.notifPerm : "unsupported";
   const log = (alertsSys && alertsSys.log) || [];
 
+  const [sort, setSort] = useState({ key: null, dir: "asc" });
+  const onSort = (k) => setSort((s) => (s.key === k ? { key: k, dir: s.dir === "asc" ? "desc" : "asc" } : { key: k, dir: "asc" }));
+  const arrow = (k) => (sort.key === k ? (sort.dir === "asc" ? " ▲" : " ▼") : "");
+  const displayRows = useMemo(() => {
+    const arr = [...consolidated];
+    if (!sort.key) return arr;
+    const sv = (p) => {
+      const live = flowResolve(p, futPrices, d912);
+      const price = live ? live.price : null;
+      const isLong = p.net > 0;
+      switch (sort.key) {
+        case "ticker": return p.ticker;
+        case "pos": return p.net;
+        case "ppp": return p.ppp ?? -Infinity;
+        case "price": return price ?? -Infinity;
+        case "res": return price != null && p.ppp ? (isLong ? price / p.ppp - 1 : p.ppp / price - 1) : -Infinity;
+        case "obi": { const bs = (live && live.bidSz) || 0, as = (live && live.askSz) || 0, tot = bs + as; return tot > 0 ? (bs - as) / tot : -Infinity; }
+        case "vol": return live && Number.isFinite(live.vol) ? live.vol : -Infinity;
+        default: return 0;
+      }
+    };
+    arr.sort((a, b) => {
+      const va = sv(a), vb = sv(b);
+      const c = typeof va === "string" ? va.localeCompare(vb) : va - vb;
+      return sort.dir === "asc" ? c : -c;
+    });
+    return arr;
+  }, [consolidated, sort, futPrices, d912]);
+
   return (
     <div style={{ padding: "24px 32px", maxWidth: 1280, margin: "0 auto" }}>
       <div style={{ marginBottom: 16 }} className="flex items-start justify-between gap-4">
@@ -20840,19 +20869,19 @@ function PositionFlowModule({ alertsSys }) {
           <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12.5 }}>
             <thead>
               <tr style={{ color: C.dim, fontSize: 10.5, letterSpacing: "0.08em", textTransform: "uppercase" }}>
-                <th style={{ textAlign: "left", padding: "9px 14px", fontWeight: 500 }}>Instrumento</th>
-                <th style={{ textAlign: "right", padding: "9px 14px", fontWeight: 500 }}>Posición</th>
-                <th style={{ textAlign: "right", padding: "9px 14px", fontWeight: 500 }}>PPP</th>
-                <th style={{ textAlign: "right", padding: "9px 14px", fontWeight: 500 }}>Precio</th>
-                <th style={{ textAlign: "right", padding: "9px 14px", fontWeight: 500 }}>Result.</th>
-                <th style={{ textAlign: "center", padding: "9px 14px", fontWeight: 500, width: 200 }}>Flujo (libro)</th>
+                <th onClick={() => onSort("ticker")} style={{ textAlign: "left", padding: "9px 14px", fontWeight: 500, cursor: "pointer", userSelect: "none" }}>Instrumento{arrow("ticker")}</th>
+                <th onClick={() => onSort("pos")} style={{ textAlign: "right", padding: "9px 14px", fontWeight: 500, cursor: "pointer", userSelect: "none" }}>Posición{arrow("pos")}</th>
+                <th onClick={() => onSort("ppp")} style={{ textAlign: "right", padding: "9px 14px", fontWeight: 500, cursor: "pointer", userSelect: "none" }}>PPP{arrow("ppp")}</th>
+                <th onClick={() => onSort("price")} style={{ textAlign: "right", padding: "9px 14px", fontWeight: 500, cursor: "pointer", userSelect: "none" }}>Precio{arrow("price")}</th>
+                <th onClick={() => onSort("res")} style={{ textAlign: "right", padding: "9px 14px", fontWeight: 500, cursor: "pointer", userSelect: "none" }}>Result.{arrow("res")}</th>
+                <th onClick={() => onSort("obi")} style={{ textAlign: "center", padding: "9px 14px", fontWeight: 500, width: 200, cursor: "pointer", userSelect: "none" }}>Flujo (libro){arrow("obi")}</th>
                 <th style={{ textAlign: "center", padding: "9px 8px", fontWeight: 500 }}>Stop</th>
                 <th style={{ textAlign: "center", padding: "9px 8px", fontWeight: 500 }}>Target</th>
-                <th style={{ textAlign: "right", padding: "9px 14px", fontWeight: 500 }}>Vol.</th>
+                <th onClick={() => onSort("vol")} style={{ textAlign: "right", padding: "9px 14px", fontWeight: 500, cursor: "pointer", userSelect: "none" }}>Vol.{arrow("vol")}</th>
               </tr>
             </thead>
             <tbody>
-              {consolidated.map((p) => {
+              {displayRows.map((p) => {
                 const live = resolve(p);
                 const isLong = p.net > 0;
                 const win = live && live.price != null && p.ppp != null && ((isLong && live.price > p.ppp) || (!isLong && live.price < p.ppp));
