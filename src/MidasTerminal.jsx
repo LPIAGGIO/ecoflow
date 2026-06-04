@@ -720,7 +720,7 @@ export default function MidasTerminal() {
                     globalAlerts.log.map((a) => (
                       <div key={a.id} className="flex items-center gap-2" style={{ padding: "8px 14px", borderTop: `1px solid ${C.border}`, fontSize: 11.5 }}>
                         <span style={{ color: C.dim, fontVariantNumeric: "tabular-nums" }}>{a.ts}</span>
-                        <span style={{ fontWeight: 700, fontSize: 9, color: a.kind === "stop" ? C.red : C.green, border: `1px solid ${a.kind === "stop" ? C.red : C.green}`, borderRadius: 3, padding: "1px 4px" }}>{a.kind === "stop" ? "STOP" : "TGT"}</span>
+                        <span style={{ fontWeight: 700, fontSize: 9, color: a.kind === "down" ? C.red : C.green, border: `1px solid ${a.kind === "down" ? C.red : C.green}`, borderRadius: 3, padding: "1px 4px" }}>{a.kind === "down" ? "▼" : "▲"}</span>
                         <span style={{ color: C.text, fontWeight: 600 }}>{a.ticker}</span>
                         <span style={{ color: C.muted, fontVariantNumeric: "tabular-nums" }}>@ {a.level}</span>
                       </div>
@@ -20662,6 +20662,49 @@ function AlertInput({ value, onCommit, placeholder }) {
   );
 }
 
+/* Alertas de precio multinivel por ticker (estilo exchange). */
+function usePriceAlerts() {
+  const { user } = useAuth();
+  const [byTicker, setByTicker] = useState({});
+  const refetch = useCallback(() => {
+    if (!user) return;
+    supabase.from("price_alerts").select("id,ticker,price,dir,triggered_at").eq("user_id", user.id).then(({ data }) => {
+      const m = {};
+      for (const r of data || []) { (m[r.ticker] = m[r.ticker] || []).push({ id: r.id, price: Number(r.price), dir: r.dir, triggered: !!r.triggered_at }); }
+      for (const t in m) m[t].sort((a, b) => a.price - b.price);
+      setByTicker(m);
+    });
+  }, [user]);
+  useEffect(() => { refetch(); const iv = setInterval(refetch, 15000); return () => clearInterval(iv); }, [refetch]);
+  const addAlert = useCallback(async (ticker, price, currentPrice) => {
+    if (!user || !(price > 0)) return;
+    const dir = currentPrice != null && price < currentPrice ? "down" : "up";
+    const { data } = await supabase.from("price_alerts").insert({ user_id: user.id, ticker, price, dir }).select().single();
+    if (data) setByTicker((prev) => ({ ...prev, [ticker]: [...(prev[ticker] || []), { id: data.id, price: Number(data.price), dir: data.dir, triggered: false }].sort((a, b) => a.price - b.price) }));
+  }, [user]);
+  const removeAlert = useCallback(async (ticker, id) => {
+    await supabase.from("price_alerts").delete().eq("id", id);
+    setByTicker((prev) => ({ ...prev, [ticker]: (prev[ticker] || []).filter((a) => a.id !== id) }));
+  }, []);
+  return { byTicker, addAlert, removeAlert };
+}
+
+function AlertAdd({ onAdd }) {
+  const [v, setV] = useState("");
+  const commit = () => { const n = Number(v.replace(",", ".")); if (n > 0) onAdd(n); setV(""); };
+  return (
+    <input
+      value={v}
+      onChange={(e) => setV(e.target.value)}
+      onKeyDown={(e) => { if (e.key === "Enter") e.currentTarget.blur(); }}
+      onBlur={commit}
+      placeholder="+ nivel"
+      inputMode="decimal"
+      style={{ width: 60, background: "rgba(255,255,255,0.03)", border: `1px dashed ${C.border}`, borderRadius: 4, color: C.text, fontSize: 11, padding: "3px 6px", textAlign: "right", outline: "none" }}
+    />
+  );
+}
+
 /* Helpers compartidos entre el panel y el chequeo global de alertas. */
 const FLOW_MONTHS = { ENE: 1, FEB: 2, MAR: 3, ABR: 4, MAY: 5, JUN: 6, JUL: 7, AGO: 8, SEP: 9, OCT: 10, NOV: 11, DIC: 12 };
 function flowExpiryKey(ticker) {
@@ -20727,16 +20770,14 @@ function flowBeep() {
 function useGlobalAlerts() {
   const { user } = useAuth();
   const { positions } = useUserPositions();
-  const [alerts, setAlerts] = useState({});
+  const [palerts, setPalerts] = useState([]); // alertas de precio NO disparadas
   useEffect(() => {
-    if (!user) { setAlerts({}); return; }
+    if (!user) { setPalerts([]); return; }
     let cancelled = false;
     const load = () =>
-      supabase.from("position_alerts").select("ticker,stop,target").eq("user_id", user.id).then(({ data }) => {
+      supabase.from("price_alerts").select("id,ticker,price,dir,triggered_at").eq("user_id", user.id).is("triggered_at", null).then(({ data }) => {
         if (cancelled) return;
-        const m = {};
-        for (const r of data || []) m[r.ticker] = { stop: r.stop != null ? Number(r.stop) : null, target: r.target != null ? Number(r.target) : null };
-        setAlerts(m);
+        setPalerts((data || []).map((r) => ({ id: r.id, ticker: r.ticker, price: Number(r.price), dir: r.dir })));
       });
     load();
     const iv = setInterval(load, 15000);
@@ -20766,29 +20807,28 @@ function useGlobalAlerts() {
   }, []);
 
   useEffect(() => {
-    for (const p of consolidated) {
-      const live = flowResolve(p, futPrices, d912);
-      if (!live || live.price == null) continue;
-      const isLong = p.net > 0, al = alerts[p.ticker] || {}, price = live.price;
-      const sk = `${p.ticker}|stop|${al.stop}`, tk = `${p.ticker}|target|${al.target}`;
-      const stopHit = al.stop != null && (isLong ? price <= al.stop : price >= al.stop);
-      const targetHit = al.target != null && (isLong ? price >= al.target : price <= al.target);
-      const ts = new Date().toLocaleTimeString("es-AR", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
-      if (stopHit) {
-        if (!firedRef.current.has(sk)) { firedRef.current.add(sk); if (!muted) fire(`🛑 STOP ${p.ticker}`, `${price} tocó tu stop ${al.stop}`); setLog((l) => [{ id: sk + Date.now(), ts, ticker: p.ticker, kind: "stop", price, level: al.stop }, ...l].slice(0, 40)); }
-      } else firedRef.current.delete(sk);
-      if (targetHit) {
-        if (!firedRef.current.has(tk)) { firedRef.current.add(tk); if (!muted) fire(`🎯 TARGET ${p.ticker}`, `${price} tocó tu target ${al.target}`); setLog((l) => [{ id: tk + Date.now(), ts, ticker: p.ticker, kind: "target", price, level: al.target }, ...l].slice(0, 40)); }
-      } else firedRef.current.delete(tk);
+    if (!palerts.length) return;
+    const priceOf = {};
+    for (const p of consolidated) { const live = flowResolve(p, futPrices, d912); if (live && live.price != null) priceOf[p.ticker] = live.price; }
+    const ts = new Date().toLocaleTimeString("es-AR", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+    for (const a of palerts) {
+      const price = priceOf[a.ticker];
+      if (price == null || firedRef.current.has(a.id)) continue;
+      const hit = a.dir === "up" ? price >= a.price : price <= a.price;
+      if (!hit) continue;
+      firedRef.current.add(a.id);
+      if (!muted) fire(`${a.dir === "up" ? "🎯" : "🛑"} ${a.ticker}`, `Precio ${price} cruzó tu alerta ${a.price}`);
+      setLog((l) => [{ id: a.id + "_" + Date.now(), ts, ticker: a.ticker, kind: a.dir, price, level: a.price }, ...l].slice(0, 40));
+      supabase.from("price_alerts").update({ triggered_at: new Date().toISOString() }).eq("id", a.id).then(() => {});
     }
-  }, [consolidated, futPrices, d912, alerts, fire, muted]);
+  }, [consolidated, futPrices, d912, palerts, fire, muted]);
 
   return { log, unseen: Math.max(0, log.length - seen), markSeen: () => setSeen(log.length), clearLog: () => { setLog([]); setSeen(0); }, notifPerm, requestPerm, muted, toggleMute };
 }
 
 function PositionFlowModule({ alertsSys }) {
   const { positions, loading } = useUserPositions();
-  const { alerts, saveAlert } = usePositionAlerts();
+  const { byTicker: alertsByTicker, addAlert, removeAlert } = usePriceAlerts();
 
   const consolidated = useMemo(() => flowConsolidate(positions), [positions]);
 
@@ -20886,8 +20926,7 @@ function PositionFlowModule({ alertsSys }) {
                 <th onClick={() => onSort("price")} style={{ textAlign: "right", padding: "9px 14px", fontWeight: 500, cursor: "pointer", userSelect: "none" }}>Precio{arrow("price")}</th>
                 <th onClick={() => onSort("res")} style={{ textAlign: "right", padding: "9px 14px", fontWeight: 500, cursor: "pointer", userSelect: "none" }}>Result.{arrow("res")}</th>
                 <th onClick={() => onSort("obi")} style={{ textAlign: "center", padding: "9px 14px", fontWeight: 500, width: 200, cursor: "pointer", userSelect: "none" }}>Flujo (libro){arrow("obi")}</th>
-                <th style={{ textAlign: "center", padding: "9px 8px", fontWeight: 500 }}>Stop</th>
-                <th style={{ textAlign: "center", padding: "9px 8px", fontWeight: 500 }}>Target</th>
+                <th style={{ textAlign: "left", padding: "9px 14px", fontWeight: 500 }}>Alertas</th>
                 <th onClick={() => onSort("vol")} style={{ textAlign: "right", padding: "9px 14px", fontWeight: 500, cursor: "pointer", userSelect: "none" }}>Vol.{arrow("vol")}</th>
               </tr>
             </thead>
@@ -20901,17 +20940,12 @@ function PositionFlowModule({ alertsSys }) {
                 const tot = (bs || 0) + (as || 0);
                 const bidPct = tot > 0 ? (bs / tot) * 100 : 50;
                 const obi = tot > 0 ? (bs - as) / tot : null;
-                const al = alerts[p.ticker] || {};
-                const price = live ? live.price : null;
-                const stopHit = al.stop != null && price != null && (isLong ? price <= al.stop : price >= al.stop);
-                const targetHit = al.target != null && price != null && (isLong ? price >= al.target : price <= al.target);
+                const alertList = alertsByTicker[p.ticker] || [];
                 return (
-                  <tr key={`${p.type}|${p.ticker}`} style={{ borderTop: `1px solid ${C.border}`, background: stopHit ? "rgba(248,113,113,0.12)" : targetHit ? "rgba(52,211,153,0.12)" : "transparent" }}>
+                  <tr key={`${p.type}|${p.ticker}`} style={{ borderTop: `1px solid ${C.border}` }}>
                     <td style={{ padding: "9px 14px" }}>
                       <span style={{ color: C.text, fontWeight: 600 }}>{p.ticker}</span>
                       <span style={{ fontSize: 10, color: C.dim, marginLeft: 6, textTransform: "uppercase", letterSpacing: "0.04em" }}>{p.type === "future" ? "fut" : p.type}</span>
-                      {stopHit && <span style={{ marginLeft: 8, fontSize: 9.5, fontWeight: 700, color: C.red, border: `1px solid ${C.red}`, borderRadius: 3, padding: "1px 5px", letterSpacing: "0.04em" }}>STOP</span>}
-                      {targetHit && <span style={{ marginLeft: 8, fontSize: 9.5, fontWeight: 700, color: C.green, border: `1px solid ${C.green}`, borderRadius: 3, padding: "1px 5px", letterSpacing: "0.04em" }}>TARGET</span>}
                     </td>
                     <td style={{ padding: "9px 14px", textAlign: "right", fontVariantNumeric: "tabular-nums" }}>
                       <span style={{ color: isLong ? C.green : C.red, fontWeight: 600 }}>{isLong ? "LONG" : "SHORT"}</span>
@@ -20939,11 +20973,16 @@ function PositionFlowModule({ alertsSys }) {
                         </div>
                       )}
                     </td>
-                    <td style={{ padding: "6px 8px", textAlign: "center" }}>
-                      <AlertInput value={al.stop} placeholder="—" onCommit={(v) => saveAlert(p.ticker, "stop", v)} />
-                    </td>
-                    <td style={{ padding: "6px 8px", textAlign: "center" }}>
-                      <AlertInput value={al.target} placeholder="—" onCommit={(v) => saveAlert(p.ticker, "target", v)} />
+                    <td style={{ padding: "6px 10px" }}>
+                      <div className="flex items-center gap-1" style={{ flexWrap: "wrap" }}>
+                        {alertList.map((a) => (
+                          <span key={a.id} className="flex items-center gap-1" style={{ fontSize: 10.5, fontVariantNumeric: "tabular-nums", color: a.triggered ? C.dim : a.dir === "down" ? C.red : C.green, border: `1px solid ${a.triggered ? C.border : a.dir === "down" ? C.red : C.green}`, borderRadius: 4, padding: "1px 5px", textDecoration: a.triggered ? "line-through" : "none" }}>
+                            {a.dir === "down" ? "▼" : "▲"} {fmt(a.price, 2)}{a.triggered ? " ✓" : ""}
+                            <button onClick={() => removeAlert(p.ticker, a.id)} title="Quitar nivel" style={{ background: "none", border: "none", color: C.dim, cursor: "pointer", fontSize: 12, lineHeight: 1, padding: 0 }}>×</button>
+                          </span>
+                        ))}
+                        <AlertAdd onAdd={(price) => addAlert(p.ticker, price, live ? live.price : null)} />
+                      </div>
                     </td>
                     <td style={{ padding: "9px 14px", textAlign: "right", color: C.dim, fontVariantNumeric: "tabular-nums" }}>{live && Number.isFinite(live.vol) ? fmt(live.vol, 0) : "—"}</td>
                   </tr>
@@ -20964,7 +21003,7 @@ function PositionFlowModule({ alertsSys }) {
             {log.map((a) => (
               <div key={a.id} className="flex items-center gap-3" style={{ padding: "7px 14px", borderTop: `1px solid ${C.border}`, fontSize: 12 }}>
                 <span style={{ color: C.dim, fontVariantNumeric: "tabular-nums", width: 66 }}>{a.ts}</span>
-                <span style={{ fontWeight: 700, fontSize: 9.5, color: a.kind === "stop" ? C.red : C.green, border: `1px solid ${a.kind === "stop" ? C.red : C.green}`, borderRadius: 3, padding: "1px 5px" }}>{a.kind === "stop" ? "STOP" : "TARGET"}</span>
+                <span style={{ fontWeight: 700, fontSize: 9.5, color: a.kind === "down" ? C.red : C.green, border: `1px solid ${a.kind === "down" ? C.red : C.green}`, borderRadius: 3, padding: "1px 5px" }}>{a.kind === "down" ? "▼ baja" : "▲ suba"}</span>
                 <span style={{ color: C.text, fontWeight: 600 }}>{a.ticker}</span>
                 <span style={{ color: C.muted, fontVariantNumeric: "tabular-nums" }}>tocó {fmt(a.level, 2)} · precio {fmt(a.price, 2)}</span>
               </div>
@@ -20974,7 +21013,7 @@ function PositionFlowModule({ alertsSys }) {
       )}
 
       <p style={{ fontSize: 10.5, color: C.dim, marginTop: 10, letterSpacing: "0.02em", lineHeight: 1.5 }}>
-        Flujo = desbalance del libro: <b style={{ color: C.green }}>C</b> compra (bid) vs <b style={{ color: C.red }}>V</b> venta (ask). El número central es el OBI (−100 a +100). Resultado = ganancia/pérdida vs tu PPP. <b style={{ color: C.text }}>Cargá Stop / Target</b> por posición (Enter para guardar): la fila se resalta y marca <b style={{ color: C.red }}>STOP</b> / <b style={{ color: C.green }}>TARGET</b> cuando el precio toca tu nivel. Refresca cada 15s. Instrumentos sin libro (ej. FCI) no se muestran.
+        Flujo = desbalance del libro: <b style={{ color: C.green }}>C</b> compra (bid) vs <b style={{ color: C.red }}>V</b> venta (ask). El número central es el OBI (−100 a +100). Resultado = ganancia/pérdida vs tu PPP. En <b style={{ color: C.text }}>Alertas</b> cargá varios niveles por instrumento (Enter): <b style={{ color: C.green }}>▲</b> dispara al subir, <b style={{ color: C.red }}>▼</b> al bajar (según dónde esté el precio al cargarlo). Cada nivel suena/notifica una vez y queda tachado (✓). Refresca cada 15s. Instrumentos sin libro (ej. FCI) no se muestran.
       </p>
     </div>
   );
