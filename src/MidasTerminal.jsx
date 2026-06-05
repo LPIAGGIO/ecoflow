@@ -8946,9 +8946,14 @@ function TotalCard({ positions, fx, bondPrices, futurePrices, stockPrices, fciPr
   const realizedToday = useMemo(() => {
     if (!fx || !positions || !isTradingDayAndMarketOpened()) return 0;
     const all = consolidatePositions(positions, bondPrices, futurePrices, fciPrices);
-    const closedToday = filterClosedToToday(all.filter((g) => g.isClosed));
+    const closedToday = filterClosedToToday(all.filter((g) => g.isClosed), futurePrices);
     let sum = 0;
     for (const g of closedToday) {
+      // Futuros: su P&L del día YA está contado en dailyTotals (computeDailyPnL
+      // marca cada op cruda contra su settle/entrada → el neto de las cerradas
+      // hoy ES el P&L del día). Sumarlo acá duplicaría. Solo no-futuros (contado
+      // realiza al vender y eso no lo captura el diario por previousClose).
+      if (g.instrument_type === "future") continue;
       const conv = convertValue(g.realizedPnl ?? 0, g.currency || "ARS", valuationCurrency, fx);
       if (conv != null) sum += conv;
     }
@@ -11480,7 +11485,7 @@ function consolidatePositions(positions, bondPrices, futurePrices, fciPrices) {
     // - entry_price guarda el precio de la pata compradora.
     // - sell_price guarda el precio de la pata vendedora.
     // - entry_date es la fecha de la operación que CIERRA el par.
-    const pushPair = (closingOp, matchedQty, buyPrice, sellPrice) => {
+    const pushPair = (closingOp, matchedQty, buyPrice, sellPrice, openDate = null, closeSide = null) => {
       synthetic.push({
         id: `${closingOp.id}__synth_pair_${synthIdx}`,
         isSynthetic: true,
@@ -11494,6 +11499,12 @@ function consolidatePositions(positions, bondPrices, futurePrices, fciPrices) {
         entry_currency: closingOp.entry_currency,
         entry_date: closingOp.entry_date,
         notes: closingOp.notes || null,
+        // Para futuros: fecha del lote que se ABRE (la pata vieja del par) y
+        // qué lado cierra. filterClosedToToday los usa para el P&L del DÍA
+        // (base = settle anterior si el lote venía arrastrado de días previos,
+        // o el precio de apertura si se abrió hoy). closeDate = entry_date.
+        openDate,
+        closeSide,
       });
       synthIdx++;
       realizedPnlRaw += matchedQty * (sellPrice - buyPrice);
@@ -11508,14 +11519,14 @@ function consolidatePositions(positions, bondPrices, futurePrices, fciPrices) {
     // el promedio ponderado del lado abierto (abajo), que matchea el PPC
     // de Cocos para instrumentos contado.
     if (g.instrument_type === "future") {
-      const openBuys = []; // [{ qty, price }] — stack (cierra desde el final)
+      const openBuys = []; // [{ qty, price, date }] — stack (cierra desde el final)
       const openSells = [];
       const closeAgainst = (stack, remaining, makePair) => {
         let rem = remaining;
         while (rem > 0 && stack.length > 0) {
           const lot = stack[stack.length - 1];
           const matched = Math.min(rem, lot.qty);
-          makePair(matched, lot.price);
+          makePair(matched, lot);
           lot.qty -= matched;
           rem -= matched;
           if (lot.qty <= 1e-9) stack.pop();
@@ -11527,17 +11538,19 @@ function consolidatePositions(positions, bondPrices, futurePrices, fciPrices) {
         const price = Number(op.entry_price) || 0;
         if (qty <= 0) continue;
         if (op.operation_type === "sell") {
-          // cierra compras abiertas (long) LIFO; el sobrante abre/extiende short
-          const rem = closeAgainst(openBuys, qty, (m, buyPrice) =>
-            pushPair(op, m, buyPrice, price)
+          // cierra compras abiertas (long) LIFO; el sobrante abre/extiende short.
+          // openDate = fecha del lote comprado (la pata que se abre).
+          const rem = closeAgainst(openBuys, qty, (m, lot) =>
+            pushPair(op, m, lot.price, price, lot.date, "long")
           );
-          if (rem > 0) openSells.push({ qty: rem, price });
+          if (rem > 0) openSells.push({ qty: rem, price, date: op.entry_date });
         } else {
-          // cierra ventas abiertas (short) LIFO; el sobrante abre/extiende long
-          const rem = closeAgainst(openSells, qty, (m, sellPrice) =>
-            pushPair(op, m, price, sellPrice)
+          // cierra ventas abiertas (short) LIFO; el sobrante abre/extiende long.
+          // openDate = fecha del lote vendido (la pata que se abre).
+          const rem = closeAgainst(openSells, qty, (m, lot) =>
+            pushPair(op, m, price, lot.price, lot.date, "short")
           );
-          if (rem > 0) openBuys.push({ qty: rem, price });
+          if (rem > 0) openBuys.push({ qty: rem, price, date: op.entry_date });
         }
       }
       const sumQ = (arr) => arr.reduce((s, l) => s + l.qty, 0);
@@ -12337,7 +12350,7 @@ function getTodayStringAR() {
  * mezclarse con la operativa del día. Esto evita que mañana se vean las
  * ventas de hoy mezcladas con las de mañana.
  */
-function filterClosedToToday(closedGroups) {
+function filterClosedToToday(closedGroups, futurePrices) {
   const today = getTodayStringAR();
   const result = [];
 
@@ -12353,25 +12366,58 @@ function filterClosedToToday(closedGroups) {
 
     if (todayPairs.length === 0) continue;
 
-    // Recalcular P&L raw del día: sum(qty × (sell_price - PPP))
+    const isFuture = g.instrument_type === "future";
+    // Settle del día anterior para futuros (el feed lo trae como settlement
+    // durante la rueda de hoy). Base para el P&L del DÍA de lotes arrastrados.
+    const priorSettle = isFuture
+      ? Number(futurePrices?.[g.ticker]?.settlement)
+      : null;
+
+    // Dos números:
+    //  - realizedPnlRaw (lifetime, entrada→salida): para no-futuros = P&L del día
+    //    (contado realiza al vender). Se conserva como base de pnlPct.
+    //  - dailyPnlRaw (futuros): P&L del DÍA estilo Cocos. Lote arrastrado se mide
+    //    contra el settle de ayer; lote abierto HOY contra su precio de apertura.
+    //    Esto NO se suma al banner "P&L hoy" (ese ya cuenta los futuros vía las
+    //    ops crudas en dailyTotals); es para mostrar en la lista de cerradas hoy.
     let realizedPnlRaw = 0;
+    let dailyPnlRaw = 0;
     let closedQtyToday = 0;
     for (const pair of todayPairs) {
       const qty = Number(pair.quantity) || 0;
       const sellPrice = Number(pair.sell_price) || 0;
-      const buyPrice = pair.entry_price; // PPP — null si fue short
+      const buyPrice = pair.entry_price; // PPP — precio de la pata compradora
       if (buyPrice != null) {
         realizedPnlRaw += qty * (sellPrice - buyPrice);
+      }
+      if (isFuture && pair.closeSide && pair.openDate) {
+        if (pair.closeSide === "long") {
+          // se abrió comprando (buyPrice), se cerró vendiendo hoy (sellPrice)
+          const base = pair.openDate === today
+            ? buyPrice
+            : (Number.isFinite(priorSettle) ? priorSettle : buyPrice);
+          dailyPnlRaw += qty * (sellPrice - base);
+        } else {
+          // short: se abrió vendiendo (sellPrice), se cerró comprando hoy (buyPrice)
+          const base = pair.openDate === today
+            ? sellPrice
+            : (Number.isFinite(priorSettle) ? priorSettle : sellPrice);
+          dailyPnlRaw += qty * (base - buyPrice);
+        }
       }
       closedQtyToday += qty;
     }
 
-    // Aplicar convención del instrumento al P&L raw.
+    // Aplicar convención del instrumento. Para FUTUROS mostramos el P&L del DÍA
+    // (settle-based); el lifetime queda en realizedPnlLifetime por si se necesita.
     let realizedPnl;
-    if (g.instrument_type === "future") {
-      realizedPnl = realizedPnlRaw * FUTURE_MULTIPLIER_DEFAULT;
+    let realizedPnlLifetime;
+    if (isFuture) {
+      realizedPnl = dailyPnlRaw * FUTURE_MULTIPLIER_DEFAULT;
+      realizedPnlLifetime = realizedPnlRaw * FUTURE_MULTIPLIER_DEFAULT;
     } else {
       realizedPnl = applyConventionToValue(g.instrument_type, 1, realizedPnlRaw);
+      realizedPnlLifetime = realizedPnl;
     }
 
     // pnlPct: ratio sobre costo del lote vendido a PPP.
@@ -12394,6 +12440,7 @@ function filterClosedToToday(closedGroups) {
       sellOpsCount: todayPairs.length,
       pnl: realizedPnl,
       realizedPnl: realizedPnl,
+      realizedPnlLifetime,
       valueAtMarket: realizedPnl,
       valueAtCost: 0,
       pnlPct,
@@ -13914,7 +13961,7 @@ function ConsolidatedSection({
   // por fecha de venta y recalculamos P&L solo del día. Esto evita que
   // ventas de días previos se mezclen con las de hoy en la UI y en el
   // total realizado del banner.
-  const closed = filterClosedToToday(closedAll);
+  const closed = filterClosedToToday(closedAll, futurePrices);
 
   return (
     <div style={{ marginBottom: 24 }}>
@@ -18927,9 +18974,12 @@ function PortfolioSummaryWidget({ expanded }) {
   const realizedToday = useMemo(() => {
     if (!fx || !positions || !isTradingDayAndMarketOpened()) return 0;
     const all = consolidatePositions(positions, bondPricesState.prices, futurePricesState.prices, fciPricesState.prices);
-    const closedToday = filterClosedToToday(all.filter((g) => g.isClosed));
+    const closedToday = filterClosedToToday(all.filter((g) => g.isClosed), futurePricesState.prices);
     let sum = 0;
     for (const g of closedToday) {
+      // Futuros: su P&L del día ya está en dailyTotals (ver TotalCard). Excluir
+      // para no duplicar; solo sumamos el realizado de no-futuros cerrados hoy.
+      if (g.instrument_type === "future") continue;
       const conv = convertValue(g.realizedPnl ?? 0, g.currency || "ARS", valuationCurrency, fx);
       if (conv != null) sum += conv;
     }
