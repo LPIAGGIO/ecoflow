@@ -12584,8 +12584,241 @@ function DataSourcesFooter({
 }
 
 
+/**
+ * Parser del CSV de operaciones de Matriz (Cocos y otros brokers que usan
+ * Matriz exportan el mismo formato: execution_reports con fills parciales).
+ * SOLO FUTUROS por ahora (lo más claro). Consolida fills por order_id, mapea
+ * DLR/JUN26 -> DLRJUN26, y clasifica cada orden:
+ *   - "new": futuro ejecutado, order_id no cargado antes -> se importa.
+ *   - "dup": order_id ya existe en cartera (extra.matriz_order_id) -> se saltea.
+ *   - "ignored": no es futuro (caución/bono/acción) o sin ejecución.
+ * El dedup por order_id permite subir el CSV completo varias veces o de a poco
+ * sin duplicar: nunca pisa lo existente, solo agrega lo nuevo.
+ */
+function parseMatrizFuturesCsv(text, existingOrderIds) {
+  const lines = (text || "").split(/\r?\n/).filter((l) => l.trim());
+  if (lines.length < 2) return [];
+  const header = lines[0].split(",").map((h) => h.trim());
+  const ix = (name) => header.indexOf(name);
+  const iOrder = ix("order_id"), iAcct = ix("account"), iSec = ix("security_id"),
+    iSym = ix("symbol"), iTime = ix("transact_time"), iSide = ix("side"),
+    iAvg = ix("avg_price"), iCum = ix("cum_qty");
+  if (iOrder < 0 || iSym < 0 || iCum < 0) return []; // formato no reconocido
+  // Agrupar por order_id, quedarse con la fila de mayor cum_qty (estado final).
+  const byOrder = new Map();
+  for (let li = 1; li < lines.length; li++) {
+    const c = lines[li].split(",");
+    const oid = (c[iOrder] || "").trim();
+    if (!oid) continue;
+    const cum = Number(c[iCum]) || 0;
+    const prev = byOrder.get(oid);
+    if (!prev || cum >= prev.cum) byOrder.set(oid, { cols: c, cum });
+  }
+  const out = [];
+  for (const [oid, { cols, cum }] of byOrder) {
+    const sec = (cols[iSec] || "").trim();
+    const sym = (cols[iSym] || "").trim();
+    const isFuture = sec.startsWith("rx_DDF_DLR") || /^DLR\//.test(sym);
+    const sideRaw = (cols[iSide] || "").trim().toUpperCase();
+    const side = sideRaw === "BUY" ? "buy" : sideRaw === "SELL" ? "sell" : null;
+    const price = Number(cols[iAvg]) || 0;
+    const time = (cols[iTime] || "").trim();
+    let date = time.slice(0, 10);
+    const d = new Date(time.replace(" ", "T"));
+    if (!isNaN(d.getTime())) {
+      date = d.toLocaleDateString("en-CA", { timeZone: "America/Argentina/Buenos_Aires" });
+    }
+    const account = (cols[iAcct] || "").trim();
+    const ticker = sym.replace("/", "").toUpperCase();
+    let status, reason = null;
+    if (!isFuture) { status = "ignored"; reason = `no es futuro (${sym})`; }
+    else if (cum <= 0) { status = "ignored"; reason = "sin ejecución"; }
+    else if (!side || price <= 0) { status = "ignored"; reason = "datos incompletos"; }
+    else if (existingOrderIds && existingOrderIds.has(oid)) { status = "dup"; }
+    else { status = "new"; }
+    out.push({ orderId: oid, account, ticker, side, qty: cum, price, date, status, reason });
+  }
+  return out;
+}
+
+/**
+ * Modal para importar el CSV de Matriz (solo futuros). Preview con dedup antes
+ * de confirmar; nunca pisa lo existente, solo agrega lo nuevo (por order_id).
+ */
+function ImportCsvModal({ existingPositions, addPosition, onClose }) {
+  const [rows, setRows] = useState(null);
+  const [fileName, setFileName] = useState("");
+  const [importing, setImporting] = useState(false);
+  const [result, setResult] = useState(null);
+
+  const existingOrderIds = useMemo(() => {
+    const s = new Set();
+    for (const p of existingPositions || []) {
+      const oid = p?.extra?.matriz_order_id;
+      if (oid) s.add(oid);
+    }
+    return s;
+  }, [existingPositions]);
+
+  const onFile = async (e) => {
+    const f = e.target.files?.[0];
+    if (!f) return;
+    setFileName(f.name);
+    setResult(null);
+    try {
+      const text = await f.text();
+      setRows(parseMatrizFuturesCsv(text, existingOrderIds));
+    } catch (err) {
+      setRows([]);
+      setResult({ inserted: 0, errs: [`No se pudo leer el archivo: ${err.message}`] });
+    }
+  };
+
+  const newRows = (rows || []).filter((r) => r.status === "new");
+  const dupCount = (rows || []).filter((r) => r.status === "dup").length;
+  const ignoredCount = (rows || []).filter((r) => r.status === "ignored").length;
+
+  const doImport = async () => {
+    setImporting(true);
+    let inserted = 0;
+    const errs = [];
+    for (const r of newRows) {
+      try {
+        await addPosition({
+          instrument_type: "future",
+          operation_type: r.side,
+          ticker: r.ticker,
+          quantity: r.qty,
+          entry_price: r.price,
+          entry_currency: "ARS",
+          entry_date: r.date,
+          settlement: "CI",
+          broker: "cocos",
+          notes: null,
+          extra: { matriz_order_id: r.orderId, matriz_account: r.account, source: "csv_matriz" },
+        });
+        inserted++;
+      } catch (err) {
+        errs.push(`${r.ticker} ${r.side} ${r.qty}: ${err.message || err}`);
+      }
+    }
+    setImporting(false);
+    setResult({ inserted, errs });
+  };
+
+  const badge = (status) => {
+    const map = {
+      new: { t: "NUEVA", c: C.green },
+      dup: { t: "ya cargada", c: C.dim },
+      ignored: { t: "ignorada", c: C.muted },
+    };
+    const b = map[status] || map.ignored;
+    return <span style={{ fontSize: 9, fontWeight: 700, color: b.c, letterSpacing: "0.05em" }}>{b.t}</span>;
+  };
+
+  return (
+    <div
+      onClick={onClose}
+      style={{
+        position: "fixed", inset: 0, backgroundColor: "rgba(0,0,0,0.55)",
+        backdropFilter: "blur(2px)", zIndex: 100, display: "flex",
+        alignItems: "center", justifyContent: "center", padding: 20,
+      }}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          backgroundColor: C.panel, border: `1px solid ${C.borderStrong}`,
+          padding: 24, maxWidth: 640, width: "100%", maxHeight: "85vh",
+          display: "flex", flexDirection: "column",
+        }}
+      >
+        <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", marginBottom: 6 }}>
+          <span style={{ fontSize: 14, fontWeight: 700, color: C.text }}>Importar CSV de Matriz</span>
+          <button onClick={onClose} style={{ background: "none", border: "none", color: C.muted, cursor: "pointer", fontSize: 16 }}>×</button>
+        </div>
+        <div style={{ fontSize: 10.5, color: C.muted, marginBottom: 14, lineHeight: 1.5 }}>
+          Reporte de operaciones de Cocos/Matriz. Por ahora importa <b>solo futuros DLR</b>; lo demás (cauciones, bonos, acciones) se ignora. No pisa lo ya cargado — agrega solo las órdenes nuevas (dedup por order_id).
+        </div>
+
+        <label style={{
+          display: "inline-block", padding: "8px 14px", border: `1px solid ${C.border}`,
+          color: C.text, fontSize: 11, cursor: "pointer", marginBottom: 14, alignSelf: "flex-start",
+        }}>
+          {fileName || "Elegir archivo .csv"}
+          <input type="file" accept=".csv,text/csv" onChange={onFile} style={{ display: "none" }} />
+        </label>
+
+        {rows && rows.length > 0 && (
+          <>
+            <div style={{ fontSize: 11, color: C.text, marginBottom: 8 }}>
+              <b style={{ color: C.green }}>{newRows.length}</b> nuevas · {dupCount} ya cargadas · {ignoredCount} ignoradas
+            </div>
+            <div style={{ overflowY: "auto", border: `1px solid ${C.border}`, marginBottom: 14 }}>
+              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 10.5 }}>
+                <thead>
+                  <tr style={{ color: C.dim, textAlign: "left" }}>
+                    <th style={{ padding: "5px 8px" }}>Estado</th>
+                    <th style={{ padding: "5px 8px" }}>Ticker</th>
+                    <th style={{ padding: "5px 8px" }}>Op</th>
+                    <th style={{ padding: "5px 8px", textAlign: "right" }}>Cant.</th>
+                    <th style={{ padding: "5px 8px", textAlign: "right" }}>Precio</th>
+                    <th style={{ padding: "5px 8px" }}>Fecha</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {rows.map((r, i) => (
+                    <tr key={r.orderId + i} style={{ borderTop: `1px solid ${C.border}`, opacity: r.status === "new" ? 1 : 0.55 }}>
+                      <td style={{ padding: "5px 8px" }}>{badge(r.status)}{r.reason && <span style={{ color: C.dim, fontSize: 9 }}> · {r.reason}</span>}</td>
+                      <td style={{ padding: "5px 8px", color: C.text }}>{r.ticker || "—"}</td>
+                      <td style={{ padding: "5px 8px", color: r.side === "buy" ? C.green : C.red }}>{r.side === "buy" ? "Compra" : r.side === "sell" ? "Venta" : "—"}</td>
+                      <td style={{ padding: "5px 8px", textAlign: "right", color: C.text }}>{r.qty || "—"}</td>
+                      <td style={{ padding: "5px 8px", textAlign: "right", color: C.text }}>{r.price || "—"}</td>
+                      <td style={{ padding: "5px 8px", color: C.muted }}>{r.date || "—"}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </>
+        )}
+        {rows && rows.length === 0 && (
+          <div style={{ fontSize: 11, color: C.red, marginBottom: 14 }}>No se reconocieron operaciones en el archivo (¿formato correcto de Matriz?).</div>
+        )}
+
+        {result && (
+          <div style={{ fontSize: 11, color: result.errs.length ? C.red : C.green, marginBottom: 12 }}>
+            Importadas {result.inserted} órdenes.{result.errs.length ? ` Errores: ${result.errs.join("; ")}` : ""}
+          </div>
+        )}
+
+        <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
+          <button onClick={onClose} style={{ padding: "8px 16px", border: `1px solid ${C.border}`, background: "none", color: C.muted, fontSize: 11, cursor: "pointer" }}>
+            {result ? "Cerrar" : "Cancelar"}
+          </button>
+          {!result && (
+            <button
+              onClick={doImport}
+              disabled={importing || newRows.length === 0}
+              style={{
+                padding: "8px 16px", border: `1px solid ${C.green}`,
+                background: newRows.length ? C.green : "none",
+                color: newRows.length ? "#04140a" : C.dim, fontSize: 11, fontWeight: 700,
+                cursor: importing || !newRows.length ? "default" : "pointer", opacity: importing ? 0.6 : 1,
+              }}
+            >
+              {importing ? "Importando…" : `Importar ${newRows.length} nuevas`}
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function PortfolioDashboard({ onNavigate }) {
   const { positions, loading, error, addPosition, updatePosition, deletePosition } = useUserPositions();
+  const [importCsvOpen, setImportCsvOpen] = useState(false);
 
   // Hook de cash: trackea movements (deposits, withdrawals, sale_proceeds,
   // purchase_cost) y deriva el saldo por moneda. Lo usamos en TotalCard,
@@ -13032,6 +13265,7 @@ function PortfolioDashboard({ onNavigate }) {
             onDelete={(p) => setConfirmingDelete(p)}
             onUpdatePrice={handleUpdateCurrentPrice}
             onAdd={openCreate}
+            onImportCsv={() => setImportCsvOpen(true)}
             onRefresh={handleRefreshAll}
             refreshing={anyLoading}
           />
@@ -13074,6 +13308,15 @@ function PortfolioDashboard({ onNavigate }) {
           editingPosition={editingPosition}
           onClose={closeDrawer}
           onSubmit={handleSubmit}
+        />
+      )}
+
+      {/* Importador de CSV de Matriz (solo futuros, dedup por order_id) */}
+      {importCsvOpen && (
+        <ImportCsvModal
+          existingPositions={positions}
+          addPosition={addPosition}
+          onClose={() => setImportCsvOpen(false)}
         />
       )}
 
@@ -13924,6 +14167,7 @@ function ConsolidatedSection({
   onDelete,
   onUpdatePrice,
   onAdd,
+  onImportCsv,
   onRefresh,
   refreshing,
 }) {
@@ -14050,6 +14294,28 @@ function ConsolidatedSection({
             >
               <Plus size={14} strokeWidth={2.2} />
               Agregar posición
+            </button>
+          )}
+          {onImportCsv && (
+            <button
+              onClick={onImportCsv}
+              className="flex items-center gap-2"
+              title="Importar operaciones desde el CSV de Cocos/Matriz (solo futuros)"
+              style={{
+                backgroundColor: "transparent",
+                color: C.muted,
+                border: `1px solid ${C.border}`,
+                padding: "8px 12px",
+                cursor: "pointer",
+                fontSize: 12,
+                fontWeight: 600,
+                fontFamily: "'Roboto', sans-serif",
+                whiteSpace: "nowrap",
+              }}
+              onMouseEnter={(e) => { e.currentTarget.style.borderColor = C.borderStrong; e.currentTarget.style.color = C.text; }}
+              onMouseLeave={(e) => { e.currentTarget.style.borderColor = C.border; e.currentTarget.style.color = C.muted; }}
+            >
+              Importar CSV
             </button>
           )}
         </div>
