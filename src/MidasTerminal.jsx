@@ -14977,7 +14977,7 @@ function ConsolidatedRow({ group, bondPrices, futurePrices, stockPrices, fciPric
                     fontWeight: 600,
                     fontFamily: "'Roboto', sans-serif",
                   }}>
-                    {group.isClosed ? "Realizado" : "Histórico"}
+                    {group.isClosed ? "Realizado histórico" : "Histórico"}
                   </span>
                   <span style={{
                     fontSize: 12.5,
