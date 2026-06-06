@@ -21606,6 +21606,27 @@ function ScalpingDLRModule({ embedded = false } = {}) {
   const [alerts, setAlerts] = useState([]);
   const bufRef = useRef([]);
   const alertingRef = useRef(false);
+  const [, setTick] = useState(0);
+
+  // Rueda de futuros DLR: 10:00-15:00 ART, lun-vie.
+  const dlrFuturesOpen = () => {
+    const ar = new Date(new Date().toLocaleString("en-US", { timeZone: "America/Argentina/Buenos_Aires" }));
+    const d = ar.getDay();
+    if (d === 0 || d === 6) return false;
+    const m = ar.getHours() * 60 + ar.getMinutes();
+    return m >= 600 && m <= 900;
+  };
+  // Tiempo real en rueda: forzamos fetch cada 5s entre 10 y 15hs (el hook
+  // compartido pollea 10s y arranca 10:30; esto cubre 10:00-10:30 y acelera).
+  // Fuera de rueda solo tickeamos para refrescar el estado abierto/cerrado.
+  useEffect(() => {
+    const id = setInterval(() => {
+      setTick((t) => t + 1);
+      if (dlrFuturesOpen() && refresh) refresh();
+    }, 5000);
+    return () => clearInterval(id);
+  }, [refresh]);
+  const isOpen = dlrFuturesOpen();
 
   const jun = fp?.["DLRJUN26"] || null;
   const jul = fp?.["DLRJUL26"] || null;
@@ -21655,8 +21676,11 @@ function ScalpingDLRModule({ embedded = false } = {}) {
     <div style={embedded ? { marginTop: 22 } : { padding: "24px 32px", maxWidth: 1100, margin: "0 auto" }}>
       <div className="flex items-start justify-between" style={{ marginBottom: 14 }}>
         <div>
-          <h1 style={{ fontSize: embedded ? 15 : 22, fontWeight: 600, color: C.text, margin: 0, letterSpacing: embedded ? "0.04em" : "-0.01em", textTransform: embedded ? "uppercase" : "none" }}>Scalping DLR</h1>
-          {!embedded && <p style={{ fontSize: 12, color: C.muted, margin: "6px 0 0" }}>Libro vivo de futuros DLR + señales estructurales. Mismo feed que Matriz (Primary).</p>}
+          <div className="flex items-center gap-2">
+            <h1 style={{ fontSize: embedded ? 15 : 22, fontWeight: 600, color: C.text, margin: 0, letterSpacing: embedded ? "0.04em" : "-0.01em", textTransform: embedded ? "uppercase" : "none" }}>Scalping DLR</h1>
+            <span style={{ fontSize: 10, fontWeight: 700, color: isOpen ? C.green : C.dim, letterSpacing: "0.04em" }}>{isOpen ? "● EN VIVO · 5s" : "○ rueda cerrada"}</span>
+          </div>
+          {!embedded && <p style={{ fontSize: 12, color: C.muted, margin: "6px 0 0" }}>Libro vivo de futuros DLR (rueda 10-15hs) + señales estructurales. Mismo feed que Matriz.</p>}
         </div>
         <div className="flex items-center gap-2">
           <button onClick={() => setMuted((m) => !m)} title="Activar/silenciar alertas sonoras" style={{ border: `1px solid ${muted ? C.border : C.green}`, background: C.panel, color: muted ? C.dim : C.green, padding: "6px 10px", fontSize: 11, cursor: "pointer", fontWeight: 600 }}>{muted ? "Sonido OFF" : "Sonido ON"}</button>
