@@ -218,6 +218,7 @@ const NAV = [
       { id: "spread-cer-fija", label: "Spread CER / Fija", icon: Diff },
       { id: "desarbitrajes", label: "Desarbitrajes MEP", icon: Repeat },
       { id: "flujo-posiciones", label: "Flujo de Posiciones", icon: Activity },
+      { id: "scalping-dlr", label: "Scalping DLR", icon: TrendingUp },
     ],
   },
   {
@@ -871,6 +872,8 @@ export default function MidasTerminal() {
               <FuturosVsCaucionModule />
             ) : active === "sintetico-dlr" ? (
               <SinteticoDolarModule />
+            ) : active === "scalping-dlr" ? (
+              <ScalpingDLRModule />
             ) : active === "portfolio-ia" ? (
               <PortfolioIAModule onNavigate={setActive} />
             ) : active === "libro-operaciones" ? (
@@ -21595,6 +21598,144 @@ function CarryDlrWidget({ futurePrices }) {
  * ruido de asincronía, no plata. Sirve para detectar y juntar estadística.
  * Para volverlo ejecutable falta snapshot intradía sincrónico + puntas.
  */
+function ScalpingDLRModule() {
+  const dlrTickers = ["DLRJUN26", "DLRJUL26"];
+  const { prices: fp, loading, error, refresh, lastFetch } = useFuturePrices(dlrTickers);
+  const fxState = useDashboardFx();
+  const spot = fxState?.fx?.mayorista?.mid ?? null;
+
+  const [muted, setMuted] = useState(false);
+  const [alerts, setAlerts] = useState([]);
+  const bufRef = useRef([]);
+  const alertingRef = useRef(false);
+
+  const jun = fp?.["DLRJUN26"] || null;
+  const jul = fp?.["DLRJUL26"] || null;
+  const px = (o) => (o ? (o.last != null ? o.last : o.price) : null);
+  const junLast = px(jun);
+  const julLast = px(jul);
+
+  // Spread calendario JUL − JUN. Banda normal de la data diaria: ~26-30,5.
+  const calSpread = (junLast != null && julLast != null) ? (julLast - junLast) : null;
+  const CAL_LOW = 25, CAL_HIGH = 31;
+  const calOut = calSpread != null && (calSpread < CAL_LOW || calSpread > CAL_HIGH);
+
+  // Buffer de reversión sobre el último de JUN26 (z-score corto).
+  useEffect(() => {
+    if (junLast == null) return;
+    const b = bufRef.current;
+    b.push(junLast);
+    if (b.length > 30) b.shift();
+  }, [lastFetch]);
+
+  const rev = useMemo(() => {
+    const b = bufRef.current;
+    if (b.length < 8 || junLast == null) return null;
+    const m = b.reduce((s, x) => s + x, 0) / b.length;
+    const sd = Math.sqrt(b.reduce((s, x) => s + (x - m) ** 2, 0) / b.length);
+    return { z: sd > 0 ? (junLast - m) / sd : 0, mean: m, sd, n: b.length };
+  }, [lastFetch]);
+
+  // Alertas en flanco de subida (no spamea): spread fuera de banda o |z|>2.
+  useEffect(() => {
+    const conds = [];
+    if (calOut) conds.push(`Spread calendario ${calSpread.toFixed(1)} fuera de banda (${CAL_LOW}-${CAL_HIGH})`);
+    if (rev && Math.abs(rev.z) > 2) conds.push(`JUN26 ${rev.z > 0 ? "overshoot arriba" : "sobre-vendido abajo"} z=${rev.z.toFixed(1)} -> candidato a volver a ~${rev.mean.toFixed(1)}`);
+    const isAlerting = conds.length > 0;
+    if (isAlerting && !alertingRef.current) {
+      setAlerts((prev) => [{ t: Date.now(), msgs: conds }, ...prev].slice(0, 25));
+      if (!muted) flowBeep();
+    }
+    alertingRef.current = isAlerting;
+  }, [lastFetch]);
+
+  const basis = (junLast != null && spot) ? (junLast - spot) : null;
+  const fmt = (v, d = 2) => (v == null || !Number.isFinite(v) ? "—" : v.toLocaleString("es-AR", { minimumFractionDigits: d, maximumFractionDigits: d }));
+  const rows = [{ tk: "DLRJUN26", o: jun }, { tk: "DLRJUL26", o: jul }];
+
+  return (
+    <div style={{ padding: "24px 32px", maxWidth: 1100, margin: "0 auto" }}>
+      <div className="flex items-start justify-between" style={{ marginBottom: 14 }}>
+        <div>
+          <h1 style={{ fontSize: 22, fontWeight: 600, color: C.text, margin: 0 }}>Scalping DLR</h1>
+          <p style={{ fontSize: 12, color: C.muted, margin: "6px 0 0" }}>Libro vivo de futuros DLR + señales estructurales. Mismo feed que Matriz (Primary).</p>
+        </div>
+        <div className="flex items-center gap-2">
+          <button onClick={() => setMuted((m) => !m)} style={{ border: `1px solid ${C.border}`, background: C.panel, color: muted ? C.dim : C.text, padding: "6px 10px", fontSize: 11, cursor: "pointer" }}>{muted ? "Mute" : "Sonido"}</button>
+          <button onClick={() => refresh && refresh()} style={{ border: `1px solid ${C.border}`, background: C.panel, color: C.muted, padding: "6px 12px", fontSize: 11, cursor: "pointer" }}>Actualizar</button>
+        </div>
+      </div>
+
+      <div style={{ border: `1px solid ${C.border}`, background: "rgba(250,204,21,0.06)", padding: "8px 12px", marginBottom: 16, fontSize: 10.5, color: C.muted, lineHeight: 1.5 }}>
+        <b style={{ color: C.yellow }}>Señales estructurales, en validación.</b> No es flujo crudo (el OBI engaña, medido). Son candidatas: el logger guarda la data intradía para backtestearlas. Usalas como aviso, no como orden automática.
+      </div>
+
+      {error && <div style={{ color: C.red, fontSize: 11, marginBottom: 12 }}>Feed: {error}</div>}
+
+      <div style={{ border: `1px solid ${C.border}`, background: C.panel, marginBottom: 16, overflow: "hidden" }}>
+        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+          <thead>
+            <tr style={{ color: C.dim, fontSize: 10, letterSpacing: "0.08em", textTransform: "uppercase" }}>
+              <th style={{ textAlign: "left", padding: "9px 14px" }}>Ticker</th>
+              <th style={{ textAlign: "right", padding: "9px 14px" }}>Compra (x size)</th>
+              <th style={{ textAlign: "right", padding: "9px 14px" }}>Último</th>
+              <th style={{ textAlign: "right", padding: "9px 14px" }}>Venta (x size)</th>
+              <th style={{ textAlign: "right", padding: "9px 14px" }}>Vol</th>
+              <th style={{ textAlign: "right", padding: "9px 14px" }}>Settle</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map(({ tk, o }) => (
+              <tr key={tk} style={{ borderTop: `1px solid ${C.border}` }}>
+                <td style={{ padding: "10px 14px", color: C.text, fontWeight: 600 }}>{tk}</td>
+                <td style={{ padding: "10px 14px", textAlign: "right", color: C.green, fontVariantNumeric: "tabular-nums" }}>{o ? `${fmt(o.bid)} x${o.bidSz ?? "—"}` : "—"}</td>
+                <td style={{ padding: "10px 14px", textAlign: "right", color: C.text, fontWeight: 600, fontVariantNumeric: "tabular-nums" }}>{fmt(px(o))}</td>
+                <td style={{ padding: "10px 14px", textAlign: "right", color: C.red, fontVariantNumeric: "tabular-nums" }}>{o ? `${fmt(o.offer)} x${o.askSz ?? "—"}` : "—"}</td>
+                <td style={{ padding: "10px 14px", textAlign: "right", color: C.dim, fontVariantNumeric: "tabular-nums" }}>{o?.volume ? o.volume.toLocaleString("es-AR") : "—"}</td>
+                <td style={{ padding: "10px 14px", textAlign: "right", color: C.dim, fontVariantNumeric: "tabular-nums" }}>{fmt(o?.settlement)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      <div className="flex gap-3" style={{ marginBottom: 16, flexWrap: "wrap" }}>
+        <div style={{ flex: 1, minWidth: 240, border: `1px solid ${calOut ? C.red : C.border}`, background: C.panel, padding: 14 }}>
+          <div style={{ fontSize: 10, color: C.dim, letterSpacing: "0.08em", textTransform: "uppercase", marginBottom: 6 }}>Spread calendario (JUL - JUN)</div>
+          <div style={{ fontSize: 22, fontWeight: 700, color: calOut ? C.red : C.text, fontVariantNumeric: "tabular-nums" }}>{calSpread != null ? fmt(calSpread, 1) : "—"}</div>
+          <div style={{ fontSize: 10.5, color: C.muted, marginTop: 4 }}>Banda normal {CAL_LOW}-{CAL_HIGH} · {calOut ? "FUERA -> posible reversión" : "en banda"}</div>
+        </div>
+        <div style={{ flex: 1, minWidth: 240, border: `1px solid ${rev && Math.abs(rev.z) > 2 ? C.red : C.border}`, background: C.panel, padding: 14 }}>
+          <div style={{ fontSize: 10, color: C.dim, letterSpacing: "0.08em", textTransform: "uppercase", marginBottom: 6 }}>Reversión JUN26 (z-score corto)</div>
+          <div style={{ fontSize: 22, fontWeight: 700, color: rev && Math.abs(rev.z) > 2 ? C.red : C.text, fontVariantNumeric: "tabular-nums" }}>{rev ? `z ${fmt(rev.z, 1)}` : "—"}</div>
+          <div style={{ fontSize: 10.5, color: C.muted, marginTop: 4 }}>{rev ? `media ~${fmt(rev.mean, 1)} (${rev.n} muestras) · ${Math.abs(rev.z) > 2 ? "overshoot -> candidato a volver" : "normal"}` : "juntando muestras…"}</div>
+        </div>
+        <div style={{ flex: 1, minWidth: 240, border: `1px solid ${C.border}`, background: C.panel, padding: 14 }}>
+          <div style={{ fontSize: 10, color: C.dim, letterSpacing: "0.08em", textTransform: "uppercase", marginBottom: 6 }}>Basis JUN26 vs spot</div>
+          <div style={{ fontSize: 22, fontWeight: 700, color: C.text, fontVariantNumeric: "tabular-nums" }}>{basis != null ? `+${fmt(basis, 1)}` : "—"}</div>
+          <div style={{ fontSize: 10.5, color: C.muted, marginTop: 4 }}>{spot ? `spot mayorista ${fmt(spot)} · informativo` : "spot no disponible"}</div>
+        </div>
+      </div>
+
+      <div style={{ border: `1px solid ${C.border}`, background: C.panel, padding: 14 }}>
+        <div style={{ fontSize: 10, color: C.dim, letterSpacing: "0.08em", textTransform: "uppercase", marginBottom: 8 }}>Alertas ({alerts.length})</div>
+        {alerts.length === 0 ? (
+          <div style={{ fontSize: 11, color: C.muted }}>Sin alertas. Se disparan cuando el spread sale de banda o JUN26 hace overshoot (|z| mayor a 2).</div>
+        ) : (
+          <div style={{ display: "flex", flexDirection: "column", gap: 6, maxHeight: 220, overflowY: "auto" }}>
+            {alerts.map((a, i) => (
+              <div key={i} style={{ fontSize: 11, borderLeft: `2px solid ${C.yellow}`, paddingLeft: 8 }}>
+                <span style={{ color: C.dim, fontSize: 10 }}>{new Date(a.t).toLocaleTimeString("es-AR")}</span>
+                {a.msgs.map((m, j) => <div key={j} style={{ color: C.muted }}>{m}</div>)}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function DesarbitrajesModule() {
   const { live, canje, loading, error, refetch } = useSovereignMep();
   const fmt = (n, d = 2) =>
