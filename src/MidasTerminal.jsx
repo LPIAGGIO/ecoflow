@@ -12369,7 +12369,43 @@ function getTodayStringAR() {
  * mezclarse con la operativa del día. Esto evita que mañana se vean las
  * ventas de hoy mezcladas con las de mañana.
  */
-function filterClosedToToday(closedGroups, futurePrices) {
+/**
+ * Hook: trae el ÚLTIMO settle por ticker de futures_settlements_history.
+ * Esa tabla solo tiene días COMPLETADOS (el worker carga el settle del día a
+ * la 1 AM siguiente), así que su última fila = el settle del día hábil anterior
+ * = la base correcta para el P&L del día. Es estable: a diferencia del feed
+ * (mtr_market_data.settlement), que tras el cierre rola al settle de HOY y
+ * rompe el cálculo del diario por la tarde/noche.
+ */
+function useLatestFutureSettles(tickers) {
+  const [settles, setSettles] = useState({});
+  const key = (tickers || []).filter(Boolean).join(",");
+  useEffect(() => {
+    const ts = (tickers || []).filter(Boolean);
+    if (ts.length === 0) { setSettles({}); return; }
+    let cancelled = false;
+    (async () => {
+      try {
+        const { data } = await supabase
+          .from("futures_settlements_history")
+          .select("ticker, settlement, settle_date")
+          .in("ticker", ts)
+          .order("settle_date", { ascending: false });
+        if (cancelled || !data) return;
+        const m = {};
+        for (const r of data) {
+          const t = (r.ticker || "").toUpperCase();
+          if (!(t in m)) m[t] = Number(r.settlement); // primera (orden desc) = más reciente
+        }
+        setSettles(m);
+      } catch (e) { /* noop */ }
+    })();
+    return () => { cancelled = true; };
+  }, [key]);
+  return settles;
+}
+
+function filterClosedToToday(closedGroups, futurePrices, priorSettleByTicker) {
   const today = getTodayStringAR();
   const result = [];
 
@@ -12386,10 +12422,13 @@ function filterClosedToToday(closedGroups, futurePrices) {
     if (todayPairs.length === 0) continue;
 
     const isFuture = g.instrument_type === "future";
-    // Settle del día anterior para futuros (el feed lo trae como settlement
-    // durante la rueda de hoy). Base para el P&L del DÍA de lotes arrastrados.
+    // Settle del día anterior para futuros. Preferimos priorSettleByTicker
+    // (futures_settlements_history → estable, siempre el settle de AYER) y caemos
+    // al feed solo si falta. NO usar solo el feed: tras el cierre rola al settle
+    // de HOY y daría el P&L del día contra la base equivocada.
+    const fromHist = priorSettleByTicker ? Number(priorSettleByTicker[g.ticker]) : NaN;
     const priorSettle = isFuture
-      ? Number(futurePrices?.[g.ticker]?.settlement)
+      ? (Number.isFinite(fromHist) ? fromHist : Number(futurePrices?.[g.ticker]?.settlement))
       : null;
 
     // Dos números:
@@ -14306,13 +14345,21 @@ function ConsolidatedSection({
     [pending, confirmed]
   );
 
+  // Settle del día anterior por ticker de futuro (fuente estable, NO el feed
+  // que rola tras el cierre). Base para el P&L del día de las cerradas hoy.
+  const futureTickers = useMemo(
+    () => Array.from(new Set((positions || []).filter((p) => p.instrument_type === "future").map((p) => (p.ticker || "").toUpperCase()))),
+    [positions]
+  );
+  const futurePriorSettles = useLatestFutureSettles(futureTickers);
+
   const open = allConsolidated.filter((g) => !g.isClosed);
   const closedAll = allConsolidated.filter((g) => g.isClosed);
   // Solo mostramos las cerradas DE HOY: filtramos los pares sintéticos
   // por fecha de venta y recalculamos P&L solo del día. Esto evita que
   // ventas de días previos se mezclen con las de hoy en la UI y en el
   // total realizado del banner.
-  const closed = filterClosedToToday(closedAll, futurePrices);
+  const closed = filterClosedToToday(closedAll, futurePrices, futurePriorSettles);
 
   return (
     <div style={{ marginBottom: 24 }}>
