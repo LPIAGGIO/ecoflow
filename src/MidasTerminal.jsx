@@ -21495,6 +21495,7 @@ function PositionFlowModule({ alertsSys }) {
       <p style={{ fontSize: 10.5, color: C.dim, marginTop: 10, letterSpacing: "0.02em", lineHeight: 1.5 }}>
         Flujo = desbalance del libro: <b style={{ color: C.green }}>C</b> compra (bid) vs <b style={{ color: C.red }}>V</b> venta (ask). El número central es el OBI (−100 a +100). Resultado = ganancia/pérdida vs tu PPP. En <b style={{ color: C.text }}>Alertas</b> cargá varios niveles por instrumento (Enter): <b style={{ color: C.green }}>▲</b> dispara al subir, <b style={{ color: C.red }}>▼</b> al bajar (según dónde esté el precio al cargarlo). Cada nivel suena/notifica una vez y queda tachado (✓). Refresca cada 15s. Instrumentos sin libro (ej. FCI) no se muestran.
       </p>
+      <ScalpingDLRModule embedded />
     </div>
   );
 }
@@ -21580,7 +21581,6 @@ function CarryDlrWidget({ futurePrices }) {
       <div style={{ fontSize: 10, color: C.dim, lineHeight: 1.5 }}>
         El short del front rolando cosecha el contango (Sharpe 1,5 en régimen calmo, comisión 0 en Cocos). Riesgo: salto devaluatorio — dimensionar por la cola, no por Kelly. Esperado neto de saltos ≈ 11-17%/año según tu visión. Indicativo, no es señal de operar.
       </div>
-      <ScalpingDLRModule embedded />
     </div>
   );
 }
