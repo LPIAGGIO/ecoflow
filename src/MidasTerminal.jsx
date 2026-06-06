@@ -218,7 +218,6 @@ const NAV = [
       { id: "spread-cer-fija", label: "Spread CER / Fija", icon: Diff },
       { id: "desarbitrajes", label: "Desarbitrajes MEP", icon: Repeat },
       { id: "flujo-posiciones", label: "Flujo de Posiciones", icon: Activity },
-      { id: "scalping-dlr", label: "Scalping DLR", icon: TrendingUp },
     ],
   },
   {
@@ -872,8 +871,6 @@ export default function MidasTerminal() {
               <FuturosVsCaucionModule />
             ) : active === "sintetico-dlr" ? (
               <SinteticoDolarModule />
-            ) : active === "scalping-dlr" ? (
-              <ScalpingDLRModule />
             ) : active === "portfolio-ia" ? (
               <PortfolioIAModule onNavigate={setActive} />
             ) : active === "libro-operaciones" ? (
@@ -21583,6 +21580,7 @@ function CarryDlrWidget({ futurePrices }) {
       <div style={{ fontSize: 10, color: C.dim, lineHeight: 1.5 }}>
         El short del front rolando cosecha el contango (Sharpe 1,5 en régimen calmo, comisión 0 en Cocos). Riesgo: salto devaluatorio — dimensionar por la cola, no por Kelly. Esperado neto de saltos ≈ 11-17%/año según tu visión. Indicativo, no es señal de operar.
       </div>
+      <ScalpingDLRModule embedded />
     </div>
   );
 }
@@ -21598,7 +21596,7 @@ function CarryDlrWidget({ futurePrices }) {
  * ruido de asincronía, no plata. Sirve para detectar y juntar estadística.
  * Para volverlo ejecutable falta snapshot intradía sincrónico + puntas.
  */
-function ScalpingDLRModule() {
+function ScalpingDLRModule({ embedded = false } = {}) {
   const dlrTickers = ["DLRJUN26", "DLRJUL26"];
   const { prices: fp, loading, error, refresh, lastFetch } = useFuturePrices(dlrTickers);
   const fxState = useDashboardFx();
@@ -21654,11 +21652,11 @@ function ScalpingDLRModule() {
   const rows = [{ tk: "DLRJUN26", o: jun }, { tk: "DLRJUL26", o: jul }];
 
   return (
-    <div style={{ padding: "24px 32px", maxWidth: 1100, margin: "0 auto" }}>
+    <div style={embedded ? { marginTop: 22 } : { padding: "24px 32px", maxWidth: 1100, margin: "0 auto" }}>
       <div className="flex items-start justify-between" style={{ marginBottom: 14 }}>
         <div>
-          <h1 style={{ fontSize: 22, fontWeight: 600, color: C.text, margin: 0 }}>Scalping DLR</h1>
-          <p style={{ fontSize: 12, color: C.muted, margin: "6px 0 0" }}>Libro vivo de futuros DLR + señales estructurales. Mismo feed que Matriz (Primary).</p>
+          <h1 style={{ fontSize: embedded ? 15 : 22, fontWeight: 600, color: C.text, margin: 0, letterSpacing: embedded ? "0.04em" : "-0.01em", textTransform: embedded ? "uppercase" : "none" }}>Scalping DLR</h1>
+          {!embedded && <p style={{ fontSize: 12, color: C.muted, margin: "6px 0 0" }}>Libro vivo de futuros DLR + señales estructurales. Mismo feed que Matriz (Primary).</p>}
         </div>
         <div className="flex items-center gap-2">
           <button onClick={() => setMuted((m) => !m)} title="Activar/silenciar alertas sonoras" style={{ border: `1px solid ${muted ? C.border : C.green}`, background: C.panel, color: muted ? C.dim : C.green, padding: "6px 10px", fontSize: 11, cursor: "pointer", fontWeight: 600 }}>{muted ? "Sonido OFF" : "Sonido ON"}</button>
