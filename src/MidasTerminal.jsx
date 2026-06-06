@@ -8971,6 +8971,13 @@ function TotalCard({ positions, fx, bondPrices, futurePrices, stockPrices, fciPr
     ? (dailyPnlShown / dailyTotals.base) * 100
     : null;
 
+  // P&L del día desglosado por ticker (estilo "P&L Diario" de Cocos).
+  const [dailyDetailOpen, setDailyDetailOpen] = useState(false);
+  const dailyByTicker = useMemo(
+    () => computeDailyPnlByTicker(positions, bondPrices, futurePrices, stockPrices, futureAdjLookup, fciPrices, fx, valuationCurrency),
+    [positions, bondPrices, futurePrices, stockPrices, futureAdjLookup, fciPrices, fx, valuationCurrency]
+  );
+
   // Cash neto en la moneda activa: convertimos el saldo de cada moneda
   // a la valuationCurrency seleccionada y los sumamos. Si el saldo de
   // alguna moneda no se puede convertir (FX no cargó todavía), esa
@@ -9105,7 +9112,19 @@ function TotalCard({ positions, fx, bondPrices, futurePrices, stockPrices, fciPr
           <span style={{ fontSize: 10, color: C.dim, fontFamily: "'Roboto', sans-serif" }}>
             hoy
           </span>
+          {showDaily && !dailyTotals.marketClosed && dailyByTicker.length > 0 && (
+            <button
+              onClick={() => setDailyDetailOpen(true)}
+              title="Ver P&L del día por ticker (estilo Cocos)"
+              style={{ background: "none", border: "none", color: C.accent, cursor: "pointer", fontSize: 10, textDecoration: "underline", fontFamily: "'Roboto', sans-serif", padding: 0 }}
+            >
+              detalle
+            </button>
+          )}
         </div>
+      )}
+      {dailyDetailOpen && (
+        <DailyPnlModal rows={dailyByTicker} currency={valuationCurrency} onClose={() => setDailyDetailOpen(false)} />
       )}
       {!showDaily && showPnl && (
         <div style={{ marginBottom: 12 }} />
@@ -12449,6 +12468,94 @@ function filterClosedToToday(closedGroups, futurePrices) {
   }
 
   return result;
+}
+
+/**
+ * P&L del día agrupado por TICKER (estilo pantalla "P&L Diario" de Cocos):
+ * junta el realizado de hoy + el MTM de lo abierto en UN solo número por ticker.
+ * Sumar computeDailyPnL sobre las ops crudas ya da el total diario por ticker
+ * (cada compra arrastrada vs settle de ayer, cada venta de hoy vs su entrada).
+ * Para no-futuros cerrados hoy se suma su realizado (el contado no entra en el
+ * MTM de arriba). La suma de todos los tickers = el "P&L hoy" del banner.
+ */
+function computeDailyPnlByTicker(positions, bondPrices, futurePrices, stockPrices, futureAdjLookup, fciPrices, fx, valuationCurrency) {
+  const byTicker = new Map();
+  const add = (ticker, amt) => {
+    const t = (ticker || "—").toString().toUpperCase();
+    byTicker.set(t, (byTicker.get(t) || 0) + amt);
+  };
+  for (const p of positions || []) {
+    const d = computeDailyPnL(p, bondPrices, futurePrices, stockPrices, futureAdjLookup, fciPrices);
+    if (!d || d.pnl == null || !Number.isFinite(d.pnl)) continue;
+    const cur = p.currency || p.entry_currency || "ARS";
+    const conv = convertValue(d.pnl, cur, valuationCurrency, fx);
+    if (conv != null) add(p.ticker, conv);
+  }
+  try {
+    const all = consolidatePositions(positions, bondPrices, futurePrices, fciPrices);
+    const closedToday = filterClosedToToday(all.filter((g) => g.isClosed), futurePrices);
+    for (const g of closedToday) {
+      if (g.instrument_type === "future") continue; // futuros ya están en el MTM de arriba
+      const conv = convertValue(g.realizedPnl ?? 0, g.currency || "ARS", valuationCurrency, fx);
+      if (conv != null) add(g.ticker, conv);
+    }
+  } catch (e) { /* noop */ }
+  return Array.from(byTicker.entries())
+    .map(([ticker, pnl]) => ({ ticker, pnl }))
+    .filter((r) => Math.abs(r.pnl) > 0.005)
+    .sort((a, b) => b.pnl - a.pnl);
+}
+
+/** Modal "P&L Diario" estilo Cocos: tabla ACTIVO / GANANCIA / PÉRDIDA por ticker. */
+function DailyPnlModal({ rows, currency, onClose }) {
+  const cur = currency === "ARS" ? "ARS" : "USD";
+  const gan = rows.filter((r) => r.pnl > 0).reduce((s, r) => s + r.pnl, 0);
+  const per = rows.filter((r) => r.pnl < 0).reduce((s, r) => s + r.pnl, 0);
+  const total = gan + per;
+  const mono = "'JetBrains Mono', monospace";
+  return (
+    <div onClick={onClose} style={{ position: "fixed", inset: 0, backgroundColor: "rgba(0,0,0,0.55)", backdropFilter: "blur(2px)", zIndex: 110, display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }}>
+      <div onClick={(e) => e.stopPropagation()} style={{ backgroundColor: C.panel, border: `1px solid ${C.borderStrong}`, width: "100%", maxWidth: 560, maxHeight: "85vh", overflowY: "auto" }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "12px 16px", borderBottom: `1px solid ${C.border}` }}>
+          <span style={{ fontSize: 13, fontWeight: 700, color: C.text }}>P&amp;L Diario · por ticker</span>
+          <button onClick={onClose} style={{ background: "none", border: "none", color: C.muted, cursor: "pointer", fontSize: 16 }}>×</button>
+        </div>
+        <table style={{ width: "100%", borderCollapse: "collapse" }}>
+          <thead>
+            <tr style={{ color: C.dim, fontSize: 10, letterSpacing: "0.1em" }}>
+              <th style={{ padding: "8px 14px", textAlign: "left" }}>ACTIVO</th>
+              <th style={{ padding: "8px 14px", textAlign: "right" }}>GANANCIA</th>
+              <th style={{ padding: "8px 14px", textAlign: "right" }}>PÉRDIDA</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((r) => (
+              <tr key={r.ticker} style={{ borderTop: `1px solid ${C.border}` }}>
+                <td style={{ padding: "9px 14px", color: C.text, fontSize: 12, fontWeight: 600 }}>{r.ticker}</td>
+                <td style={{ padding: "9px 14px", textAlign: "right", color: r.pnl > 0 ? C.green : C.dim, fontFamily: mono, fontSize: 12 }}>{r.pnl > 0 ? fmtCurrencyValue(r.pnl, cur) : "-"}</td>
+                <td style={{ padding: "9px 14px", textAlign: "right", color: r.pnl < 0 ? C.red : C.dim, fontFamily: mono, fontSize: 12 }}>{r.pnl < 0 ? fmtCurrencyValue(r.pnl, cur) : "-"}</td>
+              </tr>
+            ))}
+            {rows.length === 0 && (
+              <tr><td colSpan={3} style={{ padding: 18, textAlign: "center", color: C.muted, fontSize: 11 }}>Sin P&amp;L del día (mercado cerrado o sin movimiento).</td></tr>
+            )}
+          </tbody>
+          <tfoot>
+            <tr style={{ borderTop: `2px solid ${C.borderStrong}` }}>
+              <td style={{ padding: "10px 14px", color: C.text, fontSize: 11, fontWeight: 700 }}>TOTAL PARCIAL</td>
+              <td style={{ padding: "10px 14px", textAlign: "right", color: "#04140a", backgroundColor: C.green, fontFamily: mono, fontSize: 12, fontWeight: 700 }}>{gan > 0 ? fmtCurrencyValue(gan, cur) : "-"}</td>
+              <td style={{ padding: "10px 14px", textAlign: "right", color: "#fff", backgroundColor: C.red, fontFamily: mono, fontSize: 12, fontWeight: 700 }}>{per < 0 ? fmtCurrencyValue(per, cur) : "-"}</td>
+            </tr>
+            <tr>
+              <td colSpan={3} style={{ padding: "11px 14px", textAlign: "center", color: total >= 0 ? C.green : C.red, fontFamily: mono, fontSize: 14, fontWeight: 700, borderTop: `1px solid ${C.border}` }}>
+                TOTAL {fmtCurrencyValue(total, cur)}
+              </td>
+            </tr>
+          </tfoot>
+        </table>
+      </div>
+    </div>
+  );
 }
 
 function ticker_isBondLike(instrumentType) {
