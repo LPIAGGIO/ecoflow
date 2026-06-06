@@ -21661,7 +21661,8 @@ function ScalpingDLRModule() {
           <p style={{ fontSize: 12, color: C.muted, margin: "6px 0 0" }}>Libro vivo de futuros DLR + señales estructurales. Mismo feed que Matriz (Primary).</p>
         </div>
         <div className="flex items-center gap-2">
-          <button onClick={() => setMuted((m) => !m)} style={{ border: `1px solid ${C.border}`, background: C.panel, color: muted ? C.dim : C.text, padding: "6px 10px", fontSize: 11, cursor: "pointer" }}>{muted ? "Mute" : "Sonido"}</button>
+          <button onClick={() => setMuted((m) => !m)} title="Activar/silenciar alertas sonoras" style={{ border: `1px solid ${muted ? C.border : C.green}`, background: C.panel, color: muted ? C.dim : C.green, padding: "6px 10px", fontSize: 11, cursor: "pointer", fontWeight: 600 }}>{muted ? "Sonido OFF" : "Sonido ON"}</button>
+          <button onClick={() => flowBeep()} title="Probar el beep (y habilitar el audio del navegador)" style={{ border: `1px solid ${C.border}`, background: C.panel, color: C.text, padding: "6px 10px", fontSize: 11, cursor: "pointer" }}>Probar</button>
           <button onClick={() => refresh && refresh()} style={{ border: `1px solid ${C.border}`, background: C.panel, color: C.muted, padding: "6px 12px", fontSize: 11, cursor: "pointer" }}>Actualizar</button>
         </div>
       </div>
