@@ -22054,12 +22054,15 @@ function CarryDlrWidget({ futurePrices }) {
     .sort((a, b) => a.ekey - b.ekey);
   if (contracts.length < 2) return <div style={{ padding: "30px 20px", textAlign: "center", color: C.muted, fontSize: 11 }}>Esperando curva DLR…</div>;
   const front = contracts[0], second = contracts[1];
-  const months = Math.max(1, second.ekey - front.ekey);
+  // ekey es AAMM (ej DLRJUN26 -> 2606). Convertir a meses-absolutos para
+  // medir bien la distancia entre contratos (incluso cruzando fin de año).
+  const ekeyMonths = (k) => Math.floor(k / 100) * 12 + (k % 100);
+  const months = Math.max(1, ekeyMonths(second.ekey) - ekeyMonths(front.ekey));
   const rollMonthly = (second.price / front.price - 1) / months;
   const rollAnnual = (Math.pow(second.price / front.price, 12 / months) - 1) * 100;
-  const fy = Math.floor((front.ekey - 1) / 12), fm = ((front.ekey - 1) % 12) + 1;
-  const exp = new Date(fy, fm, 0);
-  const daysToExp = Math.max(0, Math.round((exp - new Date()) / 86400000));
+  // Dias al vencimiento real del front (ultimo dia habil del mes, via registry).
+  const frontReg = DLR_REGISTRY.find((r) => r.ticker === front.ticker);
+  const daysToExp = frontReg ? daysToExpiry(frontReg.maturityDate) : null;
   const fmt = (n, d = 2) => Number(n).toLocaleString("es-AR", { minimumFractionDigits: d, maximumFractionDigits: d });
   const fav = rollAnnual >= 18;
   return (
@@ -22073,7 +22076,7 @@ function CarryDlrWidget({ futurePrices }) {
         {fav ? "▼ Contango empinado — short del front favorable" : "Contango plano — carry del short flojo"}
       </div>
       <div className="flex" style={{ gap: 18, fontSize: 11.5 }}>
-        <div><span style={{ color: C.dim }}>Vence front en </span><b style={{ color: daysToExp <= 5 ? C.accent : C.text }}>{daysToExp}d</b>{daysToExp <= 5 ? " · rolar" : ""}</div>
+        <div><span style={{ color: C.dim }}>Vence front en </span><b style={{ color: daysToExp != null && daysToExp <= 5 ? C.accent : C.text }}>{daysToExp != null ? `${daysToExp}d` : "—"}</b>{daysToExp != null && daysToExp <= 5 ? " · rolar" : ""}</div>
         <div><span style={{ color: C.dim }}>Tamaño tope-cola </span><b style={{ color: C.text }}>~0,5-0,75x</b></div>
       </div>
       <div style={{ fontSize: 10, color: C.dim, lineHeight: 1.5 }}>
