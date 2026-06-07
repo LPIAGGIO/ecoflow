@@ -2571,19 +2571,32 @@ function NotificationsTab({ userId }) {
 
   const handleConnect = useCallback(async () => {
     setConnecting(true);
-    const code = (
-      (typeof crypto !== "undefined" && crypto.randomUUID)
-        ? crypto.randomUUID()
-        : String(Math.random()).slice(2) + String(Date.now())
-    ).replace(/-/g, "").slice(0, 16);
-    await supabase.from("telegram_links").upsert(
-      {
-        user_id: userId, link_code: code,
-        link_code_expires_at: new Date(Date.now() + 15 * 60 * 1000).toISOString(),
-        updated_at: new Date().toISOString(),
-      },
-      { onConflict: "user_id" }
-    );
+    // Reusar el codigo vigente si todavia no vencio: asi tocar "Conectar"
+    // varias veces (o tener varias pestanas) no invalida los intentos previos.
+    let code = null;
+    const { data: existing } = await supabase.from("telegram_links")
+      .select("link_code,link_code_expires_at")
+      .eq("user_id", userId).maybeSingle();
+    if (
+      existing && existing.link_code && existing.link_code_expires_at &&
+      new Date(existing.link_code_expires_at).getTime() > Date.now() + 30 * 1000
+    ) {
+      code = existing.link_code;
+    } else {
+      code = (
+        (typeof crypto !== "undefined" && crypto.randomUUID)
+          ? crypto.randomUUID()
+          : String(Math.random()).slice(2) + String(Date.now())
+      ).replace(/-/g, "").slice(0, 16);
+      await supabase.from("telegram_links").upsert(
+        {
+          user_id: userId, link_code: code,
+          link_code_expires_at: new Date(Date.now() + 15 * 60 * 1000).toISOString(),
+          updated_at: new Date().toISOString(),
+        },
+        { onConflict: "user_id" }
+      );
+    }
     window.open(`https://t.me/${TG_BOT_USERNAME}?start=${code}`, "_blank", "noopener");
     // Pollear hasta que el worker grabe el chat_id (max ~2 min).
     let ticks = 0;
