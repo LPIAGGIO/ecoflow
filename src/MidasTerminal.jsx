@@ -20584,8 +20584,8 @@ function DashboardModule() {
           )}
         </DashboardWidget>
 
-        {/* Widget: Carry DLR · Señal (operacionaliza la investigación del short-front carry) */}
-        <DashboardWidget title="Carry DLR · Señal" minHeight={280}>
+        {/* Widget: Cobertura DLR · costo del hedge (la tasa que el carry en pesos debe superar) */}
+        <DashboardWidget title="Cobertura DLR · Costo del hedge" minHeight={280}>
           {() => <CarryDlrWidget futurePrices={futurePrices} />}
         </DashboardWidget>
 
@@ -22047,40 +22047,60 @@ function PositionFlowWidget() {
 /* Widget: Carry DLR · Señal — operacionaliza la investigación del short-front carry.
  * Roll yield (lo que cosecha el short rolando) + señal + roll countdown + tamaño
  * tope-cola. Reusa futurePrices (curva DLR) del Dashboard. Indicativo. */
+// Mide el COSTO del hedge de LP: estar long el front DLR para cubrir su carry
+// en pesos cuesta la tasa implicita de devaluacion ya embebida en el futuro.
+// Esa tasa es el "hurdle": el carry en pesos tiene que superarla para que el
+// sintetico en dolares quede positivo. (Es el lado de LP, no el short-front.)
 function CarryDlrWidget({ futurePrices }) {
+  const fxState = useDashboardFx();
+  const spot = fxState?.fx?.mayorista?.mid ?? null;
   const contracts = Object.entries(futurePrices || {})
     .filter(([t, v]) => /^DLR[A-Z]{3}\d{2}$/.test(t) && v && (v.price != null || v.last != null) && flowExpiryKey(t) != null)
     .map(([t, v]) => ({ ticker: t, ekey: flowExpiryKey(t), price: v.price ?? v.last }))
     .sort((a, b) => a.ekey - b.ekey);
-  if (contracts.length < 2) return <div style={{ padding: "30px 20px", textAlign: "center", color: C.muted, fontSize: 11 }}>Esperando curva DLR…</div>;
-  const front = contracts[0], second = contracts[1];
-  // ekey es AAMM (ej DLRJUN26 -> 2606). Convertir a meses-absolutos para
-  // medir bien la distancia entre contratos (incluso cruzando fin de año).
-  const ekeyMonths = (k) => Math.floor(k / 100) * 12 + (k % 100);
-  const months = Math.max(1, ekeyMonths(second.ekey) - ekeyMonths(front.ekey));
-  const rollMonthly = (second.price / front.price - 1) / months;
-  const rollAnnual = (Math.pow(second.price / front.price, 12 / months) - 1) * 100;
-  // Dias al vencimiento real del front (ultimo dia habil del mes, via registry).
-  const frontReg = DLR_REGISTRY.find((r) => r.ticker === front.ticker);
-  const daysToExp = frontReg ? daysToExpiry(frontReg.maturityDate) : null;
+  if (contracts.length < 1) return <div style={{ padding: "30px 20px", textAlign: "center", color: C.muted, fontSize: 11 }}>Esperando curva DLR…</div>;
+
   const fmt = (n, d = 2) => Number(n).toLocaleString("es-AR", { minimumFractionDigits: d, maximumFractionDigits: d });
-  const fav = rollAnnual >= 18;
+  const enrich = (c) => {
+    const reg = DLR_REGISTRY.find((r) => r.ticker === c.ticker);
+    const days = reg ? daysToExpiry(reg.maturityDate) : null;
+    const basis = spot ? (c.price / spot - 1) * 100 : null;
+    const tna = (spot && days) ? implicitTNA(c.price, spot, days) * 100 : null;
+    const tem = (spot && days) ? implicitTEM(c.price, spot, days) * 100 : null;
+    return { ...c, days, basis, tna, tem };
+  };
+  const front = enrich(contracts[0]);
+  const second = contracts[1] ? enrich(contracts[1]) : null;
+
+  if (spot == null) {
+    return (
+      <div style={{ padding: "14px 16px", fontSize: 11, color: C.muted, lineHeight: 1.6 }}>
+        Esperando spot mayorista (A3500) para calcular el costo del hedge.<br />
+        Front: {front.ticker} {fmt(front.price, 1)}{second ? ` · ${second.ticker} ${fmt(second.price, 1)}` : ""}
+      </div>
+    );
+  }
+
   return (
     <div style={{ padding: "14px 16px", display: "flex", flexDirection: "column", gap: 11 }}>
       <div>
-        <div style={{ fontSize: 10, color: C.dim, letterSpacing: "0.06em", textTransform: "uppercase" }}>Roll yield anualizado · cosecha el short</div>
-        <div style={{ fontSize: 30, fontWeight: 700, color: rollAnnual >= 0 ? C.green : C.red, fontVariantNumeric: "tabular-nums", lineHeight: 1.1 }}>{rollAnnual >= 0 ? "+" : ""}{fmt(rollAnnual, 1)}%</div>
-        <div style={{ fontSize: 11, color: C.muted, marginTop: 2, fontVariantNumeric: "tabular-nums" }}>{front.ticker} {fmt(front.price, 1)} → {second.ticker} {fmt(second.price, 1)} ({rollMonthly >= 0 ? "+" : ""}{fmt(rollMonthly * 100, 2)}%/mes)</div>
+        <div style={{ fontSize: 10, color: C.dim, letterSpacing: "0.06em", textTransform: "uppercase" }}>Costo del hedge · tasa implícita de devaluación (front)</div>
+        <div style={{ fontSize: 30, fontWeight: 700, color: C.text, fontVariantNumeric: "tabular-nums", lineHeight: 1.1 }}>{front.tna != null ? `${front.tna >= 0 ? "+" : ""}${fmt(front.tna, 1)}% TNA` : "—"}</div>
+        <div style={{ fontSize: 11, color: C.muted, marginTop: 2, fontVariantNumeric: "tabular-nums" }}>
+          {front.ticker} {fmt(front.price, 1)} vs spot {fmt(spot, 1)} · basis {front.basis >= 0 ? "+" : ""}{fmt(front.basis, 2)}%{front.tem != null ? ` (${fmt(front.tem, 2)}%/mes)` : ""}
+        </div>
       </div>
-      <div style={{ fontSize: 12, color: fav ? C.green : C.muted, fontWeight: 600 }}>
-        {fav ? "▼ Contango empinado — short del front favorable" : "Contango plano — carry del short flojo"}
+      <div style={{ fontSize: 11.5, color: C.muted, lineHeight: 1.5 }}>
+        Tu carry en pesos tiene que rendir <b style={{ color: C.text }}>más de {front.tna != null ? `${fmt(front.tna, 1)}% TNA` : "esta tasa"}</b> para que el sintético en dólares te quede positivo, ya cubierto del salto.
       </div>
-      <div className="flex" style={{ gap: 18, fontSize: 11.5 }}>
-        <div><span style={{ color: C.dim }}>Vence front en </span><b style={{ color: daysToExp != null && daysToExp <= 5 ? C.accent : C.text }}>{daysToExp != null ? `${daysToExp}d` : "—"}</b>{daysToExp != null && daysToExp <= 5 ? " · rolar" : ""}</div>
-        <div><span style={{ color: C.dim }}>Tamaño tope-cola </span><b style={{ color: C.text }}>~0,5-0,75x</b></div>
+      <div className="flex" style={{ gap: 18, fontSize: 11.5, flexWrap: "wrap" }}>
+        <div><span style={{ color: C.dim }}>Vence front en </span><b style={{ color: front.days != null && front.days <= 5 ? C.accent : C.text }}>{front.days != null ? `${front.days}d` : "—"}</b>{front.days != null && front.days <= 5 ? " · rolar" : ""}</div>
+        {second && second.tna != null && (
+          <div><span style={{ color: C.dim }}>{second.ticker.replace("DLR", "")} cuesta </span><b style={{ color: C.text }}>{second.tna >= 0 ? "+" : ""}{fmt(second.tna, 1)}% TNA</b></div>
+        )}
       </div>
       <div style={{ fontSize: 10, color: C.dim, lineHeight: 1.5 }}>
-        El short del front rolando cosecha el contango (Sharpe 1,5 en régimen calmo, comisión 0 en Cocos). Riesgo: salto devaluatorio — dimensionar por la cola, no por Kelly. Esperado neto de saltos ≈ 11-17%/año según tu visión. Indicativo, no es señal de operar.
+        Es lo que cuesta cubrirse con el LONG del front (la devaluación ya embebida en el precio del futuro). Si tu tasa en pesos la supera, ganás en dólares aun cubierto del salto. El detalle por bono está en Analizadores → Sintético DLR / Carry Trade. Indicativo.
       </div>
     </div>
   );
