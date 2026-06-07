@@ -3744,8 +3744,7 @@ function Landing({ onLogin }) {
         <div style={{ display: "inline-block", fontSize: 11, letterSpacing: "0.18em", textTransform: "uppercase", color: C.accent, marginBottom: 16 }}>Terminal financiera · Mercado argentino</div>
         <h1 style={{ fontFamily: "'Raleway', sans-serif", fontWeight: 800, fontSize: 42, lineHeight: 1.12, margin: 0, color: C.text }}>Todo el mercado argentino,<br />en una sola pantalla</h1>
         <p style={{ fontSize: 16, color: C.muted, maxWidth: 600, margin: "20px auto 0", lineHeight: 1.6 }}>Cartera valuada en vivo, dólar futuro, carry, curvas de tasas, cotizaciones y estadísticas del BCRA. Datos en tiempo real, las cuentas hechas.</p>
-        <div style={{ marginTop: 30 }} className="flex items-center justify-center"><LoginBtn big /></div>
-        <div style={{ fontSize: 12, color: C.dim, marginTop: 12 }}>Gratis con tu cuenta de Gmail · sin tarjeta</div>
+        <div style={{ fontSize: 12, color: C.dim, marginTop: 18 }}>Gratis con tu cuenta de Gmail · sin tarjeta</div>
       </div>
       <div style={{ maxWidth: 1000, margin: "0 auto", padding: "20px 28px 50px", display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: 16 }}>
         {features.map((f) => (
