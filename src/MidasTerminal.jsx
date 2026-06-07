@@ -2410,9 +2410,7 @@ function SettingsDashboard({ userId, brokers, brokersLoading, refetchBrokers }) 
       <div className="flex" style={{ borderBottom: `1px solid ${C.border}`, marginBottom: 24 }}>
         {[
           { id: "brokers", label: "Cuentas vinculadas" },
-          { id: "notifs", label: "Notificaciones" },
-          { id: "usage", label: "Uso de API" },
-          { id: "activity", label: "Actividad" },
+          { id: "notifs", label: "Notificaciones Telegram" },
         ].map((t) => {
           const isActive = tab === t.id;
           return (
@@ -2461,8 +2459,6 @@ function SettingsDashboard({ userId, brokers, brokersLoading, refetchBrokers }) 
         />
       )}
       {tab === "notifs" && <NotificationsTab userId={userId} />}
-      {tab === "usage" && <ApiUsageWidget userId={userId} />}
-      {tab === "activity" && <ApiActivityWidget userId={userId} />}
     </div>
   );
 }
@@ -3096,9 +3092,12 @@ function BrokerCard({ id, meta, linked, positionCount, userId, refetchBrokers, c
         </div>
         </div>
 
-        {/* Efectivo de IOL — foto que escribe el worker iol-cash-sync */}
-        {showCash && (
-          <div style={{ borderTop: `1px solid ${C.border}`, padding: "10px 16px 12px" }}>
+        {/* IOL conectado: efectivo + cupo de API lado a lado + actividad desplegable */}
+        {isConnected && id === "iol" && (
+          <div style={{ borderTop: `1px solid ${C.border}` }}>
+            <div style={{ display: "flex", flexWrap: "wrap" }}>
+              {showCash && (
+                <div style={{ flex: "1 1 320px", minWidth: 0, padding: "12px 16px" }}>
             <div
               style={{
                 fontSize: 10,
@@ -3154,6 +3153,22 @@ function BrokerCard({ id, meta, linked, positionCount, userId, refetchBrokers, c
                 Actualizado: {new Date(cashSnapshotAt).toLocaleString("es-AR")}
               </div>
             )}
+                </div>
+              )}
+              {/* Cupo de API — al lado del efectivo, con divisor vertical */}
+              <div
+                style={{
+                  flex: "1 1 280px",
+                  minWidth: 0,
+                  padding: "12px 16px",
+                  borderLeft: showCash ? `1px solid ${C.border}` : "none",
+                }}
+              >
+                <IolQuotaInline userId={userId} />
+              </div>
+            </div>
+            {/* Actividad de API — desplegable para no dominar la tarjeta */}
+            <IolActivityInline userId={userId} />
           </div>
         )}
       </div>
@@ -3485,6 +3500,126 @@ function ActivityPlaceholder() {
         resultado y si fue servida desde cache. Útil para auditar el consumo del cupo
         y debugear cuando algo no funciona.
       </div>
+    </div>
+  );
+}
+
+/* ─── Versiones compactas para integrar dentro de la tarjeta de IOL ─── */
+
+// Cupo de API en version compacta (sin card propia): va al lado del efectivo.
+function IolQuotaInline({ userId }) {
+  const { data: quota, loading } = useApiQuota(userId, "iol");
+  if (loading) {
+    return <div style={{ padding: "10px 0" }}><Loader2 size={15} color={C.muted} className="eco-spin" strokeWidth={1.5} /></div>;
+  }
+  if (!quota) {
+    return <div style={{ fontSize: 11, color: C.dim, paddingTop: 4 }}>Sin actividad de API este mes.</div>;
+  }
+  const made = quota.calls_made || 0;
+  const limit = quota.calls_limit || 25000;
+  const extra = quota.extra_calls_made || 0;
+  const pct = limit > 0 ? Math.min(100, (made / limit) * 100) : 0;
+  const over = made >= limit, near = pct >= 80;
+  const barColor = over ? C.red : near ? C.yellow : C.green;
+  const fmt = (n) => Number(n).toLocaleString("es-AR");
+  const periodStart = quota.period_start ? new Date(quota.period_start + "T00:00:00") : null;
+  let proj = null;
+  if (periodStart) {
+    const now = new Date();
+    const daysElapsed = Math.max(1, Math.floor((now - periodStart) / 86400000) + 1);
+    const daysInMonth = new Date(periodStart.getFullYear(), periodStart.getMonth() + 1, 0).getDate();
+    const dailyRate = made / daysElapsed;
+    proj = { dailyRate, projectedTotal: Math.round(dailyRate * daysInMonth) };
+  }
+  return (
+    <div>
+      <div className="flex items-baseline justify-between" style={{ marginBottom: 8 }}>
+        <span style={{ fontSize: 10, letterSpacing: "0.12em", textTransform: "uppercase", color: C.dim }}>
+          Cupo de API
+        </span>
+        <span>
+          <span style={{ fontSize: 15, fontWeight: 700, color: C.text, fontVariantNumeric: "tabular-nums" }}>{fmt(made)}</span>
+          <span style={{ fontSize: 11, color: C.muted }}> / {fmt(limit)}</span>
+        </span>
+      </div>
+      <div style={{ height: 6, borderRadius: 3, background: C.deep, overflow: "hidden", marginBottom: 6 }}>
+        <div style={{ width: `${pct}%`, height: "100%", background: barColor, transition: "width .3s, background .3s" }} />
+      </div>
+      <div className="flex items-center justify-between" style={{ fontSize: 10.5 }}>
+        <span style={{ color: barColor }}>{pct.toFixed(1)}% usado</span>
+        <span style={{ color: C.muted }}>{over ? "cupo agotado" : `${fmt(Math.max(0, limit - made))} disp.`}</span>
+      </div>
+      {extra > 0 && (
+        <div style={{ fontSize: 10.5, color: C.red, marginTop: 6 }}>
+          {fmt(extra)} extra · ${fmt(extra * IOL_EXTRA_CALL_COST_ARS)}
+        </div>
+      )}
+      {proj && (
+        <div style={{ fontSize: 10, color: C.dim, marginTop: 6, lineHeight: 1.5 }}>
+          ~{fmt(Math.round(proj.dailyRate))}/día · proy. fin de mes {fmt(proj.projectedTotal)}{" "}
+          {proj.projectedTotal > limit ? "(supera cupo)" : "(dentro)"}
+        </div>
+      )}
+      {quota.last_call_at && (
+        <div style={{ fontSize: 9.5, color: C.dim, marginTop: 3 }}>
+          Última call: {new Date(quota.last_call_at).toLocaleString("es-AR")}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Actividad de API en seccion desplegable dentro de la tarjeta.
+function IolActivityInline({ userId }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div style={{ borderTop: `1px solid ${C.border}` }}>
+      <button
+        onClick={() => setOpen((o) => !o)}
+        style={{
+          width: "100%", display: "flex", alignItems: "center", justifyContent: "space-between",
+          background: "transparent", border: "none", cursor: "pointer", padding: "10px 16px", color: C.muted,
+        }}
+      >
+        <span style={{ fontSize: 10, letterSpacing: "0.12em", textTransform: "uppercase" }}>Actividad de API</span>
+        <ChevronDown size={14} style={{ transform: open ? "rotate(180deg)" : "none", transition: "transform .15s" }} />
+      </button>
+      {open && <IolActivityList userId={userId} />}
+    </div>
+  );
+}
+
+function IolActivityList({ userId }) {
+  const { data, loading } = useApiCallLog(userId, 60);
+  if (loading) {
+    return <div style={{ padding: "0 16px 16px" }}><Loader2 size={15} color={C.muted} className="eco-spin" strokeWidth={1.5} /></div>;
+  }
+  if (!data.length) {
+    return <div style={{ padding: "0 16px 14px", fontSize: 11, color: C.dim }}>Sin actividad reciente.</div>;
+  }
+  const fmtTime = (t) => new Date(t).toLocaleString("es-AR", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  const statusColor = (s) => (s === 0 ? C.red : s >= 200 && s < 300 ? C.green : s >= 400 ? C.red : C.yellow);
+  return (
+    <div>
+      <div className="flex" style={{ padding: "6px 16px", fontSize: 9, letterSpacing: "0.1em", textTransform: "uppercase", color: C.dim, fontWeight: 600 }}>
+        <span style={{ flex: "0 0 116px" }}>Hora</span>
+        <span style={{ flex: 1 }}>Endpoint</span>
+        <span style={{ flex: "0 0 84px" }}>Categoría</span>
+        <span style={{ flex: "0 0 44px", textAlign: "right" }}>St</span>
+        <span style={{ flex: "0 0 48px", textAlign: "right" }}>ms</span>
+      </div>
+      <div style={{ maxHeight: 320, overflowY: "auto" }}>
+        {data.map((r) => (
+          <div key={r.id} className="flex items-center" style={{ padding: "6px 16px", fontSize: 10.5, borderTop: `1px solid ${C.faint}` }}>
+            <span style={{ flex: "0 0 116px", color: C.dim, fontVariantNumeric: "tabular-nums" }}>{fmtTime(r.called_at)}</span>
+            <span style={{ flex: 1, color: C.text, fontFamily: "'JetBrains Mono', monospace", fontSize: 10 }}>{r.endpoint}</span>
+            <span style={{ flex: "0 0 84px", color: C.muted }}>{API_CATEGORY_LABELS[r.category] || r.category || "—"}</span>
+            <span style={{ flex: "0 0 44px", textAlign: "right", color: statusColor(r.status), fontWeight: 600 }}>{r.status === 0 ? "ERR" : r.status}</span>
+            <span style={{ flex: "0 0 48px", textAlign: "right", color: C.dim, fontVariantNumeric: "tabular-nums" }}>{r.duration_ms ?? "—"}</span>
+          </div>
+        ))}
+      </div>
+      <div style={{ padding: "8px 16px 12px", fontSize: 9.5, color: C.dim, textAlign: "right" }}>últimas {data.length}</div>
     </div>
   );
 }
