@@ -3582,7 +3582,10 @@ function IolActivityInline({ userId }) {
         }}
       >
         <span style={{ fontSize: 10, letterSpacing: "0.12em", textTransform: "uppercase" }}>Actividad de API</span>
-        <ChevronDown size={14} style={{ transform: open ? "rotate(180deg)" : "none", transition: "transform .15s" }} />
+        <span className="flex items-center" style={{ gap: 5, color: C.accent, fontSize: 10, letterSpacing: "0.04em" }}>
+          {open ? "ocultar" : "ver detalle"}
+          <ChevronDown size={14} style={{ transform: open ? "rotate(180deg)" : "none", transition: "transform .15s" }} />
+        </span>
       </button>
       {open && <IolActivityList userId={userId} />}
     </div>
