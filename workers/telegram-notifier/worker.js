@@ -1,28 +1,26 @@
 /**
  * Worker telegram-notifier: servicio permanente (24/7) que conecta Midas con
- * Telegram. Dos responsabilidades, en dos loops independientes:
+ * Telegram. Vincula cuentas (deep-link) y dispara notificaciones server-side.
  *
- *   1) LINKING (long-poll getUpdates): procesa los mensajes que llegan al bot.
- *      - "/start <code>"  -> vincula el chat con el user_id de Midas (deep-link
- *                            generado desde Configuracion > Notificaciones).
- *      - "/start"         -> mensaje de bienvenida con instrucciones.
- *      - "/stop"          -> pausa las notificaciones (enabled=false).
- *      - "/ping"/"/help"  -> respuesta simple.
+ * Loops:
+ *   1) LINKING (long-poll getUpdates): /start <code> (vincular), /stop (pausar),
+ *      /ping, /help, y comandos de consulta on-demand: /pnl, /dlr, /canje.
+ *   2) ALERTAS (cada 30s): evalua, por usuario y segun sus preferencias
+ *      (notification_prefs.prefs jsonb), cada categoria:
+ *        - price_alerts        (alertas de precio multinivel; default ON)
+ *        - scalping_dlr        (calendario JUL-JUN + reversion z-score; solo en rueda)
+ *        - desarbitrajes       (spread del canje de soberanos > umbral)
+ *        - futures_adjustments (ajustes diarios pendientes de confirmar)
+ *        - vencimientos        (futuro front / lecaps / boncaps por vencer)
+ *        - eod_summary         (resumen de cierre, 1 vez/dia habil a la hora elegida)
  *
- *   2) ALERTAS (cada 30s): evalua las price_alerts pendientes de cada usuario
- *      vinculado + habilitado que tenga la preferencia price_alerts activa, y
- *      dispara el mensaje a Telegram cuando el precio cruza el nivel.
+ * Anti-spam: cada disparo recurrente chequea notification_log (cooldown por
+ * dedup_key). Las price_alerts son one-shot (triggered_at) con claim atomico.
  *
- * Resolucion de precio: replica EXACTAMENTE la logica del front (api/mtr-md.js
- * para futuros DLR, data912 para el resto), asi la alerta server-side dispara
- * igual que la del browser.
- *
- * Anti doble-disparo: el claim de la alerta es atomico
- * (update ... where triggered_at is null returning *). Quien gana la carrera
- * (este worker o el browser) es el unico que notifica. No hay doble Telegram.
+ * Resolucion de precio: espejo del front (api/mtr-md.js para futuros DLR,
+ * data912 para el resto).
  *
  * Env (.env): TELEGRAM_BOT_TOKEN, SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY.
- * PM2: servicio permanente fork autorestart (no es cron).
  */
 require("dotenv").config();
 const { createClient } = require("@supabase/supabase-js");
@@ -33,7 +31,7 @@ const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
 if (!TOKEN || !SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
-  console.error("Faltan env vars (TELEGRAM_BOT_TOKEN / SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY). Verifica .env");
+  console.error("Faltan env vars (TELEGRAM_BOT_TOKEN / SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY).");
   process.exit(1);
 }
 
@@ -44,51 +42,118 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
 
 const API = `https://api.telegram.org/bot${TOKEN}`;
 const ALERT_INTERVAL_MS = 30 * 1000;
-const POLL_TIMEOUT_S = 30; // long-poll de getUpdates
+const POLL_TIMEOUT_S = 30;
+const FUTURE_MULT = 1000; // DLR: 1000 USD por contrato
 
-// Preferencias por defecto si el usuario todavia no guardo ninguna.
-const DEFAULT_PREFS = { price_alerts: true };
+// Parametros de senales (defaults; el front usa los mismos).
+const CAL_BAND = [25, 31];      // spread calendario JUL-JUN
+const Z_THRESHOLD = 2;          // reversion z-score sobre JUN26
+const Z_BUF_MAX = 40, Z_BUF_MIN = 20;
+const DESARB_SPREAD_PCT = 1.5;  // umbral spread del canje (alto: el cross-bond real es ~0, el resto es ruido de precios stale)
+const VENC_DAYS = 7;            // avisar si vence en <= N dias
+const EOD_DEFAULT_HOUR = 18;    // hora ART del resumen de cierre
 
-/* ─────────────── Telegram helpers ─────────────── */
+// Cooldowns (ms) para no repetir la misma senal.
+const CD = {
+  scalping: 30 * 60 * 1000,
+  desarb: 60 * 60 * 1000,
+  vencimiento: 20 * 60 * 60 * 1000, // ~1 vez/dia por ticker
+};
+
+/* ─────────────── Telegram ─────────────── */
 
 async function tg(method, body) {
   const r = await fetch(`${API}/${method}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
+    method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body || {}),
   });
   const j = await r.json().catch(() => ({}));
-  if (!j.ok) console.error(`[tg:${method}] error:`, j.description || r.status);
+  if (!j.ok) console.error(`[tg:${method}]`, j.description || r.status);
   return j;
 }
+const sendMessage = (chatId, text) =>
+  tg("sendMessage", { chat_id: chatId, text, parse_mode: "HTML", disable_web_page_preview: true });
 
-function sendMessage(chatId, text) {
-  return tg("sendMessage", { chat_id: chatId, text, parse_mode: "HTML", disable_web_page_preview: true });
+/* ─────────────── Tiempo ART ─────────────── */
+
+function artParts() {
+  const ar = new Date(new Date().toLocaleString("en-US", { timeZone: "America/Argentina/Buenos_Aires" }));
+  const y = ar.getFullYear(), m = String(ar.getMonth() + 1).padStart(2, "0"), d = String(ar.getDate()).padStart(2, "0");
+  return { dateStr: `${y}-${m}-${d}`, hour: ar.getHours(), minute: ar.getMinutes(), dow: ar.getDay() };
+}
+const isBizDay = (dow) => dow !== 0 && dow !== 6;
+// Rueda de futuros DLR: 10-15 ART, lun-vie.
+function inRueda() {
+  const p = artParts();
+  return isBizDay(p.dow) && p.hour >= 10 && p.hour < 15;
+}
+// Rueda de bonos BYMA: ~11-17 ART, lun-vie (para no disparar canje con precios stale).
+function inBymaHours() {
+  const p = artParts();
+  return isBizDay(p.dow) && p.hour >= 11 && p.hour < 17;
+}
+const PLAZO_LABEL = { "000": "CI", "001": "24hs", "002": "48hs" };
+
+/* ─────────────── Vencimientos (port de bondMaturities/dlrContracts) ─────────────── */
+
+const MONTH_LETTER = { E: 1, F: 2, M: 3, A: 4, Y: 5, J: 6, L: 7, G: 8, S: 9, O: 10, N: 11, D: 12 };
+const MONTH_AR = { ENE: 1, FEB: 2, MAR: 3, ABR: 4, MAY: 5, JUN: 6, JUL: 7, AGO: 8, SEP: 9, OCT: 10, NOV: 11, DIC: 12 };
+
+// Bonos CER que LP tiene y no estan en el registry de carry (se agregan a mano).
+const CER_REGISTRY = { TZX27: "2027-06-30", TZXD7: "2027-12-15", TZXO7: "2027-10-30" };
+const BOND_REGISTRY_DATES = {
+  S15Y6: "2026-05-15", S29Y6: "2026-05-29", S17L6: "2026-07-17", S31L6: "2026-07-31",
+  S14G6: "2026-08-14", S31G6: "2026-08-31", S30S6: "2026-09-30", S30O6: "2026-10-30", S30N6: "2026-11-30",
+  T30J6: "2026-06-30", T15E7: "2027-01-15", T30A7: "2027-04-30", T31Y7: "2027-05-31", T30J7: "2027-06-30",
+  TTM26: "2026-03-16", TTJ26: "2026-06-30", TTS26: "2026-09-15", TTD26: "2026-12-15",
+};
+function lastBusinessDayOfMonth(year, month) {
+  const d = new Date(Date.UTC(year, month, 0));
+  const dow = d.getUTCDay();
+  if (dow === 6) d.setUTCDate(d.getUTCDate() - 1);
+  else if (dow === 0) d.setUTCDate(d.getUTCDate() - 2);
+  return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}-${String(d.getUTCDate()).padStart(2, "0")}`;
+}
+// Resuelve maturityDate (ISO) de un ticker. null si no se conoce.
+function maturityOf(ticker) {
+  const t = (ticker || "").toUpperCase().trim();
+  if (BOND_REGISTRY_DATES[t]) return BOND_REGISTRY_DATES[t];
+  if (CER_REGISTRY[t]) return CER_REGISTRY[t];
+  // Futuro DLR: DLR + MES_AR + AA
+  let m = /^DLR([A-Z]{3})(\d{2})$/.exec(t);
+  if (m && MONTH_AR[m[1]]) return lastBusinessDayOfMonth(2000 + parseInt(m[2], 10), MONTH_AR[m[1]]);
+  // TT + letra + 2 digitos
+  m = /^TT([EFMAYJLGSOND])(\d{2})$/.exec(t);
+  if (m && MONTH_LETTER[m[1]]) return `${2000 + parseInt(m[2], 10)}-${String(MONTH_LETTER[m[1]]).padStart(2, "0")}-30`;
+  // [ST] + DD + letra + 1 digito
+  m = /^([ST])(\d{2})([EFMAYJLGSOND])(\d)$/.exec(t);
+  if (m && MONTH_LETTER[m[3]]) {
+    const day = parseInt(m[2], 10);
+    if (day >= 1 && day <= 31) return `${2020 + parseInt(m[4], 10)}-${String(MONTH_LETTER[m[3]]).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+  }
+  return null;
+}
+// Dias hasta vencimiento (T+1, igual que el front). null si no hay fecha.
+function daysToMaturity(maturityDate) {
+  if (!maturityDate) return null;
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  const exp = new Date(maturityDate + "T00:00:00");
+  return Math.max(0, Math.round((exp - today) / 86400000) - 1);
 }
 
-/* ─────────────── Resolucion de precio (espejo del front) ─────────────── */
+/* ─────────────── Precios (espejo del front) ─────────────── */
 
-const LAST_FRESH_MS = 30 * 60 * 1000;
-const LAST_INTRADAY_MS = 36 * 60 * 60 * 1000;
+const LAST_FRESH_MS = 30 * 60 * 1000, LAST_INTRADAY_MS = 36 * 60 * 60 * 1000;
+const isDlrFuture = (t) => /^(DLR)([A-Z]{3})(\d{2})$/.test((t || "").toUpperCase().trim().replace("/", ""));
+const symbolToApp = (s) => (s || "").replace("/", "");
 
-// app ticker "DLRJUN26" -> true si es un futuro DLR (mismo regex que api/mtr-md).
-function isDlrFuture(appTicker) {
-  return /^(DLR)([A-Z]{3})(\d{2})$/.test((appTicker || "").toUpperCase().trim().replace("/", ""));
-}
-// symbol de la tabla "DLR/JUN26" -> app ticker "DLRJUN26".
-const symbolToApp = (symbol) => (symbol || "").replace("/", "");
-
-// Replica rowToPriceEntry de api/mtr-md.js: prioriza last fresco > mid > last
-// intradia > settlement. Devuelve el precio elegido (o null).
 function futurePrice(row, nowMs) {
   const last = row.last != null ? Number(row.last) : null;
   const bid = row.bid != null ? Number(row.bid) : null;
   const offer = row.ask != null ? Number(row.ask) : null;
   const settlement = row.settlement != null ? Number(row.settlement) : null;
   const midpoint = bid != null && offer != null ? (bid + offer) / 2 : null;
-  const lastDate = row.last_ts ? new Date(row.last_ts).getTime() : null;
-  const lastAge = lastDate != null ? nowMs - lastDate : Infinity;
-
+  const lastAge = row.last_ts ? nowMs - new Date(row.last_ts).getTime() : Infinity;
   if (last != null && lastAge <= LAST_FRESH_MS) return last;
   if (midpoint != null) return midpoint;
   if (last != null && lastAge <= LAST_INTRADAY_MS) return last;
@@ -96,118 +161,341 @@ function futurePrice(row, nowMs) {
   return null;
 }
 
-// Mapa de precios de futuros DLR { "DLRJUN26": 1472, ... } leyendo mtr_market_data.
-async function loadFuturesMap() {
+// Devuelve { price: {app:precio}, settle: {app:settlement} } de mtr_market_data.
+async function loadFutures() {
   const { data, error } = await supabase.from("mtr_market_data").select("*");
-  if (error) { console.error("[futures] error:", error.message); return {}; }
-  const nowMs = Date.now();
-  const map = {};
+  if (error) { console.error("[futures]", error.message); return { price: {}, settle: {} }; }
+  const nowMs = Date.now(), price = {}, settle = {};
   for (const row of data || []) {
+    const app = symbolToApp(row.symbol);
     const p = futurePrice(row, nowMs);
-    if (p != null) map[symbolToApp(row.symbol)] = p;
+    if (p != null) price[app] = p;
+    if (row.settlement != null) settle[app] = Number(row.settlement);
   }
-  return map;
+  return { price, settle };
 }
 
-// Mapa de precios no-futuros { symbol: precio } desde data912 (mismas fuentes
-// que /api/data912). Campo `c` = ultimo, igual que flowResolve del front.
-async function loadData912Map() {
-  const SOURCES = [
-    "https://data912.com/live/arg_bonds",
-    "https://data912.com/live/arg_notes",
-    "https://data912.com/live/arg_stocks",
-    "https://data912.com/live/arg_cedears",
-  ];
+// { symbol: { c, pct } } desde data912 (bonos/letras/acciones/cedears).
+let _d912cache = null, _d912ts = 0;
+async function loadData912() {
+  if (_d912cache && Date.now() - _d912ts < 12000) return _d912cache;
+  const SRC = ["arg_bonds", "arg_notes", "arg_stocks", "arg_cedears"].map((s) => `https://data912.com/live/${s}`);
   const map = {};
-  await Promise.all(SOURCES.map(async (url) => {
+  await Promise.all(SRC.map(async (url) => {
     try {
       const r = await fetch(url, { headers: { "User-Agent": "Midas/0.1" } });
       if (!r.ok) return;
-      const arr = await r.json();
-      for (const x of Array.isArray(arr) ? arr : []) {
-        if (x && x.symbol && x.c != null) map[x.symbol] = Number(x.c);
+      for (const x of (await r.json()) || []) {
+        if (x && x.symbol && x.c != null) map[x.symbol] = { c: Number(x.c), pct: x.pct_change != null ? Number(x.pct_change) : null };
       }
-    } catch (e) { console.error("[data912] error:", e.message); }
+    } catch (e) { console.error("[data912]", e.message); }
   }));
+  _d912cache = map; _d912ts = Date.now();
   return map;
 }
 
-/* ─────────────── Loop de alertas ─────────────── */
+// Ultimo settle por ticker ANTERIOR a la fecha dada (para P&L del dia).
+async function loadYestSettles(beforeDate) {
+  const { data } = await supabase.from("futures_settlements_history")
+    .select("ticker,settle_date,settlement").lt("settle_date", beforeDate)
+    .order("settle_date", { ascending: false });
+  const m = {};
+  for (const r of data || []) if (!(r.ticker in m)) m[r.ticker] = Number(r.settlement);
+  return m;
+}
 
-async function alertLoop() {
-  try {
-    // 1) Usuarios vinculados + habilitados.
-    const { data: links } = await supabase
-      .from("telegram_links")
-      .select("user_id,chat_id")
-      .not("chat_id", "is", null)
-      .eq("enabled", true);
-    if (!links || links.length === 0) return;
+/* ─────────────── Cooldown / log ─────────────── */
 
-    const userIds = links.map((l) => l.user_id);
-    const chatByUser = Object.fromEntries(links.map((l) => [l.user_id, l.chat_id]));
+async function recentlySent(userId, kind, dedupKey, withinMs) {
+  const since = new Date(Date.now() - withinMs).toISOString();
+  const { data } = await supabase.from("notification_log").select("id")
+    .eq("user_id", userId).eq("kind", kind).eq("dedup_key", dedupKey).gt("sent_at", since).limit(1);
+  return Boolean(data && data.length);
+}
+function logSent(userId, kind, dedupKey, title, body) {
+  return supabase.from("notification_log").insert({ user_id: userId, kind, dedup_key: dedupKey, title, body });
+}
 
-    // 2) Preferencias de esos usuarios.
-    const { data: prefRows } = await supabase
-      .from("notification_prefs").select("user_id,prefs").in("user_id", userIds);
-    const prefsByUser = Object.fromEntries((prefRows || []).map((p) => [p.user_id, p.prefs || {}]));
-    const wantsPriceAlerts = (uid) => {
-      const p = prefsByUser[uid] || DEFAULT_PREFS;
-      return p.price_alerts !== false; // default ON
-    };
-    const activeUsers = userIds.filter(wantsPriceAlerts);
-    if (activeUsers.length === 0) return;
+/* ─────────────── Posiciones ─────────────── */
 
-    // 3) Alertas pendientes de esos usuarios.
-    const { data: alerts } = await supabase
-      .from("price_alerts")
-      .select("id,user_id,ticker,price,dir")
-      .is("triggered_at", null)
-      .in("user_id", activeUsers);
-    if (!alerts || alerts.length === 0) return;
+// { user_id: [ {type, ticker, net} ] } consolidado (net != 0, sin FCI).
+async function loadPositions(userIds) {
+  const { data } = await supabase.from("positions")
+    .select("user_id,instrument_type,ticker,quantity,operation_type").in("user_id", userIds);
+  const byUser = {};
+  const acc = {};
+  for (const p of data || []) {
+    const k = `${p.user_id}|${p.instrument_type}|${p.ticker}`;
+    if (!acc[k]) acc[k] = { user_id: p.user_id, type: p.instrument_type, ticker: p.ticker, net: 0 };
+    const q = Number(p.quantity) || 0;
+    acc[k].net += p.operation_type === "sell" ? -q : q;
+  }
+  for (const v of Object.values(acc)) {
+    if (Math.abs(v.net) < 1e-6 || v.type === "fci") continue;
+    (byUser[v.user_id] = byUser[v.user_id] || []).push(v);
+  }
+  return byUser;
+}
 
-    // 4) Cargar precios: futuros siempre; data912 solo si hay alertas no-futuro.
-    const futMap = await loadFuturesMap();
-    const needsData912 = alerts.some((a) => !isDlrFuture(a.ticker));
-    const d912 = needsData912 ? await loadData912Map() : {};
+/* ─────────────── Contexto del loop ─────────────── */
 
-    // 5) Evaluar y disparar.
-    for (const a of alerts) {
-      const tk = (a.ticker || "").toUpperCase().trim();
-      const price = isDlrFuture(tk) ? futMap[tk] : d912[a.ticker];
-      if (price == null) continue;
-      const level = Number(a.price);
-      const hit = a.dir === "up" ? price >= level : price <= level;
-      if (!hit) continue;
+function prefOn(prefs, key, defaultOn) {
+  const v = (prefs || {})[key];
+  return defaultOn ? v !== false : v === true;
+}
 
-      // Claim atomico: solo notifica quien marca triggered_at (vs el browser).
-      const { data: claimed } = await supabase
-        .from("price_alerts")
-        .update({ triggered_at: new Date().toISOString() })
-        .eq("id", a.id)
-        .is("triggered_at", null)
-        .select("id");
-      if (!claimed || claimed.length === 0) continue; // otro lo tomo primero
+async function loadContext() {
+  const { data: links } = await supabase.from("telegram_links")
+    .select("user_id,chat_id").not("chat_id", "is", null).eq("enabled", true);
+  if (!links || !links.length) return { users: [] };
+  const ids = links.map((l) => l.user_id);
+  const { data: prefRows } = await supabase.from("notification_prefs").select("user_id,prefs").in("user_id", ids);
+  const prefsBy = Object.fromEntries((prefRows || []).map((p) => [p.user_id, p.prefs || {}]));
+  const users = links.map((l) => ({ userId: l.user_id, chatId: l.chat_id, prefs: prefsBy[l.user_id] || {} }));
+  return { users };
+}
 
-      const arrow = a.dir === "up" ? "🎯 ▲" : "🛑 ▼";
-      const txt = `${arrow} <b>${a.ticker}</b>\nPrecio <b>${price}</b> cruzo tu alerta (${a.dir === "up" ? "sube a" : "baja a"} ${level}).`;
-      await sendMessage(chatByUser[a.user_id], txt);
-      await supabase.from("notification_log").insert({
-        user_id: a.user_id, kind: "price_alert",
-        dedup_key: `${a.ticker}|${level}|${a.dir}`,
-        title: `${a.ticker} ${level}`, body: `precio ${price}`,
-      });
-      console.log(`[alert] ${a.user_id} ${a.ticker} ${a.dir} ${level} @ ${price}`);
-    }
-  } catch (e) {
-    console.error("[alertLoop] error:", e.message);
+/* ─────────────── Evaluadores ─────────────── */
+
+async function evalPriceAlerts(users, fut) {
+  const subs = users.filter((u) => prefOn(u.prefs, "price_alerts", true));
+  if (!subs.length) return;
+  const ids = subs.map((u) => u.userId);
+  const { data: alerts } = await supabase.from("price_alerts")
+    .select("id,user_id,ticker,price,dir").is("triggered_at", null).in("user_id", ids);
+  if (!alerts || !alerts.length) return;
+  const chatBy = Object.fromEntries(subs.map((u) => [u.userId, u.chatId]));
+  let d912 = null;
+  if (alerts.some((a) => !isDlrFuture(a.ticker))) d912 = await loadData912();
+  for (const a of alerts) {
+    const tk = (a.ticker || "").toUpperCase().trim();
+    const price = isDlrFuture(tk) ? fut.price[tk] : (d912 && d912[a.ticker] ? d912[a.ticker].c : null);
+    if (price == null) continue;
+    const level = Number(a.price);
+    if (!(a.dir === "up" ? price >= level : price <= level)) continue;
+    const { data: claimed } = await supabase.from("price_alerts")
+      .update({ triggered_at: new Date().toISOString() }).eq("id", a.id).is("triggered_at", null).select("id");
+    if (!claimed || !claimed.length) continue;
+    await sendMessage(chatBy[a.user_id],
+      `${a.dir === "up" ? "🎯 ▲" : "🛑 ▼"} <b>${a.ticker}</b>\nPrecio <b>${price}</b> cruzo tu alerta (${a.dir === "up" ? "sube a" : "baja a"} ${level}).`);
+    await logSent(a.user_id, "price_alert", `${a.ticker}|${level}|${a.dir}`, `${a.ticker} ${level}`, `precio ${price}`);
+    console.log(`[alert] ${a.user_id} ${a.ticker} ${a.dir} ${level} @ ${price}`);
   }
 }
 
-/* ─────────────── Loop de vinculacion (getUpdates) ─────────────── */
+// Senales de scalping DLR (market-wide; solo en rueda con precios vivos).
+const zbuf = [];
+function buildScalpingSignals(fut) {
+  const jun = fut.price["DLRJUN26"], jul = fut.price["DLRJUL26"];
+  const sigs = [];
+  if (jun != null && jul != null) {
+    const cal = jul - jun;
+    if (cal < CAL_BAND[0]) sigs.push({ key: "cal_low", text: `📐 Spread calendario JUL-JUN comprimido: <b>${cal.toFixed(1)}</b> (banda ${CAL_BAND[0]}-${CAL_BAND[1]}).` });
+    else if (cal > CAL_BAND[1]) sigs.push({ key: "cal_high", text: `📐 Spread calendario JUL-JUN ancho: <b>${cal.toFixed(1)}</b> (banda ${CAL_BAND[0]}-${CAL_BAND[1]}).` });
+  }
+  if (jun != null) {
+    zbuf.push(jun);
+    while (zbuf.length > Z_BUF_MAX) zbuf.shift();
+    if (zbuf.length >= Z_BUF_MIN) {
+      const mean = zbuf.reduce((a, b) => a + b, 0) / zbuf.length;
+      const sd = Math.sqrt(zbuf.reduce((a, b) => a + (b - mean) ** 2, 0) / zbuf.length);
+      if (sd > 0) {
+        const z = (jun - mean) / sd;
+        if (Math.abs(z) >= Z_THRESHOLD)
+          sigs.push({ key: z > 0 ? "z_high" : "z_low", text: `🔄 Reversion JUN26: z=<b>${z.toFixed(2)}</b> (precio ${jun} vs media ${mean.toFixed(1)}). ${z > 0 ? "Estirado arriba" : "Estirado abajo"}.` });
+      }
+    }
+  }
+  return sigs;
+}
+async function evalScalping(users, fut) {
+  const subs = users.filter((u) => prefOn(u.prefs, "scalping_dlr", false));
+  if (!subs.length || !inRueda()) return;
+  const sigs = buildScalpingSignals(fut);
+  if (!sigs.length) return;
+  for (const u of subs) {
+    for (const s of sigs) {
+      if (await recentlySent(u.userId, "scalping", s.key, CD.scalping)) continue;
+      await sendMessage(u.chatId, `${s.text}\n<i>Senal estructural EN VALIDACION — candidata, no es orden.</i>`);
+      await logSent(u.userId, "scalping", s.key, "scalping", s.text.replace(/<[^>]+>/g, ""));
+      console.log(`[scalping] ${u.userId} ${s.key}`);
+    }
+  }
+}
+
+async function evalDesarb(users) {
+  const subs = users.filter((u) => prefOn(u.prefs, "desarbitrajes", false));
+  // Solo en horario de mercado: fuera de rueda los precios son stale y el
+  // spread cross-bond es ruido (la investigacion mostro que el real es ~0).
+  if (!subs.length || !inBymaHours()) return;
+  const { data: rows } = await supabase.from("sovereign_mep_canje")
+    .select("plazo,comprar_pesos_vender_dolar,vender_dolar_caro,spread_pct").gte("spread_pct", DESARB_SPREAD_PCT);
+  if (!rows || !rows.length) return;
+  for (const r of rows) {
+    const key = `${r.plazo}`;
+    const plazo = PLAZO_LABEL[r.plazo] || r.plazo;
+    const text = `🔁 <b>Canje MEP ${plazo}</b>: spread <b>${Number(r.spread_pct).toFixed(2)}%</b>.\nComprar $ y vender USD via <b>${r.comprar_pesos_vender_dolar}</b>, vender USD caro via <b>${r.vender_dolar_caro}</b>.`;
+    for (const u of subs) {
+      if (await recentlySent(u.userId, "desarb", key, CD.desarb)) continue;
+      await sendMessage(u.chatId, `${text}\n<i>Indicativo (sin puntas, patas asincronicas). Verificar antes de operar.</i>`);
+      await logSent(u.userId, "desarb", key, `canje ${r.plazo}`, `spread ${r.spread_pct}`);
+      console.log(`[desarb] ${u.userId} ${r.plazo} ${r.spread_pct}`);
+    }
+  }
+}
+
+async function evalAdjustments(users) {
+  const subs = users.filter((u) => prefOn(u.prefs, "futures_adjustments", false));
+  if (!subs.length) return;
+  const ids = subs.map((u) => u.userId);
+  const { data: adjs } = await supabase.from("futures_daily_adjustments")
+    .select("id,user_id,ticker,adjustment_date,estimated_amount").eq("status", "pending").in("user_id", ids);
+  if (!adjs || !adjs.length) return;
+  const chatBy = Object.fromEntries(subs.map((u) => [u.userId, u.chatId]));
+  const byUser = {};
+  for (const a of adjs) (byUser[a.user_id] = byUser[a.user_id] || []).push(a);
+  for (const [uid, list] of Object.entries(byUser)) {
+    const fresh = [];
+    for (const a of list) if (!(await recentlySent(uid, "adjustment", a.id, CD.vencimiento))) fresh.push(a);
+    if (!fresh.length) continue;
+    const lines = fresh.map((a) => `• ${a.ticker} ${a.adjustment_date}: ${a.estimated_amount != null ? "$" + Math.round(Number(a.estimated_amount)).toLocaleString("es-AR") : "s/d"}`).join("\n");
+    await sendMessage(chatBy[uid], `📋 <b>Ajustes de futuros pendientes</b> de confirmar:\n${lines}\nConfirmalos en Midas → Portfolio.`);
+    for (const a of fresh) await logSent(uid, "adjustment", a.id, `ajuste ${a.ticker}`, a.adjustment_date);
+    console.log(`[adjustment] ${uid} x${fresh.length}`);
+  }
+}
+
+async function evalVencimientos(users, positionsBy) {
+  const subs = users.filter((u) => prefOn(u.prefs, "vencimientos", false));
+  if (!subs.length) return;
+  for (const u of subs) {
+    const pos = positionsBy[u.userId] || [];
+    for (const p of pos) {
+      const days = daysToMaturity(maturityOf(p.ticker));
+      if (days == null || days > VENC_DAYS) continue;
+      const key = `${p.ticker}`;
+      if (await recentlySent(u.userId, "vencimiento", key, CD.vencimiento)) continue;
+      const extra = p.type === "future" ? " — rola el contrato si queres mantener la posicion." : "";
+      await sendMessage(u.chatId, `⏰ <b>${p.ticker}</b> vence en <b>${days} dia${days === 1 ? "" : "s"}</b>${extra}`);
+      await logSent(u.userId, "vencimiento", key, `vence ${p.ticker}`, `${days}d`);
+      console.log(`[vencimiento] ${u.userId} ${p.ticker} ${days}d`);
+    }
+  }
+}
+
+/* ─────────────── Resumen de cierre (EOD) ─────────────── */
+
+async function buildEodSummary(userId, positionsBy, fut) {
+  const { dateStr } = artParts();
+  const pos = positionsBy[userId] || [];
+  if (!pos.length) return `📊 <b>Cierre ${dateStr}</b>\nNo tenes posiciones abiertas.`;
+
+  const futs = pos.filter((p) => p.type === "future");
+  const bonos = pos.filter((p) => p.type !== "future");
+  const lines = [`📊 <b>Cierre ${dateStr}</b>`];
+
+  // Futuros: P&L del dia firme (settle hoy [feed] vs settle anterior [historico]).
+  if (futs.length) {
+    const yest = await loadYestSettles(dateStr);
+    let total = 0; const fl = [];
+    for (const p of futs) {
+      const sToday = fut.settle[p.ticker], sYest = yest[p.ticker];
+      if (sToday == null || sYest == null) { fl.push(`• ${p.ticker}: s/settle`); continue; }
+      const pnl = p.net * (sToday - sYest) * FUTURE_MULT;
+      total += pnl;
+      fl.push(`• ${p.ticker} (${p.net > 0 ? "+" : ""}${p.net}): ${pnl >= 0 ? "+" : ""}$${Math.round(pnl).toLocaleString("es-AR")}  (${sYest}→${sToday})`);
+    }
+    lines.push(`\n<b>Futuros DLR — P&L del dia (firme)</b>\n${fl.join("\n")}\nSubtotal: <b>${total >= 0 ? "+" : ""}$${Math.round(total).toLocaleString("es-AR")}</b>`);
+  }
+
+  // Bonos/acciones: variacion del dia (estimado, data912).
+  if (bonos.length) {
+    const d912 = await loadData912();
+    const bl = [];
+    for (const p of bonos) {
+      const d = d912[p.ticker];
+      if (!d || d.c == null) { bl.push(`• ${p.ticker}: s/precio`); continue; }
+      const pctTxt = d.pct != null ? ` (${d.pct >= 0 ? "+" : ""}${d.pct.toFixed(2)}%)` : "";
+      bl.push(`• ${p.ticker}: ${d.c}${pctTxt}`);
+    }
+    lines.push(`\n<b>Tenencias — precio y variacion del dia</b>\n${bl.join("\n")}`);
+  }
+  lines.push(`\n<i>Futuros = P&L del dia settle-based (como Cocos). Resto = precio/variacion del dia. FCI no incluidos.</i>`);
+  return lines.join("\n");
+}
+
+async function evalEodScheduled(users) {
+  const subs = users.filter((u) => prefOn(u.prefs, "eod_summary", false));
+  if (!subs.length) return;
+  const p = artParts();
+  if (!isBizDay(p.dow)) return;
+  const positionsBy = await loadPositions(subs.map((u) => u.userId));
+  const fut = await loadFutures();
+  for (const u of subs) {
+    const hour = Number((u.prefs || {}).eod_hour) || EOD_DEFAULT_HOUR;
+    if (p.hour !== hour) continue;
+    if (await recentlySent(u.userId, "eod", p.dateStr, 23 * 60 * 60 * 1000)) continue;
+    const txt = await buildEodSummary(u.userId, positionsBy, fut);
+    await sendMessage(u.chatId, txt);
+    await logSent(u.userId, "eod", p.dateStr, "cierre", "resumen diario");
+    console.log(`[eod] ${u.userId} ${p.dateStr}`);
+  }
+}
+
+/* ─────────────── Loop principal de alertas ─────────────── */
+
+async function alertLoop() {
+  try {
+    const { users } = await loadContext();
+    if (!users.length) return;
+    const fut = await loadFutures();
+    await evalPriceAlerts(users, fut);
+    await evalScalping(users, fut);
+    await evalDesarb(users);
+    await evalAdjustments(users);
+    const needVenc = users.some((u) => prefOn(u.prefs, "vencimientos", false));
+    if (needVenc) {
+      const positionsBy = await loadPositions(users.map((u) => u.userId));
+      await evalVencimientos(users, positionsBy);
+    }
+    await evalEodScheduled(users);
+  } catch (e) {
+    console.error("[alertLoop]", e.message);
+  }
+}
+
+/* ─────────────── Comandos on-demand (consulta) ─────────────── */
+
+async function userByChat(chatId) {
+  const { data } = await supabase.from("telegram_links").select("user_id").eq("chat_id", String(chatId)).maybeSingle();
+  return data ? data.user_id : null;
+}
+
+async function cmdPnl(chatId) {
+  const userId = await userByChat(chatId);
+  if (!userId) { await sendMessage(chatId, "No estas vinculado. Vincula desde Midas → Configuracion → Notificaciones."); return; }
+  const positionsBy = await loadPositions([userId]);
+  const fut = await loadFutures();
+  await sendMessage(chatId, await buildEodSummary(userId, positionsBy, fut));
+}
+
+async function cmdDlr(chatId) {
+  const fut = await loadFutures();
+  const jun = fut.price["DLRJUN26"], jul = fut.price["DLRJUL26"];
+  const cal = jun != null && jul != null ? (jul - jun).toFixed(1) : "s/d";
+  await sendMessage(chatId, `💵 <b>DLR</b>\nJUN26: ${jun ?? "s/d"}\nJUL26: ${jul ?? "s/d"}\nSpread calendario JUL-JUN: <b>${cal}</b>${inRueda() ? "" : "\n<i>(mercado cerrado — settlement)</i>"}`);
+}
+
+async function cmdCanje(chatId) {
+  const { data: rows } = await supabase.from("sovereign_mep_canje").select("plazo,spread_pct,comprar_pesos_vender_dolar,vender_dolar_caro").order("spread_pct", { ascending: false }).limit(5);
+  if (!rows || !rows.length) { await sendMessage(chatId, "Sin datos de canje ahora."); return; }
+  const lines = rows.map((r) => `• ${r.plazo}: ${Number(r.spread_pct).toFixed(2)}% (${r.comprar_pesos_vender_dolar} → ${r.vender_dolar_caro})`).join("\n");
+  await sendMessage(chatId, `🔁 <b>Canje MEP soberanos</b> (top spreads):\n${lines}\n<i>Indicativo.</i>`);
+}
+
+/* ─────────────── Linking + comandos ─────────────── */
 
 let offset = 0;
-
 async function handleUpdate(u) {
   offset = Math.max(offset, u.update_id + 1);
   const msg = u.message;
@@ -216,76 +504,62 @@ async function handleUpdate(u) {
   const text = msg.text.trim();
   const username = msg.from && msg.from.username ? msg.from.username : null;
 
-  // /start <code>  -> vincular
   if (text.startsWith("/start")) {
-    const parts = text.split(/\s+/);
-    const code = parts[1];
+    const code = text.split(/\s+/)[1];
     if (!code) {
-      await sendMessage(chatId,
-        "Hola, soy <b>Midas Alertas</b>.\n\nPara recibir notificaciones, entra a Midas → <b>Configuracion → Notificaciones</b> y toca <b>Conectar Telegram</b>. Eso te trae aca con tu codigo de vinculacion.");
+      await sendMessage(chatId, "Hola, soy <b>Midas Alertas</b>.\n\nVincula tu cuenta desde Midas → <b>Configuracion → Notificaciones</b> → <b>Conectar Telegram</b>.\n\nComandos: /pnl (resumen), /dlr (dolar futuro), /canje (desarbitrajes), /stop (pausar).");
       return;
     }
     const nowIso = new Date().toISOString();
-    const { data: link } = await supabase
-      .from("telegram_links")
-      .select("user_id")
-      .eq("link_code", code)
-      .gt("link_code_expires_at", nowIso)
-      .maybeSingle();
-    if (!link) {
-      await sendMessage(chatId, "Ese codigo es invalido o vencio. Genera uno nuevo desde Midas → Configuracion → Notificaciones.");
-      return;
-    }
+    const { data: link } = await supabase.from("telegram_links").select("user_id")
+      .eq("link_code", code).gt("link_code_expires_at", nowIso).maybeSingle();
+    if (!link) { await sendMessage(chatId, "Ese codigo es invalido o vencio. Genera uno nuevo desde Midas → Configuracion → Notificaciones."); return; }
     await supabase.from("telegram_links").update({
       chat_id: String(chatId), tg_username: username, linked_at: nowIso,
-      link_code: null, link_code_expires_at: null, enabled: true,
-      updated_at: nowIso,
+      link_code: null, link_code_expires_at: null, enabled: true, updated_at: nowIso,
     }).eq("user_id", link.user_id);
-    await sendMessage(chatId, "✅ <b>Vinculado.</b> Vas a recibir aca las notificaciones que elijas en Midas. Para pausar, manda /stop.");
+    await sendMessage(chatId, "✅ <b>Vinculado.</b> Vas a recibir las notificaciones que elijas en Midas. Probá /pnl o /dlr. Para pausar, /stop.");
     console.log(`[link] user ${link.user_id} -> chat ${chatId}`);
     return;
   }
-
-  // /stop -> pausar
   if (text.startsWith("/stop")) {
-    await supabase.from("telegram_links")
-      .update({ enabled: false, updated_at: new Date().toISOString() })
-      .eq("chat_id", String(chatId));
-    await sendMessage(chatId, "Notificaciones pausadas. Reactivalas desde Midas → Configuracion → Notificaciones (o mandando /start con tu codigo).");
+    await supabase.from("telegram_links").update({ enabled: false, updated_at: new Date().toISOString() }).eq("chat_id", String(chatId));
+    await sendMessage(chatId, "Notificaciones pausadas. Reactivalas desde Midas → Configuracion → Notificaciones.");
     return;
   }
-
-  // /ping, /help
+  if (text.startsWith("/pnl") || text.startsWith("/resumen")) { await cmdPnl(chatId); return; }
+  if (text.startsWith("/dlr")) { await cmdDlr(chatId); return; }
+  if (text.startsWith("/canje")) { await cmdCanje(chatId); return; }
   if (text.startsWith("/ping")) { await sendMessage(chatId, "pong"); return; }
   if (text.startsWith("/help")) {
-    await sendMessage(chatId, "Comandos: /start &lt;codigo&gt; para vincular, /stop para pausar, /ping para probar. La activacion y las preferencias se manejan desde Midas → Configuracion → Notificaciones.");
+    await sendMessage(chatId, "Comandos:\n/pnl — resumen de cierre\n/dlr — dolar futuro + spread\n/canje — desarbitrajes MEP\n/stop — pausar\n/start &lt;codigo&gt; — vincular\n\nLa activacion y preferencias se manejan en Midas → Configuracion → Notificaciones.");
     return;
   }
 }
 
 async function pollLoop() {
-  // Bucle infinito de long-poll. Cada getUpdates espera hasta POLL_TIMEOUT_S
-  // por updates nuevos; si no hay, vuelve y reintenta.
   // eslint-disable-next-line no-constant-condition
   while (true) {
     try {
       const r = await fetch(`${API}/getUpdates?timeout=${POLL_TIMEOUT_S}&offset=${offset}`);
       const j = await r.json();
-      if (j.ok && Array.isArray(j.result)) {
-        for (const u of j.result) {
-          try { await handleUpdate(u); } catch (e) { console.error("[handleUpdate]", e.message); }
-        }
-      }
+      if (j.ok && Array.isArray(j.result))
+        for (const u of j.result) { try { await handleUpdate(u); } catch (e) { console.error("[handleUpdate]", e.message); } }
     } catch (e) {
-      console.error("[pollLoop] error:", e.message);
+      console.error("[pollLoop]", e.message);
       await new Promise((res) => setTimeout(res, 3000));
     }
   }
 }
 
 /* ─────────────── Arranque ─────────────── */
+// Solo levanta los loops si se ejecuta directo (no si lo importa un diag/test,
+// para no abrir un segundo getUpdates que chocaria con la instancia PM2).
+if (require.main === module) {
+  console.log("[telegram-notifier] arrancando. alert interval", ALERT_INTERVAL_MS / 1000, "s");
+  pollLoop();
+  alertLoop();
+  setInterval(alertLoop, ALERT_INTERVAL_MS);
+}
 
-console.log("[telegram-notifier] arrancando. bot OK, alert interval", ALERT_INTERVAL_MS / 1000, "s");
-pollLoop();
-alertLoop();
-setInterval(alertLoop, ALERT_INTERVAL_MS);
+module.exports = { buildEodSummary, loadPositions, loadFutures, loadData912, supabase };

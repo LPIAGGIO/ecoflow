@@ -2489,16 +2489,16 @@ const TG_BOT_USERNAME = "midas_ar_BOT";
 const NOTIF_CATALOG = [
   { key: "price_alerts", label: "Alertas de precio", ready: true,
     desc: "Cuando un instrumento cruza un nivel que pusiste en Flujo de Posiciones. Suena aunque tengas Midas cerrado." },
-  { key: "scalping_dlr", label: "Senales Scalping DLR", ready: false,
-    desc: "Calendario, reversion y fair-value del DLR. En validacion: son candidatas, no senales con edge probado." },
-  { key: "desarbitrajes", label: "Desarbitrajes MEP", ready: false,
-    desc: "Cuando el spread del canje de soberanos supera un umbral. Indicativo (sin puntas)." },
-  { key: "eod_summary", label: "Resumen de fin de dia", ready: false,
-    desc: "P&L del dia por instrumento y total, al cierre del mercado." },
-  { key: "futures_adjustments", label: "Ajustes de futuros", ready: false,
+  { key: "scalping_dlr", label: "Senales Scalping DLR", ready: true,
+    desc: "Spread calendario JUL-JUN fuera de banda y reversion z-score sobre JUN26, en horario de rueda (10-15hs). En validacion: son candidatas, no senales con edge probado." },
+  { key: "desarbitrajes", label: "Desarbitrajes MEP", ready: true,
+    desc: "Cuando el spread del canje de soberanos supera el umbral. Indicativo (sin puntas)." },
+  { key: "eod_summary", label: "Resumen de fin de dia", ready: true,
+    desc: "Al cierre (18hs por defecto): P&L del dia de futuros (firme) + variacion del dia de tus tenencias. Probalo cuando quieras con /pnl en el bot." },
+  { key: "futures_adjustments", label: "Ajustes de futuros", ready: true,
     desc: "Cuando hay ajustes diarios de futuros pendientes de confirmar." },
-  { key: "vencimientos", label: "Vencimientos", ready: false,
-    desc: "Futuro front, Lecaps o cauciones por vencer (para rolar a tiempo)." },
+  { key: "vencimientos", label: "Vencimientos", ready: true,
+    desc: "Futuro front, Lecaps o Boncaps por vencer en los proximos dias (para rolar a tiempo)." },
 ];
 
 function useTelegramLink(userId) {
