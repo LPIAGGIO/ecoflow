@@ -73,6 +73,7 @@ import {
   Layers,
   Eye,
   EyeOff,
+  Send,
 } from "lucide-react";
 import {
   ScatterChart,
@@ -2409,6 +2410,7 @@ function SettingsDashboard({ userId, brokers, brokersLoading, refetchBrokers }) 
       <div className="flex" style={{ borderBottom: `1px solid ${C.border}`, marginBottom: 24 }}>
         {[
           { id: "brokers", label: "Cuentas vinculadas" },
+          { id: "notifs", label: "Notificaciones" },
           { id: "usage", label: "Uso de API" },
           { id: "activity", label: "Actividad" },
         ].map((t) => {
@@ -2458,8 +2460,283 @@ function SettingsDashboard({ userId, brokers, brokersLoading, refetchBrokers }) 
           cashSnapshots={cashSnapshots}
         />
       )}
+      {tab === "notifs" && <NotificationsTab userId={userId} />}
       {tab === "usage" && <ApiUsageWidget userId={userId} />}
       {tab === "activity" && <ApiActivityWidget userId={userId} />}
+    </div>
+  );
+}
+
+/* ─────────────── Notificaciones (Telegram) ───────────────
+ *
+ * Tab de Configuracion donde el usuario vincula su Telegram (deep-link al bot
+ * @midas_ar_BOT) y elige que notificaciones recibir. El envio real lo hace el
+ * worker VPS `telegram-notifier` (lee telegram_links + notification_prefs).
+ *
+ * Flujo de vinculacion (self-service, sin pegar chat_id a mano):
+ *   1. El usuario toca "Conectar Telegram".
+ *   2. Generamos un codigo unico, lo guardamos en telegram_links con caducidad
+ *      de 15 min, y abrimos t.me/midas_ar_BOT?start=<codigo>.
+ *   3. El usuario le da Start en Telegram -> el worker matchea el codigo con su
+ *      user_id y guarda el chat_id. Quedo vinculado.
+ *   4. Esta pantalla pollea su fila; cuando aparece el chat_id muestra
+ *      "Conectado".
+ */
+const TG_BOT_USERNAME = "midas_ar_BOT";
+
+// Catalogo de notificaciones. `ready:false` = todavia no lo dispara el worker
+// (se muestra como "Proximamente" para no prometer lo que no anda).
+const NOTIF_CATALOG = [
+  { key: "price_alerts", label: "Alertas de precio", ready: true,
+    desc: "Cuando un instrumento cruza un nivel que pusiste en Flujo de Posiciones. Suena aunque tengas Midas cerrado." },
+  { key: "scalping_dlr", label: "Senales Scalping DLR", ready: false,
+    desc: "Calendario, reversion y fair-value del DLR. En validacion: son candidatas, no senales con edge probado." },
+  { key: "desarbitrajes", label: "Desarbitrajes MEP", ready: false,
+    desc: "Cuando el spread del canje de soberanos supera un umbral. Indicativo (sin puntas)." },
+  { key: "eod_summary", label: "Resumen de fin de dia", ready: false,
+    desc: "P&L del dia por instrumento y total, al cierre del mercado." },
+  { key: "futures_adjustments", label: "Ajustes de futuros", ready: false,
+    desc: "Cuando hay ajustes diarios de futuros pendientes de confirmar." },
+  { key: "vencimientos", label: "Vencimientos", ready: false,
+    desc: "Futuro front, Lecaps o cauciones por vencer (para rolar a tiempo)." },
+];
+
+function useTelegramLink(userId) {
+  const [link, setLink] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const load = useCallback(() => {
+    if (!userId) { setLoading(false); return; }
+    supabase.from("telegram_links")
+      .select("chat_id,tg_username,enabled,link_code,linked_at")
+      .eq("user_id", userId).maybeSingle()
+      .then(({ data }) => { setLink(data || null); setLoading(false); });
+  }, [userId]);
+  useEffect(() => { load(); }, [load]);
+  return { link, loading, reload: load };
+}
+
+function useNotificationPrefs(userId) {
+  const [prefs, setPrefs] = useState(null);
+  useEffect(() => {
+    if (!userId) return;
+    let cancelled = false;
+    supabase.from("notification_prefs").select("prefs").eq("user_id", userId).maybeSingle()
+      .then(({ data }) => { if (!cancelled) setPrefs(data?.prefs || {}); });
+    return () => { cancelled = true; };
+  }, [userId]);
+  const setPref = useCallback((key, val) => {
+    setPrefs((prev) => {
+      const next = { ...(prev || {}), [key]: val };
+      supabase.from("notification_prefs").upsert(
+        { user_id: userId, prefs: next, updated_at: new Date().toISOString() },
+        { onConflict: "user_id" }
+      ).then(() => {});
+      return next;
+    });
+  }, [userId]);
+  return { prefs: prefs || {}, setPref };
+}
+
+function NotifToggle({ checked, disabled, onChange }) {
+  return (
+    <button
+      onClick={() => !disabled && onChange(!checked)}
+      disabled={disabled}
+      style={{
+        width: 38, height: 22, borderRadius: 11, flexShrink: 0,
+        background: checked ? C.accent : C.deep,
+        border: `1px solid ${checked ? C.accent : C.borderStrong}`,
+        position: "relative", cursor: disabled ? "not-allowed" : "pointer",
+        opacity: disabled ? 0.4 : 1, transition: "background 0.15s, border-color 0.15s",
+      }}
+    >
+      <span style={{
+        position: "absolute", top: 2, left: checked ? 17 : 2, width: 16, height: 16,
+        borderRadius: "50%", background: "#fff", transition: "left 0.15s",
+      }} />
+    </button>
+  );
+}
+
+function NotificationsTab({ userId }) {
+  const { link, loading, reload } = useTelegramLink(userId);
+  const { prefs, setPref } = useNotificationPrefs(userId);
+  const [connecting, setConnecting] = useState(false);
+  const pollRef = useRef(null);
+
+  const connected = Boolean(link && link.chat_id);
+
+  // Limpia el poll al desmontar.
+  useEffect(() => () => { if (pollRef.current) clearInterval(pollRef.current); }, []);
+
+  const handleConnect = useCallback(async () => {
+    setConnecting(true);
+    const code = (
+      (typeof crypto !== "undefined" && crypto.randomUUID)
+        ? crypto.randomUUID()
+        : String(Math.random()).slice(2) + String(Date.now())
+    ).replace(/-/g, "").slice(0, 16);
+    await supabase.from("telegram_links").upsert(
+      {
+        user_id: userId, link_code: code,
+        link_code_expires_at: new Date(Date.now() + 15 * 60 * 1000).toISOString(),
+        updated_at: new Date().toISOString(),
+      },
+      { onConflict: "user_id" }
+    );
+    window.open(`https://t.me/${TG_BOT_USERNAME}?start=${code}`, "_blank", "noopener");
+    // Pollear hasta que el worker grabe el chat_id (max ~2 min).
+    let ticks = 0;
+    if (pollRef.current) clearInterval(pollRef.current);
+    pollRef.current = setInterval(async () => {
+      ticks += 1;
+      const { data } = await supabase.from("telegram_links")
+        .select("chat_id").eq("user_id", userId).maybeSingle();
+      if ((data && data.chat_id) || ticks > 40) {
+        clearInterval(pollRef.current); pollRef.current = null;
+        setConnecting(false); reload();
+      }
+    }, 3000);
+  }, [userId, reload]);
+
+  const handleToggleEnabled = useCallback(async () => {
+    if (!link) return;
+    await supabase.from("telegram_links")
+      .update({ enabled: !link.enabled, updated_at: new Date().toISOString() })
+      .eq("user_id", userId);
+    reload();
+  }, [link, userId, reload]);
+
+  const handleDisconnect = useCallback(async () => {
+    if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
+    await supabase.from("telegram_links")
+      .update({ chat_id: null, link_code: null, enabled: true, updated_at: new Date().toISOString() })
+      .eq("user_id", userId);
+    setConnecting(false);
+    reload();
+  }, [userId, reload]);
+
+  if (loading) {
+    return (
+      <div style={{ padding: 40, display: "flex", justifyContent: "center" }}>
+        <Loader2 size={22} color={C.muted} className="eco-spin" strokeWidth={1.5} />
+      </div>
+    );
+  }
+
+  const card = {
+    background: C.panel, border: `1px solid ${C.border}`, borderRadius: 10,
+    padding: 20, marginBottom: 16,
+  };
+
+  return (
+    <div style={{ maxWidth: 680 }}>
+      {/* Estado de conexion */}
+      <div style={card}>
+        <div className="flex items-center" style={{ gap: 12, marginBottom: connected ? 14 : 12 }}>
+          <div style={{
+            width: 38, height: 38, borderRadius: 9, flexShrink: 0,
+            display: "flex", alignItems: "center", justifyContent: "center",
+            background: connected ? "rgba(74,222,128,0.12)" : C.accentSoft,
+            border: `1px solid ${connected ? "rgba(74,222,128,0.3)" : C.accentBorder}`,
+          }}>
+            <Send size={18} color={connected ? C.green : C.accent} strokeWidth={1.7} />
+          </div>
+          <div style={{ flex: 1 }}>
+            <div style={{ fontSize: 14, fontWeight: 600, color: C.text }}>
+              Telegram {connected ? "conectado" : "no conectado"}
+            </div>
+            <div style={{ fontSize: 11.5, color: C.muted, marginTop: 2 }}>
+              {connected
+                ? <>Recibis notificaciones en {link.tg_username ? `@${link.tg_username}` : "tu Telegram"}.{!link.enabled && " (pausadas)"}</>
+                : "Vincula tu Telegram para recibir alertas aunque tengas Midas cerrado."}
+            </div>
+          </div>
+        </div>
+
+        {!connected ? (
+          <button
+            onClick={handleConnect}
+            disabled={connecting}
+            style={{
+              display: "inline-flex", alignItems: "center", gap: 8,
+              background: C.accent, color: "#0D1A29", border: "none",
+              borderRadius: 8, padding: "9px 16px", fontSize: 12.5, fontWeight: 600,
+              cursor: connecting ? "default" : "pointer", opacity: connecting ? 0.7 : 1,
+            }}
+          >
+            {connecting
+              ? <><Loader2 size={14} className="eco-spin" strokeWidth={2} /> Esperando el Start en Telegram...</>
+              : <><Send size={14} strokeWidth={2} /> Conectar Telegram</>}
+          </button>
+        ) : (
+          <div className="flex items-center" style={{ gap: 8 }}>
+            <button
+              onClick={handleToggleEnabled}
+              style={{
+                display: "inline-flex", alignItems: "center", gap: 7,
+                background: "transparent", color: C.text,
+                border: `1px solid ${C.borderStrong}`, borderRadius: 8,
+                padding: "8px 14px", fontSize: 12, fontWeight: 500, cursor: "pointer",
+              }}
+            >
+              {link.enabled ? "Pausar" : "Reanudar"}
+            </button>
+            <button
+              onClick={handleDisconnect}
+              style={{
+                display: "inline-flex", alignItems: "center", gap: 7,
+                background: "transparent", color: C.red,
+                border: `1px solid rgba(248,113,113,0.3)`, borderRadius: 8,
+                padding: "8px 14px", fontSize: 12, fontWeight: 500, cursor: "pointer",
+              }}
+            >
+              <Trash2 size={13} strokeWidth={1.8} /> Desconectar
+            </button>
+          </div>
+        )}
+        {connecting && (
+          <div style={{ fontSize: 11, color: C.dim, marginTop: 10 }}>
+            Se abrio Telegram en otra pestana. Toca <b>Start</b> (o <b>Iniciar</b>) ahi y volve. Esta pantalla se actualiza sola.
+          </div>
+        )}
+      </div>
+
+      {/* Preferencias */}
+      <div style={{ ...card, marginBottom: 0, opacity: connected ? 1 : 0.55 }}>
+        <div style={{ fontSize: 13, fontWeight: 600, color: C.text, marginBottom: 4 }}>
+          Que queres recibir
+        </div>
+        <div style={{ fontSize: 11.5, color: C.muted, marginBottom: 16 }}>
+          {connected ? "Elegi las notificaciones que te interesan." : "Conecta Telegram para activar tus preferencias."}
+        </div>
+        {NOTIF_CATALOG.map((n, i) => {
+          const isOn = n.key === "price_alerts" ? prefs[n.key] !== false : prefs[n.key] === true;
+          const disabled = !connected || !n.ready;
+          return (
+            <div key={n.key} className="flex items-start"
+              style={{
+                gap: 14, padding: "12px 0",
+                borderTop: i === 0 ? "none" : `1px solid ${C.border}`,
+              }}>
+              <div style={{ flex: 1 }}>
+                <div className="flex items-center" style={{ gap: 8 }}>
+                  <span style={{ fontSize: 13, fontWeight: 500, color: C.text }}>{n.label}</span>
+                  {!n.ready && (
+                    <span style={{
+                      fontSize: 9, letterSpacing: "0.08em", textTransform: "uppercase",
+                      color: C.yellow, background: "rgba(250,204,21,0.1)",
+                      border: "1px solid rgba(250,204,21,0.25)", borderRadius: 4, padding: "1px 6px",
+                    }}>Proximamente</span>
+                  )}
+                </div>
+                <div style={{ fontSize: 11.5, color: C.muted, marginTop: 3, lineHeight: 1.45 }}>{n.desc}</div>
+              </div>
+              <NotifToggle checked={isOn && !disabled} disabled={disabled} onChange={(v) => setPref(n.key, v)} />
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
 }
