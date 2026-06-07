@@ -3727,7 +3727,7 @@ function Landing({ onLogin }) {
     </button>
   );
   const features = [
-    { t: "Portfolio", d: "Cargá tu cartera (bonos, futuros, FCI, cauciones, acciones) y vela valuada a mercado con P&L del día y total. Importá tu CSV de Cocos/Matriz." },
+    { t: "Portfolio", d: "Cargá tu cartera (bonos, futuros, FCI, cauciones, acciones) y vela valuada a mercado con P&L del día y total. Importá tu CSV de Matriz." },
     { t: "Analizadores DLR", d: "Carry Trade, Sintético DLR, Curva de tasas, Spread CER/Fija, Scalping DLR en vivo y Flujo de posiciones — todo el dólar futuro en un lugar." },
     { t: "Cotizaciones y Mercado", d: "Dólar MEP/CCL/mayorista en vivo, acciones, CEDEARs, bonos soberanos, lecaps, CER y duales con gráficos históricos." },
     { t: "Estadísticas BCRA", d: "Bandas cambiarias, reservas, REM, tasas y base monetaria — series oficiales actualizadas." },
@@ -3755,35 +3755,8 @@ function Landing({ onLogin }) {
           </div>
         ))}
       </div>
-      <div style={{ maxWidth: 760, margin: "0 auto", padding: "10px 28px 50px" }}>
-        <div style={{ textAlign: "center", fontFamily: "'Raleway', sans-serif", fontWeight: 700, fontSize: 22, marginBottom: 6 }}>Planes</div>
-        <div style={{ textAlign: "center", fontSize: 12, color: C.dim, marginBottom: 24 }}>Empezá gratis. Las funciones avanzadas, en Pro.</div>
-        <div className="flex" style={{ gap: 16, flexWrap: "wrap" }}>
-          <div style={{ flex: 1, minWidth: 280, background: C.panel, border: `1px solid ${C.border}`, borderRadius: 10, padding: 24 }}>
-            <div style={{ fontSize: 16, fontWeight: 700, color: C.text }}>Gratis</div>
-            <div style={{ fontSize: 12, color: C.muted, margin: "8px 0 14px" }}>Para empezar a operar informado.</div>
-            <ul style={{ margin: 0, paddingLeft: 18, fontSize: 12.5, color: C.muted, lineHeight: 1.9 }}>
-              <li>Cotizaciones y Mercado</li>
-              <li>Estadísticas BCRA</li>
-              <li>Calculadoras</li>
-              <li>Analizadores básicos</li>
-            </ul>
-          </div>
-          <div style={{ flex: 1, minWidth: 280, background: C.panel, border: `1px solid ${C.accentBorder}`, borderRadius: 10, padding: 24 }}>
-            <div className="flex items-center gap-2"><span style={{ fontSize: 16, fontWeight: 700, color: C.accent }}>Pro</span><span style={{ fontSize: 9, fontWeight: 700, color: C.accent, border: `1px solid ${C.accentBorder}`, borderRadius: 4, padding: "1px 6px" }}>PRÓXIMAMENTE</span></div>
-            <div style={{ fontSize: 12, color: C.muted, margin: "8px 0 14px" }}>Para el que opera en serio.</div>
-            <ul style={{ margin: 0, paddingLeft: 18, fontSize: 12.5, color: C.muted, lineHeight: 1.9 }}>
-              <li>Portfolio con P&L y valuación en vivo</li>
-              <li>Scalping DLR en tiempo real + alertas</li>
-              <li>Importador de operaciones (Cocos/Matriz)</li>
-              <li>Bot Trading (beta)</li>
-            </ul>
-          </div>
-        </div>
-      </div>
-      <div style={{ textAlign: "center", padding: "10px 28px 70px" }}>
-        <div className="flex items-center justify-center"><LoginBtn big /></div>
-        <div style={{ fontSize: 11, color: C.dim, marginTop: 24, fontFamily: "'Roboto', sans-serif" }}>Midas · terminal del mercado argentino</div>
+      <div style={{ textAlign: "center", fontSize: 11, color: C.dim, padding: "0 28px 60px", fontFamily: "'Roboto', sans-serif" }}>
+        Midas · terminal del mercado argentino
       </div>
     </div>
   );
