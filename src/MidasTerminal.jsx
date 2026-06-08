@@ -1465,7 +1465,7 @@ const fmtARS = (n) =>
 // Uso:
 //   <input value={simInputAmount} onChange={(e) => setSimInputAmount(formatAmountInput(e.target.value))} />
 //   const amount = parseAmountString(simInputAmount);
-function formatAmountInput(raw) {
+function formatAmountInput(raw, decimals = 2) {
   if (raw == null) return "";
   let s = String(raw);
   // Heurística: si NO hay coma todavía y el ÚLTIMO punto tiene menos
@@ -1510,8 +1510,8 @@ function formatAmountInput(raw) {
   if (intPart === "" && intPartRaw.length > 0) intPart = "0";
   // Aplicar separadores de miles
   intPart = intPart.replace(/\B(?=(\d{3})+(?!\d))/g, ".");
-  // Limitar decimales a 2
-  const dec = decPart != null ? decPart.slice(0, 2) : null;
+  // Limitar decimales al máximo pedido
+  const dec = decPart != null ? decPart.slice(0, decimals) : null;
   if (decPart !== null) return `${intPart || "0"},${dec}`;
   return intPart;
 }
@@ -1522,6 +1522,34 @@ function parseAmountString(str) {
   const cleaned = String(str).replace(/\./g, "").replace(",", ".");
   const n = parseFloat(cleaned);
   return Number.isFinite(n) ? n : 0;
+}
+
+// Cuenta caracteres "significativos" (dígitos y coma) antes de `pos`. Los puntos
+// de miles NO cuentan → permite preservar el caret al reformatear en vivo.
+function countSigChars(str, pos) {
+  let c = 0;
+  for (let i = 0; i < pos && i < str.length; i++) if (/[\d,]/.test(str[i])) c++;
+  return c;
+}
+// Posición en `str` justo después del `sig`-ésimo carácter significativo.
+function posFromSigChars(str, sig) {
+  if (sig <= 0) return 0;
+  let c = 0;
+  for (let i = 0; i < str.length; i++) {
+    if (/[\d,]/.test(str[i])) { c++; if (c >= sig) return i + 1; }
+  }
+  return str.length;
+}
+// number o JS-number-string ("1500000.75") → máscara AR "1.500.000,75".
+function numStrToArMask(v, decimals = 2) {
+  if (v == null || v === "") return "";
+  let s = String(v).trim();
+  const neg = s.startsWith("-"); if (neg) s = s.slice(1);
+  const [ipRaw = "", dp] = s.split(".");
+  const ip = ipRaw.replace(/^0+(?=\d)/, "");
+  const intFmt = ip === "" ? "" : ip.replace(/\B(?=(\d{3})+(?!\d))/g, ".");
+  const dec = dp != null ? dp.slice(0, decimals) : null;
+  return (neg ? "-" : "") + intFmt + (dec != null ? "," + dec : "");
 }
 
 // Helpers de máscara para inputs de PORCENTAJE en formato AR.
@@ -18716,98 +18744,64 @@ function Input({ value, onChange, placeholder, type = "text", step, hasError }) 
  *   - No soporta exponentes (1e6).
  *   - Negativos sí, pero raramente aplica para precios.
  */
-function MoneyInput({ value, onChange, placeholder, hasError }) {
-  const [focused, setFocused] = useState(false);
+function MoneyInput({ value, onChange, placeholder, hasError, decimals = 2 }) {
+  const ref = useRef(null);
+  const focusedRef = useRef(false);
+  const [display, setDisplay] = useState(() => numStrToArMask(value, decimals));
 
-  // Convierte un raw del usuario (con coma o punto, con o sin miles) al
-  // formato "JS number string": dígitos + opcionalmente "." y decimales.
-  // Ej: "1.500.000,75" → "1500000.75"
-  //     "1500000,75"   → "1500000.75"
-  //     "1500000"      → "1500000"
-  //     "1.500"        → "1500"  (interpretamos como miles, NO como decimal)
-  // La regla "punto = miles" es típica es-AR; si el user querría decimal
-  // con punto debería usar coma. (Compromise: si solo hay un punto y NO
-  // hay coma y los dígitos después tienen 1-2, lo tratamos como decimal
-  // tipo "65.74". Esto se discute al final del comentario.)
-  const sanitizeRaw = (input) => {
-    if (input == null) return "";
-    let s = String(input).trim();
-    if (!s) return "";
+  // Sincroniza el display con el value externo, salvo mientras el user tipea
+  // (para no pisarle el caret/lo que está escribiendo).
+  useEffect(() => {
+    if (focusedRef.current) return;
+    setDisplay(numStrToArMask(value, decimals));
+  }, [value, decimals]);
 
-    // Permitir signo negativo al inicio
-    let sign = "";
-    if (s.startsWith("-")) {
-      sign = "-";
-      s = s.slice(1);
-    }
-
-    const hasComma = s.includes(",");
-    const hasDot = s.includes(".");
-
-    if (hasComma) {
-      // Convención es-AR: coma = decimal, puntos = miles. Quitar puntos.
-      s = s.replace(/\./g, "").replace(",", ".");
-    } else if (hasDot) {
-      // Sin coma. Si hay UN solo punto y los dígitos después son 1-2,
-      // probablemente sea decimal estilo en-US ("65.74"). Si hay varios
-      // puntos o muchos dígitos después, son miles ("1.500.000").
-      const parts = s.split(".");
-      const lastPart = parts[parts.length - 1];
-      if (parts.length === 2 && lastPart.length >= 1 && lastPart.length <= 4) {
-        // Tratamos como decimal (no tocar)
-      } else {
-        // Tratamos como miles → quitar todos los puntos
-        s = s.replace(/\./g, "");
-      }
-    }
-
-    // Solo dígitos y punto decimal
-    s = s.replace(/[^\d.]/g, "");
-    return sign + s;
-  };
-
-  // Formatea un valor numérico (string o number) a "1.500.000,75"
-  const formatWithMask = (numStr) => {
-    if (numStr === "" || numStr == null) return "";
-    const n = Number(numStr);
-    if (isNaN(n)) return String(numStr);
-
-    // Detectar decimales reales para preservarlos
-    const str = String(numStr);
-    const dotIdx = str.indexOf(".");
-    const realDecimals = dotIdx === -1 ? 0 : str.length - dotIdx - 1;
-
-    return n.toLocaleString("es-AR", {
-      minimumFractionDigits: realDecimals,
-      maximumFractionDigits: Math.max(realDecimals, 0),
-      useGrouping: true,
+  // Reformatea en vivo, emite el JS-number-string (contrato existente del form)
+  // y restaura el caret contando caracteres significativos.
+  const pushFormatted = (rawAr, caretSig) => {
+    const formatted = formatAmountInput(rawAr, decimals);
+    setDisplay(formatted);
+    onChange(formatted === "" ? "" : formatted.replace(/\./g, "").replace(",", "."));
+    requestAnimationFrame(() => {
+      const el = ref.current;
+      if (!el) return;
+      const p = posFromSigChars(formatted, caretSig);
+      try { el.setSelectionRange(p, p); } catch (e) { /* noop */ }
     });
   };
 
-  // Display:
-  //   - Focused: mostrar el raw "1500000.75" pero con coma local "1500000,75"
-  //   - Blurred: mostrar formato completo "1.500.000,75"
-  const displayValue = (() => {
-    if (value === "" || value == null) return "";
-    if (focused) {
-      // Reemplazo del separador decimal a coma para que el usuario pueda
-      // seguir escribiendo en formato es-AR.
-      return String(value).replace(".", ",");
-    }
-    return formatWithMask(value);
-  })();
-
   const handleChange = (e) => {
-    const raw = sanitizeRaw(e.target.value);
-    onChange(raw);
+    const el = e.target;
+    const caret = el.selectionStart ?? el.value.length;
+    pushFormatted(el.value, countSigChars(el.value, caret));
+  };
+
+  // La tecla "." (la del teclado numérico) inserta la coma decimal. Es el
+  // núcleo del pedido: en es-AR el decimal es "," pero el teclado tiene ".".
+  const handleKeyDown = (e) => {
+    if (e.key !== ".") return;
+    e.preventDefault();
+    if (decimals <= 0) return;
+    const el = e.target;
+    if (display.includes(",")) {
+      const p = display.indexOf(",") + 1; // ya hay decimal → ir después de la coma
+      requestAnimationFrame(() => { try { el.setSelectionRange(p, p); } catch (e2) {} });
+      return;
+    }
+    const start = el.selectionStart ?? display.length;
+    const end = el.selectionEnd ?? start;
+    const newRaw = display.slice(0, start) + "," + display.slice(end);
+    pushFormatted(newRaw, countSigChars(newRaw, start + 1));
   };
 
   return (
     <input
+      ref={ref}
       type="text"
       inputMode="decimal"
-      value={displayValue}
+      value={display}
       onChange={handleChange}
+      onKeyDown={handleKeyDown}
       placeholder={placeholder}
       style={{
         width: "100%",
@@ -18821,11 +18815,12 @@ function MoneyInput({ value, onChange, placeholder, hasError }) {
         transition: "border-color 120ms ease",
       }}
       onFocus={(e) => {
-        setFocused(true);
+        focusedRef.current = true;
         if (!hasError) e.currentTarget.style.borderColor = C.accent;
       }}
       onBlur={(e) => {
-        setFocused(false);
+        focusedRef.current = false;
+        setDisplay(formatAmountInput(display, decimals)); // limpia coma colgada al salir
         if (!hasError) e.currentTarget.style.borderColor = C.border;
       }}
     />
