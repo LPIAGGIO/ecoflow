@@ -26413,9 +26413,15 @@ function buildDlrCurve(futuresList, thresholdPct = 0.003, spotAnchor = null, rem
     // TNA implícita (vs spot, simple) y comparación con la caución (cash-and-carry):
     // vsCaucion = caución − implícita. >0 → caución gana, futuro BARATO (rulo a favor);
     // <0 → implícita > caución, futuro CARO (lado short). Solo con ancla spot.
+    // TNA (nominal proporcional) y TEA (efectiva compuesta) implícitas vía los
+    // helpers canónicos de dlrContracts — MISMA convención que el widget
+    // CarryDlrWidget y el Sintético DLR (una sola fuente de verdad, sin drift).
     const tnaImplicita = (useSpot && !f.isSpot && f.expiryDays > 0)
-      ? (f.price / anchorFirst.price - 1) * 365 / f.expiryDays : null;
+      ? implicitTNA(f.price, anchorFirst.price, f.expiryDays) : null;
     const tnaImplicitaPct = tnaImplicita != null ? tnaImplicita * 100 : null;
+    const teaImplicita = (useSpot && !f.isSpot && f.expiryDays > 0)
+      ? implicitTEA(f.price, anchorFirst.price, f.expiryDays) : null;
+    const teaImplicitaPct = teaImplicita != null ? teaImplicita * 100 : null;
     const vsCaucion = (tnaImplicitaPct != null && Number.isFinite(caucionRate)) ? caucionRate - tnaImplicitaPct : null;
     let statusCaucion = "neutro";
     if (vsCaucion != null) {
@@ -26438,6 +26444,8 @@ function buildDlrCurve(futuresList, thresholdPct = 0.003, spotAnchor = null, rem
       statusRem,
       tnaImplicita,
       tnaImplicitaPct,
+      teaImplicita,
+      teaImplicitaPct,
       vsCaucion,
       statusCaucion,
       isAnchor,
@@ -26451,7 +26459,7 @@ function buildDlrCurve(futuresList, thresholdPct = 0.003, spotAnchor = null, rem
   // comparar de un vistazo contra la implícita del mercado.
   const lastRemPoint = [...points].reverse().find((p) => p.priceRem != null);
   const remAnnualDevRate = (useSpot && lastRemPoint && anchorFirst.price > 0 && lastRemPoint.expiryDays > 0)
-    ? Math.pow(lastRemPoint.priceRem / anchorFirst.price, 365 / lastRemPoint.expiryDays) - 1
+    ? implicitTEA(lastRemPoint.priceRem, anchorFirst.price, lastRemPoint.expiryDays)
     : null;
 
   return {
@@ -26921,7 +26929,7 @@ function DlrCurveSection({ dlrCurve, C, compact = false, hideTitle = false }) {
                 <g key={`pt-${p.ticker}`}>
                   <circle cx={cx} cy={cy} r={compact ? 5 : 7} fill={fill} stroke="#0a0e1a" strokeWidth={compact ? "2" : "2.5"}>
                     <title>
-                      {p.ticker}: ${p.price.toFixed(2)} (teórico ${p.priceTheoric.toFixed(2)}, basis {p.basisPct >= 0 ? "+" : ""}{p.basisPct.toFixed(2)}%){p.priceRem != null ? ` · REM $${p.priceRem.toFixed(2)} (${p.basisRemPct >= 0 ? "+" : ""}${p.basisRemPct.toFixed(2)}% vs consenso)` : ""}{p.tnaImplicitaPct != null ? ` · TNA impl ${p.tnaImplicitaPct.toFixed(1)}%${p.vsCaucion != null ? ` (vs caución ${p.vsCaucion >= 0 ? "+" : ""}${p.vsCaucion.toFixed(1)}pp)` : ""}` : ""}
+                      {p.ticker}: ${p.price.toFixed(2)} (teórico ${p.priceTheoric.toFixed(2)}, basis {p.basisPct >= 0 ? "+" : ""}{p.basisPct.toFixed(2)}%){p.priceRem != null ? ` · REM $${p.priceRem.toFixed(2)} (${p.basisRemPct >= 0 ? "+" : ""}${p.basisRemPct.toFixed(2)}% vs consenso)` : ""}{p.tnaImplicitaPct != null ? ` · TNA impl ${p.tnaImplicitaPct.toFixed(1)}%${p.teaImplicitaPct != null ? ` / TEA ${p.teaImplicitaPct.toFixed(1)}%` : ""}${p.vsCaucion != null ? ` (vs caución ${p.vsCaucion >= 0 ? "+" : ""}${p.vsCaucion.toFixed(1)}pp)` : ""}` : ""}
                     </title>
                   </circle>
                   <text
