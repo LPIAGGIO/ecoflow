@@ -335,7 +335,7 @@ async function evalDesarb(users) {
   if (arbPct == null || arbPct <= CANJE_PUSH_PCT) return;
   const f = (n) => Number(n).toLocaleString("es-AR", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   const key = `${bestBuy.label}-${bestSell.label}`;
-  const text = `⚡ <b>Canje real ${arbPct.toFixed(2)}%</b>\nComprar USD por <b>${bestBuy.label}</b> a $${f(bestBuy.compra)}, vender por <b>${bestSell.label}</b> a $${f(bestSell.venta)}.\n<i>Puntas ejecutables, neto de cruzar. Confirma antes de operar.</i>`;
+  const text = `⚡ <b>Canje real ${arbPct.toFixed(2)}%</b> (> Black ~0,4%)\nComprar USD por <b>${bestBuy.label}</b> a $${f(bestBuy.compra)}, vender por <b>${bestSell.label}</b> a $${f(bestSell.venta)}.\n<i>Puntas ejecutables, neto de cruzar. Confirma antes de operar.</i>`;
   for (const u of subs) {
     if (await recentlySent(u.userId, "desarb", key, CD.desarb)) continue;
     await sendMessage(u.chatId, text);
@@ -497,7 +497,7 @@ async function cmdCanje(chatId) {
 // puntas EJECUTABLES (data912 arg_bonds). Comprar USD = comprás el bono en $
 // (ask$) y lo vendés en D (bidD) → ask$/bidD, el más bajo. Vender al revés.
 const DOLAR_PAIRS = [["AL30", "AL30D"], ["GD30", "GD30D"], ["AL35", "AL35D"], ["GD35", "GD35D"], ["GD38", "GD38D"], ["AE38", "AE38D"], ["AL41", "AL41D"], ["GD41", "GD41D"]];
-const CANJE_PUSH_PCT = 0.6; // umbral de alerta: canje real neto del costo (~0,5%)
+const CANJE_PUSH_PCT = 0.4; // umbral de alerta: canje real neto del costo BLACK (~0,1% × 4 patas)
 
 // Trae puntas EJECUTABLES (data912 arg_bonds) y calcula el mejor bono para
 // comprar/vender USD. Compartido por /dolar y la alerta de canje real.
@@ -538,8 +538,8 @@ async function cmdDolar(chatId) {
   if (bestSell) msg += `\n🔴 <b>Vender USD</b>: $${f(bestSell.venta)} vía <b>${bestSell.label}</b> (el más caro)`;
   if (arbPct != null) {
     msg += arbPct > CANJE_PUSH_PCT
-      ? `\n\n⚡ Canje real ${arbPct.toFixed(2)}% (> costo ~0,5%). Confirmá puntas.`
-      : `\n\nSin canje: ${arbPct.toFixed(2)}% (no cubre el costo ~0,5% del rulo).`;
+      ? `\n\n⚡ Canje real ${arbPct.toFixed(2)}% (> costo Black ~0,4%). Confirmá puntas.`
+      : `\n\nSin canje: ${arbPct.toFixed(2)}% (no cubre el costo Black ~0,4% del rulo).`;
   }
   msg += "\n<i>Comprar = comprás el bono en $ y lo vendés en D; vender al revés. Incluye cruzar puntas.</i>";
   await sendMessage(chatId, msg);

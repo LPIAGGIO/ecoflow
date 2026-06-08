@@ -22409,9 +22409,10 @@ const DOLLAR_BOND_PAIRS = [
   { label: "AL41", ars: "AL41", mep: "AL41D" },
   { label: "GD41", ars: "GD41", mep: "GD41D" },
 ];
-// Comisión round-trip aprox de un canje (compra+venta de 2 bonos). Solo se
+// Costo aprox de un canje en comisión BLACK (~0,1% por operación × 4 patas
+// = 0,4%). Es el umbral más optimista; con tiers peores el piso sube. Solo se
 // usa para decidir si el spread comprar/vender deja un arbitraje real.
-const CANJE_COST_PCT = 0.5;
+const CANJE_COST_PCT = 0.4;
 
 function useDollarBonds() {
   const [rows, setRows] = useState([]);
@@ -22508,8 +22509,8 @@ function DollarBondsSection() {
           {arbPct != null && (
             <div style={{ fontSize: 11.5, color: hasArb ? C.green : C.muted, fontWeight: 600, marginBottom: 12 }}>
               {hasArb
-                ? `Canje real: comprar por ${bestBuy.label} y vender por ${bestSell.label} deja ${fmt(arbPct, 2)}% (> costo ~${CANJE_COST_PCT}%). Confirmá puntas antes de operar.`
-                : `Sin canje: mejor compra vs mejor venta = ${fmt(arbPct, 2)}% (no cubre el costo ~${CANJE_COST_PCT}% del rulo).`}
+                ? `Canje real: comprar por ${bestBuy.label} y vender por ${bestSell.label} deja ${fmt(arbPct, 2)}% (> costo Black ~${CANJE_COST_PCT}%). Confirmá puntas antes de operar.`
+                : `Sin canje: mejor compra vs mejor venta = ${fmt(arbPct, 2)}% (no cubre el costo Black ~${CANJE_COST_PCT}% del rulo).`}
             </div>
           )}
 
