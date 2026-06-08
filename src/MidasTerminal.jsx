@@ -26819,31 +26819,36 @@ function DlrCurveSection({ dlrCurve, C, compact = false, hideTitle = false }) {
 
         {/* Tabla compacta de basis — OCULTA en modo compact */}
         {!compact && (
-          <div style={{ flex: "0 1 340px", minWidth: 280 }}>
-            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12, fontVariantNumeric: "tabular-nums" }}>
+          <div style={{ flex: "0 1 460px", minWidth: 340 }}>
+            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11.5, fontVariantNumeric: "tabular-nums" }}>
               <thead>
                 <tr>
-                  <th style={{ textAlign: "left", padding: "6px 8px", color: C.dim, fontSize: 10, letterSpacing: "0.06em", textTransform: "uppercase", fontWeight: 500, borderBottom: `1px solid ${C.border}` }}>DLR</th>
-                  <th style={{ textAlign: "right", padding: "6px 8px", color: C.dim, fontSize: 10, letterSpacing: "0.06em", textTransform: "uppercase", fontWeight: 500, borderBottom: `1px solid ${C.border}` }}>Real</th>
-                  <th style={{ textAlign: "right", padding: "6px 8px", color: C.dim, fontSize: 10, letterSpacing: "0.06em", textTransform: "uppercase", fontWeight: 500, borderBottom: `1px solid ${C.border}` }}>Teórico</th>
-                  <th style={{ textAlign: "right", padding: "6px 8px", color: C.dim, fontSize: 10, letterSpacing: "0.06em", textTransform: "uppercase", fontWeight: 500, borderBottom: `1px solid ${C.border}` }}>Basis</th>
+                  {["DLR", "Real", "Teórico", "Basis", "REM", "vs REM"].map((h, i) => (
+                    <th key={h} style={{ textAlign: i === 0 ? "left" : "right", padding: "6px 7px", color: i >= 4 ? C.cat.amber : C.dim, fontSize: 9.5, letterSpacing: "0.05em", textTransform: "uppercase", fontWeight: 500, borderBottom: `1px solid ${C.border}` }}>{h}</th>
+                  ))}
                 </tr>
               </thead>
               <tbody>
                 {dlrCurve.points.map((p) => (
                   <tr key={`tbl-${p.ticker}`} style={{ borderBottom: `1px solid ${C.border}` }}>
-                    <td style={{ padding: "6px 8px", color: C.text, fontWeight: 500 }}>
-                      <span style={{ color: colorForStatus(p.status), marginRight: 6, fontSize: 13 }}>●</span>
+                    <td style={{ padding: "6px 7px", color: C.text, fontWeight: 500 }}>
+                      <span style={{ color: colorForStatus(p.status), marginRight: 5, fontSize: 12 }}>●</span>
                       {p.shortTicker}
                     </td>
-                    <td style={{ padding: "6px 8px", textAlign: "right", color: C.text, fontFamily: "'Roboto Mono', monospace" }}>
+                    <td style={{ padding: "6px 7px", textAlign: "right", color: C.text, fontFamily: "'Roboto Mono', monospace" }}>
                       {p.price.toFixed(2)}
                     </td>
-                    <td style={{ padding: "6px 8px", textAlign: "right", color: C.muted, fontFamily: "'Roboto Mono', monospace" }}>
+                    <td style={{ padding: "6px 7px", textAlign: "right", color: C.muted, fontFamily: "'Roboto Mono', monospace" }}>
                       {p.priceTheoric.toFixed(2)}
                     </td>
-                    <td style={{ padding: "6px 8px", textAlign: "right", color: colorForStatus(p.status), fontWeight: 600, fontFamily: "'Roboto Mono', monospace" }}>
+                    <td style={{ padding: "6px 7px", textAlign: "right", color: colorForStatus(p.status), fontWeight: 600, fontFamily: "'Roboto Mono', monospace" }}>
                       {p.status === "ancla" ? "ancla" : `${p.basisPct >= 0 ? "+" : ""}${p.basisPct.toFixed(2)}%`}
+                    </td>
+                    <td style={{ padding: "6px 7px", textAlign: "right", color: p.priceRem != null ? C.cat.amber : C.dim, fontFamily: "'Roboto Mono', monospace" }}>
+                      {p.priceRem != null ? p.priceRem.toFixed(2) : "—"}
+                    </td>
+                    <td style={{ padding: "6px 7px", textAlign: "right", color: p.basisRemPct != null ? colorForStatus(p.statusRem) : C.dim, fontWeight: 600, fontFamily: "'Roboto Mono', monospace" }}>
+                      {p.basisRemPct != null ? `${p.basisRemPct >= 0 ? "+" : ""}${p.basisRemPct.toFixed(2)}%` : "—"}
                     </td>
                   </tr>
                 ))}
@@ -26857,6 +26862,9 @@ function DlrCurveSection({ dlrCurve, C, compact = false, hideTitle = false }) {
       {!compact && (
         <div style={{ marginTop: 14, padding: "10px 14px", background: "rgba(91, 141, 214, 0.06)", borderLeft: `2px solid ${C.accentBorder}`, fontSize: 11, color: C.muted, lineHeight: 1.6 }}>
           <strong style={{ color: C.text }}>Lectura:</strong> la <strong style={{ color: C.text }}>curva lisa teórica</strong> asume devaluación mensual constante entre {anchorLabel}. Un DLR <strong style={{ color: C.green }}>verde</strong> cotiza por debajo de la curva (basis &lt; -0.3%) — hedgear con él captura alfa extra. Un DLR <strong style={{ color: C.red }}>rojo</strong> cotiza encima (basis &gt; +0.3%), se evita como hedge cuando hay alternativa. Las <strong style={{ color: C.accent }}>anclas</strong> ({hasSpotAnchor ? "spot mayorista y último DLR" : "primer y último DLR"}) definen la curva por construcción.{hasSpotAnchor ? " El spot es el valor real del dólar hoy: desde ahí se mide el basis de cada futuro, incluido el primero." : ""}
+          {dlrCurve.hasRem && (
+            <><br /><strong style={{ color: C.cat.amber }}>REM</strong> = el dólar que pronostican las consultoras (BCRA) para ese mes — <strong>no</strong> es el "teórico" (ese es la curva interna). <strong style={{ color: C.cat.amber }}>vs REM</strong> compara el futuro contra ese pronóstico: <strong style={{ color: C.red }}>rojo</strong> = el mercado pricea MÁS devaluación que el consenso (futuro caro), <strong style={{ color: C.green }}>verde</strong> = menos (futuro barato).</>
+          )}
         </div>
       )}
     </div>
