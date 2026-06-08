@@ -22148,20 +22148,24 @@ function HedgeScenarioWidget({ full = false }) {
   const { positions } = useUserPositions();
   const bondPricesState = useBondPrices();
   const bondPrices = bondPricesState?.prices || {};
+  const fciState = useFciPrices(positions);
+  const fciPrices = fciState?.prices || {};
   const fxState = useDashboardFx();
   const spot = fxState?.fx?.mayorista?.mid ?? null;
 
-  const { bonds, futuresRaw, futureTickers } = useMemo(() => {
-    const bAcc = {}, fAcc = {};
+  const { bonds, fcis, futuresRaw, futureTickers } = useMemo(() => {
+    const bAcc = {}, fAcc = {}, fciAcc = {};
     for (const p of positions || []) {
       const q = Number(p.quantity) || 0;
       const signed = p.operation_type === "sell" ? -q : q;
       if (p.instrument_type === "bond_ars") bAcc[p.ticker] = (bAcc[p.ticker] || 0) + signed;
+      else if (p.instrument_type === "fci") fciAcc[p.ticker] = (fciAcc[p.ticker] || 0) + signed;
       else if (p.instrument_type === "future" && /^DLR/i.test(p.ticker)) fAcc[p.ticker] = (fAcc[p.ticker] || 0) + signed;
     }
     const bonds = Object.entries(bAcc).filter(([, n]) => Math.abs(n) > 1e-6).map(([ticker, qty]) => ({ ticker, qty }));
+    const fcis = Object.entries(fciAcc).filter(([, n]) => Math.abs(n) > 1e-6).map(([ticker, qty]) => ({ ticker, qty }));
     const futuresRaw = Object.entries(fAcc).filter(([, n]) => Math.abs(n) > 1e-6).map(([ticker, net]) => ({ ticker, net }));
-    return { bonds, futuresRaw, futureTickers: futuresRaw.map((f) => f.ticker) };
+    return { bonds, fcis, futuresRaw, futureTickers: futuresRaw.map((f) => f.ticker) };
   }, [positions]);
 
   const { prices: futPrices } = useFuturePrices(futureTickers);
@@ -22173,27 +22177,49 @@ function HedgeScenarioWidget({ full = false }) {
     const px = bondPrices[b.ticker]?.price;
     return s + (px ? (b.qty * px) / 100 : 0);
   }, 0);
+  // FCI: tambien son carry en pesos (invierten en bonos/cauciones/plazos fijos).
+  // Valor = cuotapartes × VCP (sin convencion /100). Key normalizada (trim+UPPER).
+  const fciPesoTotal = fcis.reduce((s, f) => {
+    const vcp = fciPrices[(f.ticker || "").trim().toUpperCase()]?.price;
+    return s + (vcp ? f.qty * vcp : 0);
+  }, 0);
+  const carryPesoTotal = bondPesoTotal + fciPesoTotal;
   const futNet = futures.reduce((s, f) => s + f.net, 0);
+  // Contratos para calzar el sintetico (cobertura dolar-neutra): cubrir el valor
+  // en USD del carry. Cada contrato DLR = 1000 USD de exposicion.
+  const carryUsd = spot ? carryPesoTotal / spot : null;
+  const neutralContracts = carryUsd != null ? carryUsd / 1000 : null;
+  const excessContracts = neutralContracts != null ? futNet - neutralContracts : null;
 
   if (spot == null) return <div style={{ padding: "30px 20px", textAlign: "center", color: C.muted, fontSize: 11 }}>Esperando spot mayorista…</div>;
-  if (bonds.length === 0 && futures.length === 0) return <div style={{ padding: "30px 20px", textAlign: "center", color: C.muted, fontSize: 11 }}>Sin bonos en pesos ni futuros DLR en tu cartera.</div>;
+  if (bonds.length === 0 && fcis.length === 0 && futures.length === 0) return <div style={{ padding: "30px 20px", textAlign: "center", color: C.muted, fontSize: 11 }}>Sin carry en pesos ni futuros DLR en tu cartera.</div>;
 
   const devs = full ? [-0.05, 0, 0.10, 0.20, 0.30, 0.50] : [0, 0.10, 0.20, 0.30];
-  const rows = computeHedgeScenarios({ bondPesoTotal, futures, spot, devs });
+  const rows = computeHedgeScenarios({ bondPesoTotal: carryPesoTotal, futures, spot, devs });
   const fmtU = (n) => (n == null || !Number.isFinite(n) ? "—" : Math.round(n).toLocaleString("es-AR"));
   const net0 = rows[0]?.netUsd ?? 0;
 
   return (
     <div style={{ padding: "14px 16px", display: "flex", flexDirection: "column", gap: 10 }}>
-      <div style={{ fontSize: 11, color: C.muted, lineHeight: 1.4 }}>
-        Valor en USD de tu posición si el dólar salta (horizonte: vto del front). Bonos en pesos {fmtU(bondPesoTotal / spot)} USD · futuros long <b style={{ color: C.text }}>{futNet}</b> contratos.
+      <div style={{ fontSize: 11, color: C.muted, lineHeight: 1.5 }}>
+        Valor en USD de tu posición si el dólar salta (horizonte: vto del front). Carry en pesos <b style={{ color: C.text }}>{fmtU(carryUsd)} USD</b> (bonos {fmtU(bondPesoTotal / spot)} + FCI {fmtU(fciPesoTotal / spot)}) · futuros long <b style={{ color: C.text }}>{futNet}</b> contratos.
       </div>
+      {neutralContracts != null && (
+        <div style={{ fontSize: 11.5, color: C.text, background: C.deep, border: `1px solid ${C.border}`, borderRadius: 6, padding: "9px 11px", lineHeight: 1.55 }}>
+          Para <b>calzar el sintético</b> (cobertura dólar-neutra) necesitás <b style={{ color: C.accent }}>~{Math.round(neutralContracts)}</b> contratos. Tenés <b>{futNet}</b> →{" "}
+          {excessContracts > 0.5
+            ? <>te <b style={{ color: C.green }}>sobran +{Math.round(excessContracts)}</b> contratos: ese excedente es apuesta direccional a la devaluación (no cobertura).</>
+            : excessContracts < -0.5
+            ? <>te <b style={{ color: C.red }}>faltan {Math.round(-excessContracts)}</b> contratos para estar calzado.</>
+            : <b style={{ color: C.green }}>estás calzado al milímetro.</b>}
+        </div>
+      )}
       <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11.5 }}>
         <thead>
           <tr style={{ color: C.dim, fontSize: 9, letterSpacing: "0.06em", textTransform: "uppercase" }}>
             <th style={{ textAlign: "left", padding: "4px 6px" }}>Salto $</th>
             {full && <th style={{ textAlign: "right", padding: "4px 6px" }}>Dólar</th>}
-            <th style={{ textAlign: "right", padding: "4px 6px" }}>Bonos USD</th>
+            <th style={{ textAlign: "right", padding: "4px 6px" }}>Carry USD</th>
             <th style={{ textAlign: "right", padding: "4px 6px" }}>Futuros USD</th>
             <th style={{ textAlign: "right", padding: "4px 6px" }}>Neto USD</th>
           </tr>
@@ -22214,10 +22240,10 @@ function HedgeScenarioWidget({ full = false }) {
         </tbody>
       </table>
       <div style={{ fontSize: 10, color: C.dim, lineHeight: 1.5 }}>
-        {futNet > 0
-          ? "Estás neto LONG dólar: ganás si salta, pagás el carry si no se mueve. "
+        {excessContracts > 0.5
+          ? "Estás neto LONG dólar (más futuros que el calce): ganás si salta, pagás el carry si no se mueve. "
           : ""}
-        Foto de sensibilidad al dólar (bonos a valor de hoy; CER sin proyectar inflación). Detalle en Analizadores → Sintético DLR.
+        Foto de sensibilidad al dólar. Carry = bonos + FCI a valor de hoy (CER/FCI sin proyectar rendimiento futuro). Detalle en Analizadores → Sintético DLR.
       </div>
     </div>
   );
