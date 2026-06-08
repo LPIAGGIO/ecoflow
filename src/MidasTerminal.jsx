@@ -20589,6 +20589,11 @@ function DashboardModule() {
           {() => <CarryDlrWidget futurePrices={futurePrices} />}
         </DashboardWidget>
 
+        {/* Widget: Mi cobertura · escenarios de dolar sobre bonos + futuros reales */}
+        <DashboardWidget title="Mi Cobertura · Escenarios" minHeight={280}>
+          {() => <HedgeScenarioWidget />}
+        </DashboardWidget>
+
         {/* Widget 2: FX en vivo (real) */}
         <DashboardWidget title="FX en vivo" minHeight={280}>
           {({ expanded }) => <FxLiveWidget expanded={expanded} />}
@@ -22101,6 +22106,112 @@ function CarryDlrWidget({ futurePrices }) {
       </div>
       <div style={{ fontSize: 10, color: C.dim, lineHeight: 1.5 }}>
         Es lo que cuesta cubrirse con el LONG del front (la devaluación ya embebida en el precio del futuro). Si tu tasa en pesos la supera, ganás en dólares aun cubierto del salto. El detalle por bono está en Analizadores → Sintético DLR / Carry Trade. Indicativo.
+      </div>
+    </div>
+  );
+}
+
+/* ─────────────── Escenarios de cobertura (bonos + futuros DLR) ───────────────
+ *
+ * Motor COMPARTIDO (lo usan el widget del Dashboard y la seccion de Sintetico
+ * Dolar). Toma la posicion real de LP: bonos en pesos (el carry) + futuros DLR
+ * long (la cobertura), y proyecta el valor en USD bajo distintos saltos del
+ * dolar a un horizonte.
+ *
+ * Modelo (explicado con LP):
+ *   - spotS = spot * (1 + dev)
+ *   - Bonos: valor en pesos / spotS = valor en USD (cae si el dolar sube).
+ *   - Futuros: P&L pesos = Σ net*1000*(spotS - F); /spotS = USD (sube si sube).
+ *   - Neto USD = bonos USD + futuros P&L USD.
+ * Supuestos: la curva de futuros se mueve con el spot; bonos a valor de hoy
+ * (sin devengar el cupon del horizonte; los CER no proyectan inflacion futura).
+ * Es una foto de SENSIBILIDAD al dolar, no un P&L contable exacto.
+ */
+function computeHedgeScenarios({ bondPesoTotal, futures, spot, devs }) {
+  if (!Number.isFinite(spot) || spot <= 0) return null;
+  const bondUsd0 = bondPesoTotal / spot;
+  return devs.map((dev) => {
+    const spotS = spot * (1 + dev);
+    const bondUsd = bondPesoTotal / spotS;
+    const futPnlPesos = futures.reduce((s, f) => s + f.net * 1000 * (spotS - f.F), 0);
+    const futPnlUsd = futPnlPesos / spotS;
+    return { dev, spotS, bondUsd, futPnlUsd, netUsd: bondUsd + futPnlUsd };
+  }).map((r) => ({ ...r, netVsHoy: r.netUsd - bondUsd0 }));
+}
+
+// Widget compacto del Dashboard: foto de "como estoy parado" bajo escenarios.
+function HedgeScenarioWidget() {
+  const { positions } = useUserPositions();
+  const bondPricesState = useBondPrices();
+  const bondPrices = bondPricesState?.prices || {};
+  const fxState = useDashboardFx();
+  const spot = fxState?.fx?.mayorista?.mid ?? null;
+
+  const { bonds, futuresRaw, futureTickers } = useMemo(() => {
+    const bAcc = {}, fAcc = {};
+    for (const p of positions || []) {
+      const q = Number(p.quantity) || 0;
+      const signed = p.operation_type === "sell" ? -q : q;
+      if (p.instrument_type === "bond_ars") bAcc[p.ticker] = (bAcc[p.ticker] || 0) + signed;
+      else if (p.instrument_type === "future" && /^DLR/i.test(p.ticker)) fAcc[p.ticker] = (fAcc[p.ticker] || 0) + signed;
+    }
+    const bonds = Object.entries(bAcc).filter(([, n]) => Math.abs(n) > 1e-6).map(([ticker, qty]) => ({ ticker, qty }));
+    const futuresRaw = Object.entries(fAcc).filter(([, n]) => Math.abs(n) > 1e-6).map(([ticker, net]) => ({ ticker, net }));
+    return { bonds, futuresRaw, futureTickers: futuresRaw.map((f) => f.ticker) };
+  }, [positions]);
+
+  const { prices: futPrices } = useFuturePrices(futureTickers);
+
+  const futures = futuresRaw
+    .map((f) => ({ ...f, F: futPrices[f.ticker]?.price ?? futPrices[f.ticker]?.last ?? null }))
+    .filter((f) => f.F != null);
+  const bondPesoTotal = bonds.reduce((s, b) => {
+    const px = bondPrices[b.ticker]?.price;
+    return s + (px ? (b.qty * px) / 100 : 0);
+  }, 0);
+  const futNet = futures.reduce((s, f) => s + f.net, 0);
+
+  if (spot == null) return <div style={{ padding: "30px 20px", textAlign: "center", color: C.muted, fontSize: 11 }}>Esperando spot mayorista…</div>;
+  if (bonds.length === 0 && futures.length === 0) return <div style={{ padding: "30px 20px", textAlign: "center", color: C.muted, fontSize: 11 }}>Sin bonos en pesos ni futuros DLR en tu cartera.</div>;
+
+  const devs = [0, 0.10, 0.20, 0.30];
+  const rows = computeHedgeScenarios({ bondPesoTotal, futures, spot, devs });
+  const fmtU = (n) => (n == null || !Number.isFinite(n) ? "—" : Math.round(n).toLocaleString("es-AR"));
+  const net0 = rows[0]?.netUsd ?? 0;
+
+  return (
+    <div style={{ padding: "14px 16px", display: "flex", flexDirection: "column", gap: 10 }}>
+      <div style={{ fontSize: 11, color: C.muted, lineHeight: 1.4 }}>
+        Valor en USD de tu posición si el dólar salta (horizonte: vto del front). Bonos en pesos {fmtU(bondPesoTotal / spot)} USD · futuros long <b style={{ color: C.text }}>{futNet}</b> contratos.
+      </div>
+      <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11.5 }}>
+        <thead>
+          <tr style={{ color: C.dim, fontSize: 9, letterSpacing: "0.06em", textTransform: "uppercase" }}>
+            <th style={{ textAlign: "left", padding: "4px 6px" }}>Salto $</th>
+            <th style={{ textAlign: "right", padding: "4px 6px" }}>Bonos USD</th>
+            <th style={{ textAlign: "right", padding: "4px 6px" }}>Futuros USD</th>
+            <th style={{ textAlign: "right", padding: "4px 6px" }}>Neto USD</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((r) => {
+            const better = r.netUsd >= net0;
+            return (
+              <tr key={r.dev} style={{ borderTop: `1px solid ${C.border}` }}>
+                <td style={{ textAlign: "left", padding: "5px 6px", color: C.text, fontWeight: 600 }}>{r.dev === 0 ? "0% (crawl)" : `+${Math.round(r.dev * 100)}%`}</td>
+                <td style={{ textAlign: "right", padding: "5px 6px", color: C.muted, fontVariantNumeric: "tabular-nums" }}>{fmtU(r.bondUsd)}</td>
+                <td style={{ textAlign: "right", padding: "5px 6px", color: r.futPnlUsd >= 0 ? C.green : C.red, fontVariantNumeric: "tabular-nums" }}>{r.futPnlUsd >= 0 ? "+" : ""}{fmtU(r.futPnlUsd)}</td>
+                <td style={{ textAlign: "right", padding: "5px 6px", color: better ? C.green : C.text, fontWeight: 600, fontVariantNumeric: "tabular-nums" }}>{fmtU(r.netUsd)}</td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+      <div style={{ fontSize: 10, color: C.dim, lineHeight: 1.5 }}>
+        {futNet > 0
+          ? "Estás neto LONG dólar: ganás si salta, pagás el carry si no se mueve. "
+          : ""}
+        Foto de sensibilidad al dólar (bonos a valor de hoy; CER sin proyectar inflación). Detalle en Analizadores → Sintético DLR.
       </div>
     </div>
   );
