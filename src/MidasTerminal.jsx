@@ -20201,7 +20201,7 @@ function FxLiveWidget({ expanded }) {
 //
 // El modal se cierra con Escape, click en backdrop, o click en la X.
 // ═══════════════════════════════════════════════════════════════════════
-function DashboardWidget({ title, children, minHeight = 240 }) {
+function DashboardWidget({ title, children, minHeight = 240, draggable = false, isOver = false, isDragging = false, onDragStart, onDragOver, onDrop, onDragEnd }) {
   const [expanded, setExpanded] = useState(false);
 
   // Escape cierra el modal cuando está expandido
@@ -20222,31 +20222,49 @@ function DashboardWidget({ title, children, minHeight = 240 }) {
 
   return (
     <>
-      {/* Widget compacto en el grid */}
-      <div style={{
+      {/* Widget compacto en el grid (drop target) */}
+      <div
+        onDragOver={onDragOver}
+        onDrop={onDrop}
+        onDragEnd={onDragEnd}
+        style={{
         background: C.panel,
-        border: `1px solid ${C.border}`,
+        border: `1px solid ${isOver ? C.accent : C.border}`,
         display: "flex",
         flexDirection: "column",
         minHeight,
+        opacity: isDragging ? 0.4 : 1,
+        transition: "border-color 0.12s, opacity 0.12s",
       }}>
-        {/* Header del widget */}
-        <div style={{
+        {/* Header del widget (handle de arrastre) */}
+        <div
+          draggable={draggable}
+          onDragStart={onDragStart}
+          style={{
           padding: "10px 14px",
           borderBottom: `1px solid ${C.border}`,
           display: "flex",
           alignItems: "center",
           justifyContent: "space-between",
           gap: 10,
+          cursor: draggable ? "grab" : "default",
         }}>
-          <span style={{
-            fontSize: 11,
-            fontWeight: 600,
-            color: C.text,
-            letterSpacing: "0.06em",
-            textTransform: "uppercase",
-          }}>
-            {title}
+          <span style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
+            {draggable && (
+              <span title="Arrastrá para reordenar" style={{ color: C.dim, fontSize: 13, lineHeight: 1, userSelect: "none", letterSpacing: "-2px" }}>⠿</span>
+            )}
+            <span style={{
+              fontSize: 11,
+              fontWeight: 600,
+              color: C.text,
+              letterSpacing: "0.06em",
+              textTransform: "uppercase",
+              whiteSpace: "nowrap",
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+            }}>
+              {title}
+            </span>
           </span>
           <button
             onClick={() => setExpanded(true)}
@@ -20514,6 +20532,23 @@ function NavCurveSection({ userId, C, compact = false }) {
   );
 }
 
+// Orden de los widgets del Dashboard, persistido en localStorage (drag & drop).
+const DASHBOARD_ORDER_LS_KEY = "midas:dashboard-order-v1";
+const DASHBOARD_WIDGET_IDS = [
+  "curva-dlr", "cobertura-dlr", "mi-cobertura", "fx", "resumen",
+  "flujo", "nav", "carry", "macro", "alertas-activas",
+];
+function loadDashboardOrder(allIds) {
+  let saved = [];
+  try { saved = JSON.parse(localStorage.getItem(DASHBOARD_ORDER_LS_KEY) || "[]"); } catch (e) { saved = []; }
+  const known = (Array.isArray(saved) ? saved : []).filter((id) => allIds.includes(id));
+  const missing = allIds.filter((id) => !known.includes(id));
+  return [...known, ...missing];
+}
+function persistDashboardOrder(order) {
+  try { localStorage.setItem(DASHBOARD_ORDER_LS_KEY, JSON.stringify(order)); } catch (e) { /* noop */ }
+}
+
 function DashboardModule() {
   // Tickers DLR vivos (con vencimiento futuro). Memoizado para que el hook
   // de polling no se reinicie en cada render.
@@ -20534,6 +20569,27 @@ function DashboardModule() {
 
   const { user } = useAuth();
 
+  // ── Orden de widgets (drag & drop, persistido) ──
+  const [order, setOrder] = useState(() => loadDashboardOrder(DASHBOARD_WIDGET_IDS));
+  const [dragId, setDragId] = useState(null);
+  const [overId, setOverId] = useState(null);
+  const handleDrop = useCallback((targetId) => {
+    setOrder((prev) => {
+      if (!dragId || dragId === targetId) return prev;
+      const next = prev.filter((id) => id !== dragId);
+      const idx = next.indexOf(targetId);
+      next.splice(idx < 0 ? next.length : idx, 0, dragId);
+      persistDashboardOrder(next);
+      return next;
+    });
+    setDragId(null);
+    setOverId(null);
+  }, [dragId]);
+  const resetOrder = useCallback(() => {
+    persistDashboardOrder(DASHBOARD_WIDGET_IDS);
+    setOrder(DASHBOARD_WIDGET_IDS);
+  }, []);
+
   // Construcción de la curva. Reusa el helper global que también usa el
   // Sintético DLR — misma lógica de filtrado y mismo umbral de basis.
   const dlrCurve = useMemo(
@@ -20541,23 +20597,27 @@ function DashboardModule() {
     [futurePrices, spotMayorista]
   );
 
-  // Placeholders de widgets futuros. Cada uno reserva espacio en el grid
-  // para que se vea el formato de "panel modular" desde el primer día.
-  // Los voy a ir reemplazando con widgets reales en próximas sesiones.
-  const upcomingWidgets = [
-    { title: "Alertas activas",   desc: "Cruces de basis, vencimientos próximos, gaps" },
-  ];
-
   return (
     <div style={{ padding: "20px 24px 32px", overflowY: "auto", height: "100%" }}>
       {/* Header del módulo */}
-      <div style={{ marginBottom: 18, paddingBottom: 12, borderBottom: `1px solid ${C.border}` }}>
-        <h1 style={{ fontSize: 16, fontWeight: 600, color: C.text, margin: 0, letterSpacing: "0.05em", textTransform: "uppercase" }}>
-          Dashboard
-        </h1>
-        <p style={{ fontSize: 11, color: C.muted, margin: "5px 0 0 0", letterSpacing: "0.02em" }}>
-          Panel modular · click en ⛶ para expandir cada widget
-        </p>
+      <div style={{ marginBottom: 18, paddingBottom: 12, borderBottom: `1px solid ${C.border}`, display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 12 }}>
+        <div>
+          <h1 style={{ fontSize: 16, fontWeight: 600, color: C.text, margin: 0, letterSpacing: "0.05em", textTransform: "uppercase" }}>
+            Dashboard
+          </h1>
+          <p style={{ fontSize: 11, color: C.muted, margin: "5px 0 0 0", letterSpacing: "0.02em" }}>
+            Panel modular · arrastrá un widget (⠿) para reordenar · ⛶ para expandir
+          </p>
+        </div>
+        <button
+          onClick={resetOrder}
+          title="Volver al orden original"
+          style={{ flexShrink: 0, background: "transparent", border: `1px solid ${C.border}`, color: C.muted, borderRadius: 4, padding: "5px 10px", fontSize: 10.5, letterSpacing: "0.04em", cursor: "pointer" }}
+          onMouseEnter={(e) => { e.currentTarget.style.borderColor = C.accent; e.currentTarget.style.color = C.text; }}
+          onMouseLeave={(e) => { e.currentTarget.style.borderColor = C.border; e.currentTarget.style.color = C.muted; }}
+        >
+          Restablecer orden
+        </button>
       </div>
 
       {/* Grid responsive de widgets.
@@ -20569,92 +20629,59 @@ function DashboardModule() {
         gridTemplateColumns: "repeat(auto-fit, minmax(380px, 1fr))",
         gap: 14,
       }}>
-        {/* Widget 1: Curva DLR + Detector de Basis (real) */}
-        <DashboardWidget title="Curva DLR · Detector de Basis" minHeight={280}>
-          {({ expanded }) => (
-            dlrCurve ? (
-              <DlrCurveSection dlrCurve={dlrCurve} C={C} compact={!expanded} hideTitle />
-            ) : (
-              <div style={{ padding: "40px 22px", textAlign: "center", color: C.muted, fontSize: 11 }}>
-                {futuresLoading
-                  ? "Cargando precios de futuros DLR..."
-                  : "Sin datos de futuros DLR disponibles."}
+        {(() => {
+          // Catalogo de widgets con id estable (para persistir el orden).
+          const widgets = [
+            { id: "curva-dlr", title: "Curva DLR · Detector de Basis", render: ({ expanded }) => (
+              dlrCurve ? (
+                <DlrCurveSection dlrCurve={dlrCurve} C={C} compact={!expanded} hideTitle />
+              ) : (
+                <div style={{ padding: "40px 22px", textAlign: "center", color: C.muted, fontSize: 11 }}>
+                  {futuresLoading ? "Cargando precios de futuros DLR..." : "Sin datos de futuros DLR disponibles."}
+                </div>
+              )
+            ) },
+            { id: "cobertura-dlr", title: "Cobertura DLR · Costo del hedge", render: () => <CarryDlrWidget futurePrices={futurePrices} /> },
+            { id: "mi-cobertura", title: "Mi Cobertura · Escenarios", render: () => <HedgeScenarioWidget /> },
+            { id: "fx", title: "FX en vivo", render: ({ expanded }) => <FxLiveWidget expanded={expanded} /> },
+            { id: "resumen", title: "Resumen Portfolio", render: ({ expanded }) => <PortfolioSummaryWidget expanded={expanded} /> },
+            { id: "flujo", title: "Flujo de Posiciones", render: () => <PositionFlowWidget /> },
+            { id: "nav", title: "Evolución del patrimonio", render: ({ expanded }) => <NavCurveSection userId={user?.id} C={C} compact={!expanded} /> },
+            { id: "carry", title: "Carry Trade · Top TEA", render: ({ expanded }) => <CarryTradeWidget expanded={expanded} /> },
+            { id: "macro", title: "Indicadores Macro", render: ({ expanded }) => <BcraIndicatorsWidget expanded={expanded} /> },
+            { id: "alertas-activas", title: "Alertas activas", render: () => (
+              <div style={{ height: "100%", minHeight: 240, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 8, padding: "20px 24px", textAlign: "center" }}>
+                <span style={{ fontSize: 10, color: C.dim, letterSpacing: "0.18em", textTransform: "uppercase", fontWeight: 600 }}>Próximamente</span>
+                <p style={{ fontSize: 11.5, color: C.muted, margin: 0, lineHeight: 1.6, maxWidth: 280 }}>Cruces de basis, vencimientos próximos, gaps</p>
               </div>
-            )
-          )}
-        </DashboardWidget>
-
-        {/* Widget: Cobertura DLR · costo del hedge (la tasa que el carry en pesos debe superar) */}
-        <DashboardWidget title="Cobertura DLR · Costo del hedge" minHeight={280}>
-          {() => <CarryDlrWidget futurePrices={futurePrices} />}
-        </DashboardWidget>
-
-        {/* Widget: Mi cobertura · escenarios de dolar sobre bonos + futuros reales */}
-        <DashboardWidget title="Mi Cobertura · Escenarios" minHeight={280}>
-          {() => <HedgeScenarioWidget />}
-        </DashboardWidget>
-
-        {/* Widget 2: FX en vivo (real) */}
-        <DashboardWidget title="FX en vivo" minHeight={280}>
-          {({ expanded }) => <FxLiveWidget expanded={expanded} />}
-        </DashboardWidget>
-
-        {/* Widget 3: Resumen Portfolio (real) */}
-        <DashboardWidget title="Resumen Portfolio" minHeight={280}>
-          {({ expanded }) => <PortfolioSummaryWidget expanded={expanded} />}
-        </DashboardWidget>
-
-        {/* Widget: Flujo de Posiciones (compacto) — flujo del libro + alertas activas */}
-        <DashboardWidget title="Flujo de Posiciones" minHeight={280}>
-          {() => <PositionFlowWidget />}
-        </DashboardWidget>
-
-        {/* Widget: Evolución del patrimonio (NAV en el tiempo) */}
-        <DashboardWidget title="Evolución del patrimonio" minHeight={280}>
-          {({ expanded }) => <NavCurveSection userId={user?.id} C={C} compact={!expanded} />}
-        </DashboardWidget>
-
-        {/* Widget 4: Carry Trade (real) */}
-        <DashboardWidget title="Carry Trade · Top TEA" minHeight={280}>
-          {({ expanded }) => <CarryTradeWidget expanded={expanded} />}
-        </DashboardWidget>
-
-        {/* Widget 5: Indicadores BCRA / Macro (real) */}
-        <DashboardWidget title="Indicadores Macro" minHeight={280}>
-          {({ expanded }) => <BcraIndicatorsWidget expanded={expanded} />}
-        </DashboardWidget>
-
-        {/* Widgets placeholder — se van reemplazando en próximas sesiones */}
-        {upcomingWidgets.map((w) => (
-          <DashboardWidget key={w.title} title={w.title} minHeight={280}>
-            {() => (
-              <div style={{
-                height: "100%",
-                minHeight: 240,
-                display: "flex",
-                flexDirection: "column",
-                alignItems: "center",
-                justifyContent: "center",
-                gap: 8,
-                padding: "20px 24px",
-                textAlign: "center",
-              }}>
-                <span style={{
-                  fontSize: 10,
-                  color: C.dim,
-                  letterSpacing: "0.18em",
-                  textTransform: "uppercase",
-                  fontWeight: 600,
-                }}>
-                  Próximamente
-                </span>
-                <p style={{ fontSize: 11.5, color: C.muted, margin: 0, lineHeight: 1.6, maxWidth: 280 }}>
-                  {w.desc}
-                </p>
-              </div>
-            )}
-          </DashboardWidget>
-        ))}
+            ) },
+          ];
+          // Orden efectivo: el guardado + cualquier widget nuevo al final.
+          const ordered = [
+            ...order.filter((id) => widgets.some((w) => w.id === id)),
+            ...widgets.filter((w) => !order.includes(w.id)).map((w) => w.id),
+          ];
+          return ordered.map((id) => {
+            const w = widgets.find((x) => x.id === id);
+            if (!w) return null;
+            return (
+              <DashboardWidget
+                key={w.id}
+                title={w.title}
+                minHeight={280}
+                draggable
+                isOver={overId === w.id && dragId !== w.id}
+                isDragging={dragId === w.id}
+                onDragStart={(e) => { setDragId(w.id); if (e.dataTransfer) e.dataTransfer.effectAllowed = "move"; }}
+                onDragOver={(e) => { e.preventDefault(); if (overId !== w.id) setOverId(w.id); }}
+                onDrop={(e) => { e.preventDefault(); handleDrop(w.id); }}
+                onDragEnd={() => { setDragId(null); setOverId(null); }}
+              >
+                {w.render}
+              </DashboardWidget>
+            );
+          });
+        })()}
       </div>
     </div>
   );
