@@ -20571,6 +20571,8 @@ function DashboardModule() {
   // Spot mayorista: ancla inicial de la curva (lo que vale el dólar hoy).
   const { fx } = useDashboardFx();
   const spotMayorista = fx?.mayorista?.mid;
+  // Curva REM (pronóstico de consultoras) para el benchmark externo de la curva.
+  const { remTc, remIpc } = useRemFx();
 
   const { user } = useAuth();
 
@@ -20594,8 +20596,8 @@ function DashboardModule() {
   // Construcción de la curva. Reusa el helper global que también usa el
   // Sintético DLR — misma lógica de filtrado y mismo umbral de basis.
   const dlrCurve = useMemo(
-    () => buildDlrCurveFromFuturePrices(futurePrices, 0.003, spotMayorista),
-    [futurePrices, spotMayorista]
+    () => buildDlrCurveFromFuturePrices(futurePrices, 0.003, spotMayorista, remTc, remIpc),
+    [futurePrices, spotMayorista, remTc, remIpc]
   );
 
   return (
@@ -24106,6 +24108,28 @@ function projectREMTC(targetDate, remTcByMonth = {}, remIpcByMonth = {}) {
   return value;
 }
 
+// Hook compartido: trae la curva REM (tipo de cambio + IPC) del BCRA, ya
+// parseada a mapas { "YYYY-MM": valor }. Lo usan Carry Trade y la curva DLR.
+function useRemFx() {
+  const [remTc, setRemTc] = useState({});
+  const [remIpc, setRemIpc] = useState({});
+  useEffect(() => {
+    let cancelled = false;
+    const parse = (datos) => {
+      const m = {};
+      for (const d of datos || []) {
+        const per = d["período"] ?? d.periodo;
+        if (per && /^\d{4}-\d{2}-\d{2}/.test(String(per)) && d.mediana != null) m[String(per).slice(0, 7)] = d.mediana;
+      }
+      return m;
+    };
+    fetch("/api/bcra-rem?type=tipo_cambio").then((r) => (r.ok ? r.json() : null)).then((j) => { if (!cancelled && j) setRemTc(parse(j.datos)); }).catch(() => {});
+    fetch("/api/bcra-rem?type=ipc").then((r) => (r.ok ? r.json() : null)).then((j) => { if (!cancelled && j) setRemIpc(parse(j.datos)); }).catch(() => {});
+    return () => { cancelled = true; };
+  }, []);
+  return { remTc, remIpc };
+}
+
 function CarryTradeModule() {
   const [mode, setMode] = useState("byDollar");
   const [bondsRaw, setBondsRaw] = useState([]);
@@ -26196,7 +26220,7 @@ function findBestSingleHedgeForHorizon(futuresList, horizonDays) {
  *                          monthlyDevRate, annualDevRate } o null si no hay
  *                          datos suficientes (necesita >= 2 DLRs con precio).
  */
-function buildDlrCurve(futuresList, thresholdPct = 0.003, spotAnchor = null) {
+function buildDlrCurve(futuresList, thresholdPct = 0.003, spotAnchor = null, remResolver = null) {
   if (!Array.isArray(futuresList) || futuresList.length < 2) return null;
 
   // Filtrar solo DLRs con precio válido y días al vto válidos.
@@ -26254,6 +26278,17 @@ function buildDlrCurve(futuresList, thresholdPct = 0.003, spotAnchor = null) {
       status = "ancla";
     }
 
+    // Benchmark externo: la curva REM (pronóstico de consultoras). A diferencia
+    // del basis interno (vs la forma de la propia curva), acá "caro" = el
+    // mercado pricea MÁS devaluación que el consenso REM; "barato" = menos.
+    const priceRem = (!f.isSpot && f.maturityDate && remResolver) ? remResolver(f.maturityDate) : null;
+    const basisRem = (priceRem != null && priceRem > 0) ? (f.price - priceRem) / priceRem : null;
+    let statusRem = "neutro";
+    if (basisRem != null) {
+      if (basisRem < -thresholdPct) statusRem = "barato";
+      else if (basisRem > thresholdPct) statusRem = "caro";
+    }
+
     return {
       ticker: f.ticker,
       shortTicker: f.shortTicker || f.ticker.replace(/^DLR/, ""), // "DLRJUN26" → "JUN26"
@@ -26263,12 +26298,23 @@ function buildDlrCurve(futuresList, thresholdPct = 0.003, spotAnchor = null) {
       basis,
       basisPct: basis * 100,
       status,
+      priceRem,
+      basisRem,
+      basisRemPct: basisRem != null ? basisRem * 100 : null,
+      statusRem,
       isAnchor,
       isAnchorFirst,
       isAnchorLast,
       isSpot: !!f.isSpot,
     };
   });
+
+  // Deval anual implícita del REM (spot → REM del futuro más largo), para
+  // comparar de un vistazo contra la implícita del mercado.
+  const lastRemPoint = [...points].reverse().find((p) => p.priceRem != null);
+  const remAnnualDevRate = (useSpot && lastRemPoint && anchorFirst.price > 0 && lastRemPoint.expiryDays > 0)
+    ? Math.pow(lastRemPoint.priceRem / anchorFirst.price, 365 / lastRemPoint.expiryDays) - 1
+    : null;
 
   return {
     points,
@@ -26277,6 +26323,8 @@ function buildDlrCurve(futuresList, thresholdPct = 0.003, spotAnchor = null) {
     dailyDevRate,
     monthlyDevRate,
     annualDevRate,
+    hasRem: points.some((p) => p.priceRem != null),
+    remAnnualDevRate,
     threshold: thresholdPct,
     // Helper para que la UI saque rápido un DLR de la curva por ticker
     byTicker: new Map(points.map((p) => [p.ticker, p])),
@@ -26301,7 +26349,7 @@ function buildDlrCurve(futuresList, thresholdPct = 0.003, spotAnchor = null) {
  * @param {number} thresholdPct — umbral basis (default 0.003 = 0.3%)
  * @returns {Object|null} resultado de buildDlrCurve, o null si no hay datos
  */
-function buildDlrCurveFromFuturePrices(futurePrices, thresholdPct = 0.003, spotPrice = null) {
+function buildDlrCurveFromFuturePrices(futurePrices, thresholdPct = 0.003, spotPrice = null, remTc = null, remIpc = null) {
   if (!futurePrices || typeof futurePrices !== "object") return null;
 
   const futuresLive = DLR_REGISTRY
@@ -26322,7 +26370,11 @@ function buildDlrCurveFromFuturePrices(futurePrices, thresholdPct = 0.003, spotP
       ? { ticker: "SPOT", shortTicker: "SPOT", price: Number(spotPrice), isSpot: true }
       : null;
 
-  return buildDlrCurve(futuresLive, thresholdPct, spotAnchor);
+  const remResolver = (remTc && Object.keys(remTc).length > 0)
+    ? (maturityDate) => projectREMTC(maturityDate, remTc, remIpc || {})
+    : null;
+
+  return buildDlrCurve(futuresLive, thresholdPct, spotAnchor, remResolver);
 }
 
 /**
@@ -26597,7 +26649,7 @@ function DlrCurveSection({ dlrCurve, C, compact = false, hideTitle = false }) {
   const xMax = dlrCurve.points[dlrCurve.points.length - 1].expiryDays;
   const xSpan = xMax - xMin;
 
-  const allPrices = dlrCurve.points.flatMap((p) => [p.price, p.priceTheoric]);
+  const allPrices = dlrCurve.points.flatMap((p) => [p.price, p.priceTheoric, ...(p.priceRem != null ? [p.priceRem] : [])]);
   const yMin = Math.min(...allPrices) * 0.98;
   const yMax = Math.max(...allPrices) * 1.02;
   const ySpan = yMax - yMin;
@@ -26611,6 +26663,8 @@ function DlrCurveSection({ dlrCurve, C, compact = false, hideTitle = false }) {
   const pathTheoric = dlrCurve.points
     .map((p, i) => `${i === 0 ? "M" : "L"} ${xCoord(p.expiryDays)} ${yCoord(p.priceTheoric)}`)
     .join(" ");
+  const remPts = dlrCurve.points.filter((p) => p.priceRem != null);
+  const pathRem = remPts.map((p, i) => `${i === 0 ? "M" : "L"} ${xCoord(p.expiryDays)} ${yCoord(p.priceRem)}`).join(" ");
 
   const yTicks = [0, 0.25, 0.5, 0.75, 1].map((f) => yMin + ySpan * f);
 
@@ -26623,6 +26677,8 @@ function DlrCurveSection({ dlrCurve, C, compact = false, hideTitle = false }) {
 
   const baratos = dlrCurve.points.filter((p) => p.status === "barato");
   const caros = dlrCurve.points.filter((p) => p.status === "caro");
+  const carosRem = dlrCurve.points.filter((p) => p.statusRem === "caro");
+  const baratosRem = dlrCurve.points.filter((p) => p.statusRem === "barato");
   const hasSpotAnchor = !!dlrCurve.points[0]?.isSpot;
   const anchorLabel = hasSpotAnchor ? "el spot mayorista y el último DLR" : "el primer y último DLR";
 
@@ -26638,6 +26694,11 @@ function DlrCurveSection({ dlrCurve, C, compact = false, hideTitle = false }) {
         <span style={{ fontSize: compact ? 10.5 : 11.5, color: C.muted }}>
           Devaluación implícita: <strong style={{ color: C.text }}>{(dlrCurve.monthlyDevRate * 100).toFixed(2)}%</strong> mensual / <strong style={{ color: C.text }}>{(dlrCurve.annualDevRate * 100).toFixed(2)}%</strong> anual
         </span>
+        {dlrCurve.hasRem && dlrCurve.remAnnualDevRate != null && (
+          <span style={{ fontSize: compact ? 10.5 : 11.5, color: C.cat.amber }}>
+            REM (consenso): <strong>{(dlrCurve.remAnnualDevRate * 100).toFixed(1)}%</strong> anual
+          </span>
+        )}
         {(baratos.length > 0 || caros.length > 0) && (
           <span style={{ fontSize: compact ? 10.5 : 11.5, color: C.muted, marginLeft: "auto" }}>
             {baratos.length > 0 && (
@@ -26654,6 +26715,19 @@ function DlrCurveSection({ dlrCurve, C, compact = false, hideTitle = false }) {
           </span>
         )}
       </div>
+
+      {dlrCurve.hasRem && (carosRem.length > 0 || baratosRem.length > 0) && (
+        <div style={{ fontSize: compact ? 10 : 11, color: C.muted, marginBottom: compact ? 8 : 12, marginTop: compact ? -2 : -6, lineHeight: 1.4 }}>
+          <span style={{ color: C.cat.amber, fontWeight: 600 }}>vs REM (consenso):</span>{" "}
+          {baratosRem.length > 0 && (
+            <span style={{ color: C.green, fontWeight: 600 }}>barato (mercado pricea menos deval): {baratosRem.map((p) => p.shortTicker).join(", ")}</span>
+          )}
+          {baratosRem.length > 0 && carosRem.length > 0 && <span style={{ color: C.dim, margin: "0 8px" }}>·</span>}
+          {carosRem.length > 0 && (
+            <span style={{ color: C.red, fontWeight: 600 }}>caro (pricea más deval): {carosRem.map((p) => p.shortTicker).join(", ")}</span>
+          )}
+        </div>
+      )}
 
       <div style={{ display: "flex", gap: 22, alignItems: "flex-start", flexWrap: "wrap" }}>
         {/* Gráfico SVG */}
@@ -26688,6 +26762,10 @@ function DlrCurveSection({ dlrCurve, C, compact = false, hideTitle = false }) {
             <path d={pathTheoric} fill="none" stroke={C.muted} strokeWidth={compact ? "1.5" : "1.8"} strokeDasharray="6,4" opacity="0.65"/>
             {/* Curva real */}
             <path d={pathReal} fill="none" stroke={C.accent} strokeWidth={compact ? "2" : "2.5"}/>
+            {/* Curva REM (pronóstico de consultoras) — benchmark externo */}
+            {dlrCurve.hasRem && pathRem && (
+              <path d={pathRem} fill="none" stroke={C.cat.amber} strokeWidth={compact ? "1.6" : "2"} strokeDasharray="1,5" strokeLinecap="round" opacity="0.95"/>
+            )}
 
             {/* Puntos */}
             {dlrCurve.points.map((p) => {
@@ -26698,7 +26776,7 @@ function DlrCurveSection({ dlrCurve, C, compact = false, hideTitle = false }) {
                 <g key={`pt-${p.ticker}`}>
                   <circle cx={cx} cy={cy} r={compact ? 5 : 7} fill={fill} stroke="#0a0e1a" strokeWidth={compact ? "2" : "2.5"}>
                     <title>
-                      {p.ticker}: ${p.price.toFixed(2)} (teórico ${p.priceTheoric.toFixed(2)}, basis {p.basisPct >= 0 ? "+" : ""}{p.basisPct.toFixed(2)}%)
+                      {p.ticker}: ${p.price.toFixed(2)} (teórico ${p.priceTheoric.toFixed(2)}, basis {p.basisPct >= 0 ? "+" : ""}{p.basisPct.toFixed(2)}%){p.priceRem != null ? ` · REM $${p.priceRem.toFixed(2)} (${p.basisRemPct >= 0 ? "+" : ""}${p.basisRemPct.toFixed(2)}% vs consenso)` : ""}
                     </title>
                   </circle>
                   <text
@@ -26788,6 +26866,7 @@ function DlrCurveSection({ dlrCurve, C, compact = false, hideTitle = false }) {
 function SinteticoDolarModule() {
   // ─── State ──────────────────────────────────────────────
   const [spotMayorista, setSpotMayorista] = useState(null);
+  const { remTc: remTcCurve, remIpc: remIpcCurve } = useRemFx(); // REM para el benchmark de la curva DLR
   // Spot MEP (= "casa: bolsa" en dolarapi). Lo usamos en el simulador del
   // modal de detalle para calcular el equivalente USD de la inversion en
   // pesos al MEP de hoy (el FX al que un argentino realmente convierte
@@ -27170,9 +27249,12 @@ function SinteticoDolarModule() {
         0.003,
         Number.isFinite(spotMayorista) && spotMayorista > 0
           ? { ticker: "SPOT", shortTicker: "SPOT", price: spotMayorista, isSpot: true }
+          : null,
+        (remTcCurve && Object.keys(remTcCurve).length > 0)
+          ? (md) => projectREMTC(md, remTcCurve, remIpcCurve || {})
           : null
       ),
-    [futuresLive, spotMayorista]
+    [futuresLive, spotMayorista, remTcCurve, remIpcCurve]
   );
 
   // Sort dinamico: aplica sortKey/sortDir sobre rows. Las filas con
