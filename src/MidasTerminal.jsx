@@ -14553,23 +14553,22 @@ function FutureAdjustmentsModal({ adjustments, futurePrices, onConfirm, onConfir
                       }}>
                         Monto a acreditar (ARS) {isConsolidated && <span style={{ textTransform: "none", letterSpacing: 0, color: C.accent }}>· total consolidado</span>}
                       </label>
-                      <input
-                        type="text"
-                        inputMode="decimal"
+                      <MoneyInput
                         value={draft.value}
-                        onChange={(e) => setDrafts((prev) => ({
+                        onChange={(v) => setDrafts((prev) => ({
                           ...prev,
-                          [group.key]: { ...prev[group.key], value: e.target.value, error: null },
+                          [group.key]: { ...prev[group.key], value: v, error: null },
                         }))}
+                        allowNegative
+                        decimals={2}
                         disabled={draft.processing}
-                        className="eco-mono"
+                        bare
                         style={{
                           backgroundColor: C.deep,
                           border: `1px solid ${C.border}`,
                           color: C.text,
                           padding: "8px 10px",
                           fontSize: 13,
-                          fontFamily: "'JetBrains Mono', monospace",
                         }}
                       />
                     </div>
@@ -18688,10 +18687,21 @@ function Input({ value, onChange, placeholder, type = "text", step, hasError }) 
 // emit: "js" → onChange recibe JS-number-string ("1500000.75"); "ar" → recibe
 // el string formateado AR ("1.500.000,75"). Usá "ar" cuando el consumidor lo
 // parsea con parseAmountString (espera puntos de miles).
-function MoneyInput({ value, onChange, placeholder, hasError, decimals = 2, bare = false, style: styleOverride, onBlur, onKeyDown: onKeyDownExtra, emit = "js" }) {
+function MoneyInput({ value, onChange, placeholder, hasError, decimals = 2, bare = false, style: styleOverride, onBlur, onKeyDown: onKeyDownExtra, emit = "js", allowNegative = false, disabled = false }) {
   const ref = useRef(null);
   const focusedRef = useRef(false);
-  const toDisplay = (v) => emit === "ar" ? formatAmountInput(v == null ? "" : String(v), decimals) : numStrToArMask(v, decimals);
+  // Formatea preservando el signo "-" cuando allowNegative (formatAmountInput
+  // descarta no-dígitos; numStrToArMask ya es neg-aware). El "-" no es char
+  // "significativo" para countSigChars/posFromSigChars, así que el caret se
+  // mantiene bien con el signo al frente.
+  const fmtSigned = (raw) => {
+    const sv = raw == null ? "" : String(raw);
+    if (!allowNegative) return formatAmountInput(sv, decimals);
+    const neg = sv.trimStart().startsWith("-");
+    const f = formatAmountInput(sv.replace(/-/g, ""), decimals);
+    return neg ? (f === "" ? "-" : "-" + f) : f;
+  };
+  const toDisplay = (v) => emit === "ar" ? fmtSigned(v == null ? "" : String(v)) : numStrToArMask(v, decimals);
   const [display, setDisplay] = useState(() => toDisplay(value));
 
   // Sincroniza el display con el value externo, salvo mientras el user tipea
@@ -18704,9 +18714,9 @@ function MoneyInput({ value, onChange, placeholder, hasError, decimals = 2, bare
   // Reformatea en vivo, emite según `emit` y restaura el caret contando
   // caracteres significativos (los puntos de miles no cuentan).
   const pushFormatted = (rawAr, caretSig) => {
-    const formatted = formatAmountInput(rawAr, decimals);
+    const formatted = fmtSigned(rawAr);
     setDisplay(formatted);
-    onChange(emit === "ar" ? formatted : (formatted === "" ? "" : formatted.replace(/\./g, "").replace(",", ".")));
+    onChange(emit === "ar" ? formatted : (formatted === "" || formatted === "-" ? (formatted === "-" ? "-" : "") : formatted.replace(/\./g, "").replace(",", ".")));
     requestAnimationFrame(() => {
       const el = ref.current;
       if (!el) return;
@@ -18750,6 +18760,7 @@ function MoneyInput({ value, onChange, placeholder, hasError, decimals = 2, bare
       onChange={handleChange}
       onKeyDown={handleKeyDown}
       placeholder={placeholder}
+      disabled={disabled}
       style={{
         ...(bare ? {} : {
           width: "100%",
@@ -18770,7 +18781,7 @@ function MoneyInput({ value, onChange, placeholder, hasError, decimals = 2, bare
       }}
       onBlur={(e) => {
         focusedRef.current = false;
-        setDisplay(formatAmountInput(display, decimals)); // limpia coma colgada al salir
+        setDisplay(fmtSigned(display)); // limpia coma colgada al salir (preserva signo)
         if (!bare && !hasError) e.currentTarget.style.borderColor = C.border;
         if (onBlur) onBlur(e);
       }}
