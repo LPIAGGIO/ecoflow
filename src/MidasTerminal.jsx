@@ -13000,7 +13000,8 @@ function parseMatrizFuturesCsv(text, existingOrderIds) {
     const isBond = sec.startsWith("bm_") || / - XMEV - /.test(sym) || /\bMERV\b/.test(sym);
 
     let ticker = null, instrumentType = null, entryCurrency = null,
-      settlement = "CI", price = rawPrice, plazo = null, kind = "—";
+      settlement = "CI", price = rawPrice, plazo = null, kind = "—",
+      route = "position", movementType = null, cashAmount = 0;
 
     if (isFuture) {
       ticker = sym.replace("/", "").toUpperCase();
@@ -13032,6 +13033,20 @@ function parseMatrizFuturesCsv(text, existingOrderIds) {
       // Matriz cotiza los bonos ×100 respecto del feed/posiciones de Midas
       // (AL30 94180 -> 941,80 ; AL30D 64,33 -> 0,6433). Dividimos las dos patas.
       price = rawPrice / 100;
+
+      // Soberanos hard-dollar (AL/GD/AE/GE): son vehículo de compra/venta
+      // de USD (MEP/canje), no tenencias. Comprar AL30 en $ y venderlo en
+      // AL30D = convertir pesos→USD; la posición del bono queda PLANA. Se
+      // importan como MOVIMIENTO DE CAJA (la conversión), no como posición,
+      // así no aparecen shorts fantasma. Estos cotizan por 1 VN, así que el
+      // monto es qty × precio (sin el /100 de la fórmula genérica de bonos).
+      const baseTicker = (ticker || "").replace(/[DC]$/, "");
+      if (/^(AL|GD|AE|GE)\d{2}$/.test(baseTicker)) {
+        route = "cash";
+        movementType = side === "buy" ? "purchase_cost" : "sale_proceeds";
+        cashAmount = (Number(cum) || 0) * price;
+        kind = entryCurrency === "ARS" ? "Canje $" : "Canje USD";
+      }
     }
 
     let status, reason = null;
@@ -13044,6 +13059,7 @@ function parseMatrizFuturesCsv(text, existingOrderIds) {
     out.push({
       orderId: oid, account, ticker, side, qty: cum, price, date, status, reason,
       instrumentType, entryCurrency, settlement, plazo, kind,
+      route, movementType, cashAmount,
     });
   }
   return out;
@@ -13054,19 +13070,37 @@ function parseMatrizFuturesCsv(text, existingOrderIds) {
  * de confirmar; nunca pisa lo existente, solo agrega lo nuevo (por order_id).
  */
 function ImportCsvModal({ existingPositions, addPosition, onClose }) {
+  const { user } = useAuth();
   const [rows, setRows] = useState(null);
   const [fileName, setFileName] = useState("");
   const [importing, setImporting] = useState(false);
   const [result, setResult] = useState(null);
+  const [cashRefs, setCashRefs] = useState(() => new Set());
+
+  // order_ids de canjes ya importados como movimiento de caja (source_ref),
+  // para dedupear igual que las posiciones (extra.matriz_order_id).
+  useEffect(() => {
+    let cancel = false;
+    (async () => {
+      if (!user) return;
+      const { data } = await supabase
+        .from("cash_movements")
+        .select("source_ref")
+        .eq("user_id", user.id)
+        .not("source_ref", "is", null);
+      if (!cancel && data) setCashRefs(new Set(data.map((d) => d.source_ref)));
+    })();
+    return () => { cancel = true; };
+  }, [user]);
 
   const existingOrderIds = useMemo(() => {
-    const s = new Set();
+    const s = new Set(cashRefs);
     for (const p of existingPositions || []) {
       const oid = p?.extra?.matriz_order_id;
       if (oid) s.add(oid);
     }
     return s;
-  }, [existingPositions]);
+  }, [existingPositions, cashRefs]);
 
   const onFile = async (e) => {
     const f = e.target.files?.[0];
@@ -13092,19 +13126,34 @@ function ImportCsvModal({ existingPositions, addPosition, onClose }) {
     const errs = [];
     for (const r of newRows) {
       try {
-        await addPosition({
-          instrument_type: r.instrumentType,
-          operation_type: r.side,
-          ticker: r.ticker,
-          quantity: r.qty,
-          entry_price: r.price,
-          entry_currency: r.entryCurrency,
-          entry_date: r.date,
-          settlement: r.settlement,
-          broker: "cocos",
-          notes: null,
-          extra: { matriz_order_id: r.orderId, matriz_account: r.account, source: "csv_matriz" },
-        });
+        if (r.route === "cash") {
+          // Canje de soberano: movimiento de caja (conversión de moneda),
+          // sin posición de bono. compra → purchase_cost; venta → sale_proceeds.
+          const { error } = await supabase.from("cash_movements").insert({
+            user_id: user.id,
+            movement_type: r.movementType,
+            currency: r.entryCurrency,
+            amount: r.cashAmount,
+            movement_date: r.date,
+            notes: `Canje ${r.ticker} (${r.side === "buy" ? "compra" : "venta"})`,
+            source_ref: r.orderId,
+          });
+          if (error) throw error;
+        } else {
+          await addPosition({
+            instrument_type: r.instrumentType,
+            operation_type: r.side,
+            ticker: r.ticker,
+            quantity: r.qty,
+            entry_price: r.price,
+            entry_currency: r.entryCurrency,
+            entry_date: r.date,
+            settlement: r.settlement,
+            broker: "cocos",
+            notes: null,
+            extra: { matriz_order_id: r.orderId, matriz_account: r.account, source: "csv_matriz" },
+          });
+        }
         inserted++;
       } catch (err) {
         errs.push(`${r.ticker} ${r.side} ${r.qty}: ${err.message || err}`);
@@ -13146,7 +13195,7 @@ function ImportCsvModal({ existingPositions, addPosition, onClose }) {
           <button onClick={onClose} style={{ background: "none", border: "none", color: C.muted, cursor: "pointer", fontSize: 16 }}>×</button>
         </div>
         <div style={{ fontSize: 10.5, color: C.muted, marginBottom: 14, lineHeight: 1.5 }}>
-          Reporte de operaciones de Cocos/Matriz. Importa <b>futuros DLR</b> y <b>bonos</b> (soberanos $ y MEP/CCL); las cauciones se ignoran. Agrupa los fills parciales por orden y normaliza el precio (los bonos en Matriz vienen ×100). No pisa lo ya cargado — agrega solo las órdenes nuevas (dedup por order_id).
+          Reporte de operaciones de Cocos/Matriz. Importa <b>futuros DLR</b> (posición) y bonos. Los <b>soberanos hard-dollar</b> (AL/GD/AE/GE) se toman como <b>canje</b>: comprar/vender AL30↔AL30D es convertir moneda, no deja posición — entran como movimiento de caja (pesos↔USD), así no aparecen shorts. Los bonos en pesos/CER entran como posición. Agrupa fills parciales y normaliza el precio (Matriz cotiza ×100). Las cauciones se ignoran. Dedup por order_id — no duplica al re-importar.
         </div>
 
         <label style={{
