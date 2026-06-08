@@ -13043,7 +13043,11 @@ function parseMatrizFuturesCsv(text, existingOrderIds) {
       const baseTicker = (ticker || "").replace(/[DC]$/, "");
       if (/^(AL|GD|AE|GE)\d{2}$/.test(baseTicker)) {
         route = "cash";
-        movementType = side === "buy" ? "purchase_cost" : "sale_proceeds";
+        // El canje es caja SIN posición. La tabla cash_movements exige que
+        // purchase_cost/sale_proceeds tengan posición asociada, y que
+        // deposit/withdrawal NO la tengan → usamos deposit/withdrawal:
+        //   compra (gastás esa moneda) → withdrawal ; venta (cobrás) → deposit.
+        movementType = side === "buy" ? "withdrawal" : "deposit";
         cashAmount = (Number(cum) || 0) * price;
         kind = entryCurrency === "ARS" ? "Canje $" : "Canje USD";
       }
