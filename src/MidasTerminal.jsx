@@ -9127,6 +9127,7 @@ function TotalCard({ positions, fx, bondPrices, futurePrices, stockPrices, fciPr
     let hasAny = false;
 
     for (const p of positions) {
+      if (p.instrument_type === "future") continue; // futuros: por neto, abajo
       const d = computeDailyPnL(p, bondPrices, futurePrices, stockPrices, futureAdjLookup, fciPrices);
       if (!d || d.pnl == null || !Number.isFinite(d.pnl)) continue;
 
@@ -9147,6 +9148,13 @@ function TotalCard({ positions, fx, bondPrices, futurePrices, stockPrices, fciPr
           prevValueInValuation += (valNowConv - conv);
         }
       }
+    }
+
+    // Futuros por NETO del ticker (cancela round-trips cerrados en días previos;
+    // evita el P&L fantasma del lote-por-lote). Moneda futuros = ARS.
+    for (const [, pnlArs] of computeFuturesDailyByTicker(positions, futurePrices, futureAdjLookup)) {
+      const conv = convertValue(pnlArs, "ARS", valuationCurrency, fx);
+      if (conv != null && Number.isFinite(conv)) { pnlInValuation += conv; hasAny = true; }
     }
 
     return {
@@ -12735,18 +12743,77 @@ function filterClosedToToday(closedGroups, futurePrices, priorSettleByTicker) {
  * Para no-futuros cerrados hoy se suma su realizado (el contado no entra en el
  * MTM de arriba). La suma de todos los tickers = el "P&L hoy" del banner.
  */
+/* P&L del día de FUTUROS por ticker, calculado por NETO (no lote por lote).
+ * Clave: todos los lotes ARRASTRADOS de un ticker usan el MISMO settle de ayer,
+ * así un round-trip cerrado en un día previo (compra+venta) se cancela exacto y
+ * no deja P&L fantasma. Antes el lote-por-lote usaba bases distintas (la compra
+ * con su ajuste = settle de ayer; la venta que la cerró sin ajuste caía a
+ * fp.settlement = settle de HOY) → no cancelaban → −961k fantasma en JUL.
+ * Lotes operados HOY se miden contra su precio de entrada (MTM intradía, que ya
+ * incluye lo realizado hoy). Devuelve Map<ticker, pnlARS>.
+ */
+function computeFuturesDailyByTicker(positions, futurePrices, futureAdjLookup) {
+  const todayAR = new Date().toLocaleDateString("en-CA", { timeZone: "America/Argentina/Buenos_Aires" });
+  const byT = new Map();
+  for (const p of positions || []) {
+    if (p?.instrument_type !== "future" || !p.ticker) continue;
+    const t = (p.ticker || "").trim().toUpperCase();
+    if (!byT.has(t)) byT.set(t, []);
+    byT.get(t).push(p);
+  }
+  const out = new Map();
+  for (const [ticker, lotes] of byT) {
+    const fp = futurePrices ? futurePrices[ticker] : null;
+    const lastRaw = fp?.last != null ? fp.last : fp?.settlement;
+    if (lastRaw == null || fp?.error) continue;
+    const last = Number(lastRaw);
+    if (!Number.isFinite(last)) continue;
+    // Settle de ayer ÚNICO para el ticker: el lastSettle del ajuste de cualquier
+    // lote que lo tenga (= settle de ayer mientras no corra el cron de hoy);
+    // si ninguno tiene ajuste, fp.settlement.
+    let prevSettle = null;
+    for (const p of lotes) {
+      const le = futureAdjLookup ? futureAdjLookup.get(p.id) : null;
+      if (le?.lastSettle != null) { prevSettle = Number(le.lastSettle); break; }
+    }
+    if (prevSettle == null && fp?.settlement != null) prevSettle = Number(fp.settlement);
+    let sum = 0;
+    for (const p of lotes) {
+      const qty = Number(p.quantity) || 0;
+      if (qty === 0) continue;
+      const mult = Number(p.extra?.contract_size) || 1000;
+      const sign = p.operation_type === "sell" ? -1 : 1;
+      // Base: lote de HOY → su entrada; lote arrastrado → settle de ayer del ticker.
+      const base = (p.entry_date === todayAR && Number(p.entry_price) > 0)
+        ? Number(p.entry_price) : prevSettle;
+      if (base == null || !Number.isFinite(base) || base <= 0) continue;
+      sum += sign * (last - base) * qty * mult;
+    }
+    out.set(ticker, sum);
+  }
+  return out;
+}
+
 function computeDailyPnlByTicker(positions, bondPrices, futurePrices, stockPrices, futureAdjLookup, fciPrices, fx, valuationCurrency) {
   const byTicker = new Map();
   const add = (ticker, amt) => {
     const t = (ticker || "—").toString().toUpperCase();
     byTicker.set(t, (byTicker.get(t) || 0) + amt);
   };
+  // No-futuros: lote por lote (bonos/acciones usan previousClose, raro el
+  // round-trip intradía; su realizado de contado se suma más abajo).
   for (const p of positions || []) {
+    if (p?.instrument_type === "future") continue;
     const d = computeDailyPnL(p, bondPrices, futurePrices, stockPrices, futureAdjLookup, fciPrices);
     if (!d || d.pnl == null || !Number.isFinite(d.pnl)) continue;
     const cur = p.currency || p.entry_currency || "ARS";
     const conv = convertValue(d.pnl, cur, valuationCurrency, fx);
     if (conv != null) add(p.ticker, conv);
+  }
+  // Futuros: por NETO del ticker (cancela round-trips cerrados en días previos).
+  for (const [ticker, pnlArs] of computeFuturesDailyByTicker(positions, futurePrices, futureAdjLookup)) {
+    const conv = convertValue(pnlArs, "ARS", valuationCurrency, fx);
+    if (conv != null) add(ticker, conv);
   }
   try {
     const all = consolidatePositions(positions, bondPrices, futurePrices, fciPrices);
