@@ -24185,7 +24185,9 @@ function CarryTradeModule() {
           const map = {};
           (remData.datos || []).forEach((d) => {
             const per = d["período"] ?? d.periodo;
-            if (per && d.mediana != null) map[String(per).slice(0, 7)] = d.mediana;
+            // Solo períodos con fecha mensual real (el API mete agregados anuales
+            // "2026"/"2027" y "próx. 12 meses" que ensucian el mapa).
+            if (per && /^\d{4}-\d{2}-\d{2}/.test(String(per)) && d.mediana != null) map[String(per).slice(0, 7)] = d.mediana;
           });
           setRemTc(map);
         }
@@ -24199,7 +24201,9 @@ function CarryTradeModule() {
           const map = {};
           (ipcData.datos || []).forEach((d) => {
             const per = d["período"] ?? d.periodo;
-            if (per && d.mediana != null) map[String(per).slice(0, 7)] = d.mediana;
+            // Solo períodos con fecha mensual real (el API mete agregados anuales
+            // "2026"/"2027" y "próx. 12 meses" que ensucian el mapa).
+            if (per && /^\d{4}-\d{2}-\d{2}/.test(String(per)) && d.mediana != null) map[String(per).slice(0, 7)] = d.mediana;
           });
           setRemIpc(map);
         }
@@ -29423,7 +29427,9 @@ function FuturosVsCaucionModule() {
           const map = {};
           (remData.datos || []).forEach((d) => {
             const per = d["período"] ?? d.periodo;
-            if (per && d.mediana != null) map[String(per).slice(0, 7)] = d.mediana;
+            // Solo períodos con fecha mensual real (el API mete agregados anuales
+            // "2026"/"2027" y "próx. 12 meses" que ensucian el mapa).
+            if (per && /^\d{4}-\d{2}-\d{2}/.test(String(per)) && d.mediana != null) map[String(per).slice(0, 7)] = d.mediana;
           });
           setRemTc(map);
         }
