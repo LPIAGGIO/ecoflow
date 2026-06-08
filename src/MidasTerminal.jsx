@@ -20573,6 +20573,7 @@ function DashboardModule() {
   const spotMayorista = fx?.mayorista?.mid;
   // Curva REM (pronóstico de consultoras) para el benchmark externo de la curva.
   const { remTc, remIpc } = useRemFx();
+  const caucionRate = useCaucionRate();
 
   const { user } = useAuth();
 
@@ -20596,8 +20597,8 @@ function DashboardModule() {
   // Construcción de la curva. Reusa el helper global que también usa el
   // Sintético DLR — misma lógica de filtrado y mismo umbral de basis.
   const dlrCurve = useMemo(
-    () => buildDlrCurveFromFuturePrices(futurePrices, 0.003, spotMayorista, remTc, remIpc),
-    [futurePrices, spotMayorista, remTc, remIpc]
+    () => buildDlrCurveFromFuturePrices(futurePrices, 0.003, spotMayorista, remTc, remIpc, caucionRate),
+    [futurePrices, spotMayorista, remTc, remIpc, caucionRate]
   );
 
   return (
@@ -24130,6 +24131,22 @@ function useRemFx() {
   return { remTc, remIpc };
 }
 
+// Hook compartido: tasa de caución 1 día (TNA %) desde el snapshot A3, con
+// fallback al valor guardado / 32. Para el benchmark "vs caución" de la curva.
+function useCaucionRate() {
+  const [rate, setRate] = useState(() => readStoredCaucion() ?? 32);
+  useEffect(() => {
+    let cancelled = false;
+    fetch("/api/a3-cauciones").then((r) => (r.ok ? r.json() : null)).then((d) => {
+      if (cancelled || !d) return;
+      const parsed = extractCaucion1d(d);
+      if (parsed && parsed.rate != null) setRate(Number(parsed.rate));
+    }).catch(() => {});
+    return () => { cancelled = true; };
+  }, []);
+  return rate;
+}
+
 function CarryTradeModule() {
   const [mode, setMode] = useState("byDollar");
   const [bondsRaw, setBondsRaw] = useState([]);
@@ -26220,7 +26237,7 @@ function findBestSingleHedgeForHorizon(futuresList, horizonDays) {
  *                          monthlyDevRate, annualDevRate } o null si no hay
  *                          datos suficientes (necesita >= 2 DLRs con precio).
  */
-function buildDlrCurve(futuresList, thresholdPct = 0.003, spotAnchor = null, remResolver = null) {
+function buildDlrCurve(futuresList, thresholdPct = 0.003, spotAnchor = null, remResolver = null, caucionRate = null) {
   if (!Array.isArray(futuresList) || futuresList.length < 2) return null;
 
   // Filtrar solo DLRs con precio válido y días al vto válidos.
@@ -26289,6 +26306,19 @@ function buildDlrCurve(futuresList, thresholdPct = 0.003, spotAnchor = null, rem
       else if (basisRem > thresholdPct) statusRem = "caro";
     }
 
+    // TNA implícita (vs spot, simple) y comparación con la caución (cash-and-carry):
+    // vsCaucion = caución − implícita. >0 → caución gana, futuro BARATO (rulo a favor);
+    // <0 → implícita > caución, futuro CARO (lado short). Solo con ancla spot.
+    const tnaImplicita = (useSpot && !f.isSpot && f.expiryDays > 0)
+      ? (f.price / anchorFirst.price - 1) * 365 / f.expiryDays : null;
+    const tnaImplicitaPct = tnaImplicita != null ? tnaImplicita * 100 : null;
+    const vsCaucion = (tnaImplicitaPct != null && Number.isFinite(caucionRate)) ? caucionRate - tnaImplicitaPct : null;
+    let statusCaucion = "neutro";
+    if (vsCaucion != null) {
+      if (vsCaucion > 1) statusCaucion = "barato";       // caución > implícita → rulo a favor
+      else if (vsCaucion < -1) statusCaucion = "caro";   // implícita > caución → futuro caro
+    }
+
     return {
       ticker: f.ticker,
       shortTicker: f.shortTicker || f.ticker.replace(/^DLR/, ""), // "DLRJUN26" → "JUN26"
@@ -26302,6 +26332,10 @@ function buildDlrCurve(futuresList, thresholdPct = 0.003, spotAnchor = null, rem
       basisRem,
       basisRemPct: basisRem != null ? basisRem * 100 : null,
       statusRem,
+      tnaImplicita,
+      tnaImplicitaPct,
+      vsCaucion,
+      statusCaucion,
       isAnchor,
       isAnchorFirst,
       isAnchorLast,
@@ -26325,6 +26359,8 @@ function buildDlrCurve(futuresList, thresholdPct = 0.003, spotAnchor = null, rem
     annualDevRate,
     hasRem: points.some((p) => p.priceRem != null),
     remAnnualDevRate,
+    caucionRate: Number.isFinite(caucionRate) ? caucionRate : null,
+    hasCaucion: points.some((p) => p.vsCaucion != null),
     threshold: thresholdPct,
     // Helper para que la UI saque rápido un DLR de la curva por ticker
     byTicker: new Map(points.map((p) => [p.ticker, p])),
@@ -26349,7 +26385,7 @@ function buildDlrCurve(futuresList, thresholdPct = 0.003, spotAnchor = null, rem
  * @param {number} thresholdPct — umbral basis (default 0.003 = 0.3%)
  * @returns {Object|null} resultado de buildDlrCurve, o null si no hay datos
  */
-function buildDlrCurveFromFuturePrices(futurePrices, thresholdPct = 0.003, spotPrice = null, remTc = null, remIpc = null) {
+function buildDlrCurveFromFuturePrices(futurePrices, thresholdPct = 0.003, spotPrice = null, remTc = null, remIpc = null, caucionRate = null) {
   if (!futurePrices || typeof futurePrices !== "object") return null;
 
   const futuresLive = DLR_REGISTRY
@@ -26374,7 +26410,7 @@ function buildDlrCurveFromFuturePrices(futurePrices, thresholdPct = 0.003, spotP
     ? (maturityDate) => projectREMTC(maturityDate, remTc, remIpc || {})
     : null;
 
-  return buildDlrCurve(futuresLive, thresholdPct, spotAnchor, remResolver);
+  return buildDlrCurve(futuresLive, thresholdPct, spotAnchor, remResolver, caucionRate);
 }
 
 /**
@@ -26699,6 +26735,11 @@ function DlrCurveSection({ dlrCurve, C, compact = false, hideTitle = false }) {
             REM (consenso): <strong>{(dlrCurve.remAnnualDevRate * 100).toFixed(1)}%</strong> anual
           </span>
         )}
+        {dlrCurve.caucionRate != null && (
+          <span style={{ fontSize: compact ? 10.5 : 11.5, color: C.cat.teal }}>
+            Caución: <strong>{dlrCurve.caucionRate.toFixed(1)}%</strong>
+          </span>
+        )}
         {(baratos.length > 0 || caros.length > 0) && (
           <span style={{ fontSize: compact ? 10.5 : 11.5, color: C.muted, marginLeft: "auto" }}>
             {baratos.length > 0 && (
@@ -26776,7 +26817,7 @@ function DlrCurveSection({ dlrCurve, C, compact = false, hideTitle = false }) {
                 <g key={`pt-${p.ticker}`}>
                   <circle cx={cx} cy={cy} r={compact ? 5 : 7} fill={fill} stroke="#0a0e1a" strokeWidth={compact ? "2" : "2.5"}>
                     <title>
-                      {p.ticker}: ${p.price.toFixed(2)} (teórico ${p.priceTheoric.toFixed(2)}, basis {p.basisPct >= 0 ? "+" : ""}{p.basisPct.toFixed(2)}%){p.priceRem != null ? ` · REM $${p.priceRem.toFixed(2)} (${p.basisRemPct >= 0 ? "+" : ""}${p.basisRemPct.toFixed(2)}% vs consenso)` : ""}
+                      {p.ticker}: ${p.price.toFixed(2)} (teórico ${p.priceTheoric.toFixed(2)}, basis {p.basisPct >= 0 ? "+" : ""}{p.basisPct.toFixed(2)}%){p.priceRem != null ? ` · REM $${p.priceRem.toFixed(2)} (${p.basisRemPct >= 0 ? "+" : ""}${p.basisRemPct.toFixed(2)}% vs consenso)` : ""}{p.tnaImplicitaPct != null ? ` · TNA impl ${p.tnaImplicitaPct.toFixed(1)}%${p.vsCaucion != null ? ` (vs caución ${p.vsCaucion >= 0 ? "+" : ""}${p.vsCaucion.toFixed(1)}pp)` : ""}` : ""}
                     </title>
                   </circle>
                   <text
@@ -26823,8 +26864,15 @@ function DlrCurveSection({ dlrCurve, C, compact = false, hideTitle = false }) {
             <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11.5, fontVariantNumeric: "tabular-nums" }}>
               <thead>
                 <tr>
-                  {["DLR", "Real", "Teórico", "Basis", "REM", "vs REM"].map((h, i) => (
-                    <th key={h} style={{ textAlign: i === 0 ? "left" : "right", padding: "6px 7px", color: i >= 4 ? C.cat.amber : C.dim, fontSize: 9.5, letterSpacing: "0.05em", textTransform: "uppercase", fontWeight: 500, borderBottom: `1px solid ${C.border}` }}>{h}</th>
+                  {[
+                    { h: "DLR", a: "left", c: C.dim },
+                    { h: "Real", a: "right", c: C.dim },
+                    { h: "TNA impl", a: "right", c: C.cat.teal },
+                    { h: "vs Cauc", a: "right", c: C.cat.teal },
+                    { h: "REM", a: "right", c: C.cat.amber },
+                    { h: "vs REM", a: "right", c: C.cat.amber },
+                  ].map((col) => (
+                    <th key={col.h} style={{ textAlign: col.a, padding: "6px 7px", color: col.c, fontSize: 9.5, letterSpacing: "0.05em", textTransform: "uppercase", fontWeight: 500, borderBottom: `1px solid ${C.border}` }}>{col.h}</th>
                   ))}
                 </tr>
               </thead>
@@ -26832,24 +26880,14 @@ function DlrCurveSection({ dlrCurve, C, compact = false, hideTitle = false }) {
                 {dlrCurve.points.map((p) => (
                   <tr key={`tbl-${p.ticker}`} style={{ borderBottom: `1px solid ${C.border}` }}>
                     <td style={{ padding: "6px 7px", color: C.text, fontWeight: 500 }}>
-                      <span style={{ color: colorForStatus(p.status), marginRight: 5, fontSize: 12 }}>●</span>
+                      <span style={{ color: colorForStatus(p.status), marginRight: 5, fontSize: 12 }} title="Color = basis interno (vs curva teórica)">●</span>
                       {p.shortTicker}
                     </td>
-                    <td style={{ padding: "6px 7px", textAlign: "right", color: C.text, fontFamily: "'Roboto Mono', monospace" }}>
-                      {p.price.toFixed(2)}
-                    </td>
-                    <td style={{ padding: "6px 7px", textAlign: "right", color: C.muted, fontFamily: "'Roboto Mono', monospace" }}>
-                      {p.priceTheoric.toFixed(2)}
-                    </td>
-                    <td style={{ padding: "6px 7px", textAlign: "right", color: colorForStatus(p.status), fontWeight: 600, fontFamily: "'Roboto Mono', monospace" }}>
-                      {p.status === "ancla" ? "ancla" : `${p.basisPct >= 0 ? "+" : ""}${p.basisPct.toFixed(2)}%`}
-                    </td>
-                    <td style={{ padding: "6px 7px", textAlign: "right", color: p.priceRem != null ? C.cat.amber : C.dim, fontFamily: "'Roboto Mono', monospace" }}>
-                      {p.priceRem != null ? p.priceRem.toFixed(2) : "—"}
-                    </td>
-                    <td style={{ padding: "6px 7px", textAlign: "right", color: p.basisRemPct != null ? colorForStatus(p.statusRem) : C.dim, fontWeight: 600, fontFamily: "'Roboto Mono', monospace" }}>
-                      {p.basisRemPct != null ? `${p.basisRemPct >= 0 ? "+" : ""}${p.basisRemPct.toFixed(2)}%` : "—"}
-                    </td>
+                    <td style={{ padding: "6px 7px", textAlign: "right", color: C.text, fontFamily: "'Roboto Mono', monospace" }}>{p.price.toFixed(2)}</td>
+                    <td style={{ padding: "6px 7px", textAlign: "right", color: C.muted, fontFamily: "'Roboto Mono', monospace" }}>{p.tnaImplicitaPct != null ? `${p.tnaImplicitaPct.toFixed(1)}%` : "—"}</td>
+                    <td style={{ padding: "6px 7px", textAlign: "right", color: p.vsCaucion != null ? colorForStatus(p.statusCaucion) : C.dim, fontWeight: 600, fontFamily: "'Roboto Mono', monospace" }}>{p.vsCaucion != null ? `${p.vsCaucion >= 0 ? "+" : ""}${p.vsCaucion.toFixed(1)}` : "—"}</td>
+                    <td style={{ padding: "6px 7px", textAlign: "right", color: p.priceRem != null ? C.cat.amber : C.dim, fontFamily: "'Roboto Mono', monospace" }}>{p.priceRem != null ? p.priceRem.toFixed(0) : "—"}</td>
+                    <td style={{ padding: "6px 7px", textAlign: "right", color: p.basisRemPct != null ? colorForStatus(p.statusRem) : C.dim, fontWeight: 600, fontFamily: "'Roboto Mono', monospace" }}>{p.basisRemPct != null ? `${p.basisRemPct >= 0 ? "+" : ""}${p.basisRemPct.toFixed(2)}%` : "—"}</td>
                   </tr>
                 ))}
               </tbody>
@@ -26865,6 +26903,9 @@ function DlrCurveSection({ dlrCurve, C, compact = false, hideTitle = false }) {
           {dlrCurve.hasRem && (
             <><br /><strong style={{ color: C.cat.amber }}>REM</strong> = el dólar que pronostican las consultoras (BCRA) para ese mes — <strong>no</strong> es el "teórico" (ese es la curva interna). <strong style={{ color: C.cat.amber }}>vs REM</strong> compara el futuro contra ese pronóstico: <strong style={{ color: C.red }}>rojo</strong> = el mercado pricea MÁS devaluación que el consenso (futuro caro), <strong style={{ color: C.green }}>verde</strong> = menos (futuro barato).</>
           )}
+          {dlrCurve.hasCaucion && (
+            <><br /><strong style={{ color: C.cat.teal }}>TNA impl</strong> = la tasa anual que pricea cada futuro (vs spot). <strong style={{ color: C.cat.teal }}>vs Cauc</strong> = caución − implícita (en puntos): <strong style={{ color: C.green }}>verde</strong> = la caución rinde más que la implícita → cash-and-carry a favor (futuro barato); <strong style={{ color: C.red }}>rojo</strong> = el futuro pricea más tasa que la caución (caro, lado short).</>
+          )}
         </div>
       )}
     </div>
@@ -26875,6 +26916,7 @@ function SinteticoDolarModule() {
   // ─── State ──────────────────────────────────────────────
   const [spotMayorista, setSpotMayorista] = useState(null);
   const { remTc: remTcCurve, remIpc: remIpcCurve } = useRemFx(); // REM para el benchmark de la curva DLR
+  const caucionRateCurve = useCaucionRate(); // caución para el benchmark "vs caución"
   // Spot MEP (= "casa: bolsa" en dolarapi). Lo usamos en el simulador del
   // modal de detalle para calcular el equivalente USD de la inversion en
   // pesos al MEP de hoy (el FX al que un argentino realmente convierte
@@ -27260,9 +27302,10 @@ function SinteticoDolarModule() {
           : null,
         (remTcCurve && Object.keys(remTcCurve).length > 0)
           ? (md) => projectREMTC(md, remTcCurve, remIpcCurve || {})
-          : null
+          : null,
+        caucionRateCurve
       ),
-    [futuresLive, spotMayorista, remTcCurve, remIpcCurve]
+    [futuresLive, spotMayorista, remTcCurve, remIpcCurve, caucionRateCurve]
   );
 
   // Sort dinamico: aplica sortKey/sortDir sobre rows. Las filas con
