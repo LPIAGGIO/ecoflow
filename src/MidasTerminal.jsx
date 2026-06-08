@@ -18744,7 +18744,7 @@ function Input({ value, onChange, placeholder, type = "text", step, hasError }) 
  *   - No soporta exponentes (1e6).
  *   - Negativos sí, pero raramente aplica para precios.
  */
-function MoneyInput({ value, onChange, placeholder, hasError, decimals = 2 }) {
+function MoneyInput({ value, onChange, placeholder, hasError, decimals = 2, bare = false, style: styleOverride, onBlur, onKeyDown: onKeyDownExtra }) {
   const ref = useRef(null);
   const focusedRef = useRef(false);
   const [display, setDisplay] = useState(() => numStrToArMask(value, decimals));
@@ -18779,6 +18779,8 @@ function MoneyInput({ value, onChange, placeholder, hasError, decimals = 2 }) {
   // La tecla "." (la del teclado numérico) inserta la coma decimal. Es el
   // núcleo del pedido: en es-AR el decimal es "," pero el teclado tiene ".".
   const handleKeyDown = (e) => {
+    if (onKeyDownExtra) onKeyDownExtra(e);
+    if (e.defaultPrevented) return;
     if (e.key !== ".") return;
     e.preventDefault();
     if (decimals <= 0) return;
@@ -18804,24 +18806,28 @@ function MoneyInput({ value, onChange, placeholder, hasError, decimals = 2 }) {
       onKeyDown={handleKeyDown}
       placeholder={placeholder}
       style={{
-        width: "100%",
-        backgroundColor: C.deep,
-        border: `1px solid ${hasError ? C.red : C.border}`,
+        ...(bare ? {} : {
+          width: "100%",
+          backgroundColor: C.deep,
+          border: `1px solid ${hasError ? C.red : C.border}`,
+          padding: "9px 12px",
+        }),
         color: C.text,
-        padding: "9px 12px",
         fontSize: 12.5,
         fontFamily: "'JetBrains Mono', monospace",
         outline: "none",
         transition: "border-color 120ms ease",
+        ...styleOverride,
       }}
       onFocus={(e) => {
         focusedRef.current = true;
-        if (!hasError) e.currentTarget.style.borderColor = C.accent;
+        if (!bare && !hasError) e.currentTarget.style.borderColor = C.accent;
       }}
       onBlur={(e) => {
         focusedRef.current = false;
         setDisplay(formatAmountInput(display, decimals)); // limpia coma colgada al salir
-        if (!hasError) e.currentTarget.style.borderColor = C.border;
+        if (!bare && !hasError) e.currentTarget.style.borderColor = C.border;
+        if (onBlur) onBlur(e);
       }}
     />
   );
@@ -21638,16 +21644,16 @@ function usePositionAlerts() {
 function AlertInput({ value, onCommit, placeholder }) {
   const [v, setV] = useState(value == null ? "" : String(value));
   useEffect(() => { setV(value == null ? "" : String(value)); }, [value]);
-  const commit = () => onCommit(v.trim() === "" ? null : Number(v.replace(",", ".")));
+  const commit = () => onCommit(String(v).trim() === "" ? null : Number(String(v).replace(",", ".")));
   return (
-    <input
+    <MoneyInput
       value={v}
-      onChange={(e) => setV(e.target.value)}
+      onChange={setV}
       onBlur={commit}
       onKeyDown={(e) => { if (e.key === "Enter") e.currentTarget.blur(); }}
       placeholder={placeholder}
-      inputMode="decimal"
-      style={{ width: 62, background: "rgba(255,255,255,0.03)", border: `1px solid ${C.border}`, borderRadius: 4, color: C.text, fontSize: 11, padding: "3px 6px", textAlign: "right", fontVariantNumeric: "tabular-nums", outline: "none" }}
+      bare
+      style={{ width: 62, background: "rgba(255,255,255,0.03)", border: `1px solid ${C.border}`, borderRadius: 4, color: C.text, fontSize: 11, padding: "3px 6px", textAlign: "right", fontVariantNumeric: "tabular-nums" }}
     />
   );
 }
@@ -21681,16 +21687,16 @@ function usePriceAlerts() {
 
 function AlertAdd({ onAdd }) {
   const [v, setV] = useState("");
-  const commit = () => { const n = Number(v.replace(",", ".")); if (n > 0) onAdd(n); setV(""); };
+  const commit = () => { const n = Number(String(v).replace(",", ".")); if (n > 0) onAdd(n); setV(""); };
   return (
-    <input
+    <MoneyInput
       value={v}
-      onChange={(e) => setV(e.target.value)}
+      onChange={setV}
       onKeyDown={(e) => { if (e.key === "Enter") e.currentTarget.blur(); }}
       onBlur={commit}
       placeholder="+ nivel"
-      inputMode="decimal"
-      style={{ width: 60, background: "rgba(255,255,255,0.03)", border: `1px dashed ${C.border}`, borderRadius: 4, color: C.text, fontSize: 11, padding: "3px 6px", textAlign: "right", outline: "none" }}
+      bare
+      style={{ width: 60, background: "rgba(255,255,255,0.03)", border: `1px dashed ${C.border}`, borderRadius: 4, color: C.text, fontSize: 11, padding: "3px 6px", textAlign: "right" }}
     />
   );
 }
@@ -25706,19 +25712,16 @@ function UsdInputCard({ usdAmount, setUsdAmount, mep }) {
       </div>
       <div className="flex items-baseline gap-2 mt-1">
         <span style={{ fontSize: 19, color: C.muted, fontWeight: 400 }}>$</span>
-        <input
-          type="number"
+        <MoneyInput
           value={usdAmount}
-          onChange={(e) => setUsdAmount(parseFloat(e.target.value) || 0)}
+          onChange={(v) => setUsdAmount(parseAmountString(v))}
+          bare
           style={{
-            background: "transparent",
-            border: "none",
             color: C.text,
             fontSize: 19,
             fontWeight: 600,
             fontFamily: "'JetBrains Mono', ui-monospace, monospace",
             fontVariantNumeric: "tabular-nums",
-            outline: "none",
             width: "100%",
             minWidth: 0,
             padding: 0,
@@ -25851,20 +25854,17 @@ function ManualUsdInput({ value, onChange }) {
       </div>
       <div className="flex items-baseline gap-2 mt-1">
         <span style={{ fontSize: 19, color: C.muted, fontWeight: 400 }}>$</span>
-        <input
-          type="number"
+        <MoneyInput
           value={value}
           placeholder="ej. 1850"
-          onChange={(e) => onChange(e.target.value)}
+          onChange={onChange}
+          bare
           style={{
-            background: "transparent",
-            border: "none",
             color: C.text,
             fontSize: 19,
             fontWeight: 600,
             fontFamily: "'JetBrains Mono', ui-monospace, monospace",
             fontVariantNumeric: "tabular-nums",
-            outline: "none",
             width: "100%",
             minWidth: 0,
             padding: 0,
