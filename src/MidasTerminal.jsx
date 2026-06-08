@@ -14951,6 +14951,89 @@ function ConsolidatedSection({
           onUpdatePrice={onUpdatePrice}
         />
       )}
+
+      {/* Canjes / conversiones de moneda (caja, sin posición de bono) */}
+      <CanjesSection />
+    </div>
+  );
+}
+
+/* ─────────────── CanjesSection ───────────────
+ * Lista los canjes (conversiones de moneda vía soberanos) que se importaron
+ * como movimientos de caja (notes que empiezan en "Canje"). No son posiciones
+ * de bono — son pesos↔USD. Agrupa por día y muestra cada pata + el neto por
+ * moneda. Self-contained: lee useCashMovements directo.
+ */
+function CanjesSection() {
+  const { movements } = useCashMovements();
+  const [open, setOpen] = useState(false);
+  const legs = (movements || []).filter((m) => typeof m.notes === "string" && m.notes.startsWith("Canje"));
+  if (!legs.length) return null;
+
+  const fmt = (n) => Number(n).toLocaleString("es-AR", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const signed = (m) => (m.movement_type === "deposit" ? 1 : -1) * Number(m.amount);
+  const parse = (notes) => {
+    const mt = /^Canje\s+(\S+)\s+\((compra|venta)\)/.exec(notes || "");
+    return mt ? { ticker: mt[1], op: mt[2] } : { ticker: notes, op: null };
+  };
+
+  const byDate = new Map();
+  for (const m of legs) {
+    if (!byDate.has(m.movement_date)) byDate.set(m.movement_date, []);
+    byDate.get(m.movement_date).push(m);
+  }
+  const days = Array.from(byDate.entries()).sort((a, b) => (a[0] < b[0] ? 1 : -1));
+  const netArsTotal = legs.filter((m) => m.currency === "ARS").reduce((s, m) => s + signed(m), 0);
+
+  return (
+    <div style={{ marginTop: 16 }}>
+      <button
+        onClick={() => setOpen((v) => !v)}
+        style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "space-between", backgroundColor: C.panel, border: `1px solid ${C.border}`, padding: "10px 14px", cursor: "pointer", textAlign: "left", fontFamily: "'Roboto', sans-serif" }}
+      >
+        <div className="flex items-center gap-2">
+          {open ? <ChevronDown size={13} strokeWidth={1.8} color={C.dim} /> : <ChevronRight size={13} strokeWidth={1.8} color={C.dim} />}
+          <span style={{ fontSize: 9, letterSpacing: "0.22em", color: C.dim, textTransform: "uppercase", fontWeight: 600 }}>Canjes / Conversiones</span>
+          <span style={{ fontSize: 10, color: C.muted }}>({legs.length} patas)</span>
+        </div>
+        <span style={{ fontSize: 12, fontWeight: 700, fontVariantNumeric: "tabular-nums", color: netArsTotal >= 0 ? C.green : C.red }}>
+          {netArsTotal >= 0 ? "+" : ""}{fmt(netArsTotal)} ARS
+        </span>
+      </button>
+
+      {open && (
+        <div style={{ border: `1px solid ${C.border}`, borderTop: "none" }}>
+          {days.map(([date, ms]) => {
+            const netByCur = {};
+            for (const m of ms) netByCur[m.currency] = (netByCur[m.currency] || 0) + signed(m);
+            const netStr = Object.entries(netByCur).map(([c, v]) => `${v >= 0 ? "+" : ""}${fmt(v)} ${c}`).join(" · ");
+            return (
+              <div key={date} style={{ borderBottom: `1px solid ${C.border}` }}>
+                <div className="flex items-center justify-between" style={{ padding: "7px 14px", background: "rgba(255,255,255,0.02)" }}>
+                  <span style={{ fontSize: 11, color: C.text, fontWeight: 600 }}>{date}</span>
+                  <span style={{ fontSize: 11, fontWeight: 700, fontVariantNumeric: "tabular-nums", color: (netByCur.ARS ?? 0) >= 0 ? C.green : C.red }}>neto {netStr}</span>
+                </div>
+                {ms.map((m) => {
+                  const { ticker, op } = parse(m.notes);
+                  const isIn = m.movement_type === "deposit";
+                  return (
+                    <div key={m.source_ref || m.id} className="flex items-center" style={{ gap: 10, padding: "6px 14px 6px 24px", fontSize: 11.5, borderTop: `1px solid ${C.border}` }}>
+                      <span style={{ color: C.text, fontWeight: 600, width: 60 }}>{ticker}</span>
+                      <span style={{ color: op === "compra" ? C.green : C.red, fontSize: 9.5, fontWeight: 700, width: 48 }}>{op === "compra" ? "COMPRA" : op === "venta" ? "VENTA" : "—"}</span>
+                      <span style={{ flex: 1, textAlign: "right", fontVariantNumeric: "tabular-nums", color: isIn ? C.green : C.red }}>
+                        {isIn ? "+" : "−"}{fmt(Number(m.amount))} {m.currency}
+                      </span>
+                    </div>
+                  );
+                })}
+              </div>
+            );
+          })}
+          <div style={{ padding: "8px 14px", fontSize: 10, color: C.dim, lineHeight: 1.5 }}>
+            El canje es conversión de moneda (pesos↔USD vía soberanos), no deja posición de bono. El neto en pesos es el resultado del rulo (incluye cruzar puntas; sin comisiones del CSV).
+          </div>
+        </div>
+      )}
     </div>
   );
 }
