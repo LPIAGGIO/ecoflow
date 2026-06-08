@@ -1,0 +1,16 @@
+{
+  "name": "rem-sync",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Actualiza mensualmente el REM oficial del BCRA (tipo de cambio + IPC) en la tabla Supabase rem_forecasts, parseando el xlsx oficial.",
+  "main": "worker.js",
+  "scripts": {
+    "start": "node worker.js"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.45.0",
+    "dotenv": "^16.4.5",
+    "ws": "^8.18.0",
+    "xlsx": "^0.18.5"
+  }
+}
