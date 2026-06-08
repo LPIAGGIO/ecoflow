@@ -25718,7 +25718,7 @@ function UsdInputCard({ usdAmount, setUsdAmount, mep }) {
         <span style={{ fontSize: 19, color: C.muted, fontWeight: 400 }}>$</span>
         <MoneyInput
           value={usdAmount}
-          onChange={(v) => setUsdAmount(parseAmountString(v))}
+          onChange={(v) => setUsdAmount(parseFloat(v) || 0)}
           bare
           style={{
             color: C.text,
