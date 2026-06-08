@@ -24250,6 +24250,12 @@ function CarryTradeModule() {
         // Filtro silencioso: ignorar ruido (AE, AL, GD, X*, etc.)
         if (shouldIgnoreTicker(ticker)) { ignoredCount++; return null; }
 
+        // Duales TAMAR (BONTAMs TT*): el registry los marca como boncap fijo,
+        // pero son TASA VARIABLE — su pago fijo es solo un PISO. Calcularles
+        // carry fijo da un ROI rojo catastrofico que engana. Se analizan en
+        // Sintetico DLR (que los trata como duales). Acá se excluyen.
+        if (KNOWN_BONTAMS[ticker]) { ignoredCount++; return null; }
+
         const resolved = resolveBond(ticker);
         if (!resolved) { rejectedNoMap.push(ticker); return null; }
 
@@ -24435,7 +24441,7 @@ function CarryTradeModule() {
 
       <p style={{ fontSize: 10, color: C.dim, marginTop: 12, lineHeight: 1.5, maxWidth: 720 }}>
         Precios de data912.com con delay ~2h respecto a BYMA. Pago al vencimiento real (registry verificado + emisiones del Tesoro); los bonos sin pago conocido se omiten.
-        Bandas BCRA: crawling 1%/mes hasta 31/12/2025, luego inflación T-2 del REM. El REM se extrapola con inflación más allá del último mes publicado. Para operaciones reales consultar tu plataforma de trading.
+        Bandas BCRA: crawling 1%/mes hasta 31/12/2025, luego inflación T-2 del REM. El REM se extrapola con inflación más allá del último mes publicado. Los duales TAMAR (TT*) se excluyen acá (son tasa variable) — se analizan en Sintético DLR. Para operaciones reales consultar tu plataforma de trading.
       </p>
     </div>
   );
