@@ -24268,14 +24268,15 @@ function CarryTradeModule() {
         const hasFinalPayoff = true;
 
         const roiArs = valorFinal / priceArs - 1;
-        const tirAnual = Math.pow(1 + roiArs, 365 / days) - 1;
+        const tna = roiArs * (365 / days);                      // nominal anual (simple)
+        const tirAnual = Math.pow(1 + roiArs, 365 / days) - 1;  // efectiva anual (TEA)
         const tem = Math.pow(1 + roiArs, 30 / days) - 1;
         const tea = Math.pow(1 + tem, 12) - 1;
 
         return {
           ticker, type: resolved.type, source: resolved.source,
           maturityDate: resolved.maturityDate, days, priceArs, valorFinal,
-          hasFinalPayoff, roiArs, tirAnual, tem, tea,
+          hasFinalPayoff, roiArs, tna, tirAnual, tem, tea,
         };
       })
       .filter(Boolean)
@@ -24720,7 +24721,7 @@ function EquilibriumTable({ bonds, fxRates, loading, equilibriumFor, carryVsMep,
                   <Td align="right" mono>${fmtARS(b.priceArs)}</Td>
                   <Td align="right" mono><span style={{ color: C.muted }}>{b.days}</span></Td>
                   <Td align="right" mono><span style={{ color: C.muted }}>{fmtPct(b.tem * 100)}</span></Td>
-                  <Td align="right" mono><span style={{ color: C.muted }}>{fmtPct(b.tirAnual * 100)}</span></Td>
+                  <Td align="right" mono><span style={{ color: C.muted }}>{fmtPct(b.tna * 100)}</span></Td>
                   <Td align="right" mono><span style={{ color: C.muted }}>{fmtPct(b.tea * 100)}</span></Td>
                   <Td align="right" mono>{eqCell(equilibriumFor(b, fxRates.oficial))}</Td>
                   <Td align="right" mono>{eqCell(equilibriumFor(b, fxRates.mep))}</Td>
