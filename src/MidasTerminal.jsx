@@ -12982,10 +12982,9 @@ function parseMatrizFuturesCsv(text, existingOrderIds) {
   for (const [oid, { cols, cum }] of byOrder) {
     const sec = (cols[iSec] || "").trim();
     const sym = (cols[iSym] || "").trim();
-    const isFuture = sec.startsWith("rx_DDF_DLR") || /^DLR\//.test(sym);
     const sideRaw = (cols[iSide] || "").trim().toUpperCase();
     const side = sideRaw === "BUY" ? "buy" : sideRaw === "SELL" ? "sell" : null;
-    const price = Number(cols[iAvg]) || 0;
+    const rawPrice = Number(cols[iAvg]) || 0;
     const time = (cols[iTime] || "").trim();
     let date = time.slice(0, 10);
     const d = new Date(time.replace(" ", "T"));
@@ -12993,14 +12992,59 @@ function parseMatrizFuturesCsv(text, existingOrderIds) {
       date = d.toLocaleDateString("en-CA", { timeZone: "America/Argentina/Buenos_Aires" });
     }
     const account = (cols[iAcct] || "").trim();
-    const ticker = sym.replace("/", "").toUpperCase();
+
+    // Clasificación del instrumento por security_id / symbol:
+    //   futuros DLR  -> rx_DDF_DLR_*  ó  symbol "DLR/JUN26"
+    //   bonos BYMA   -> bm_*          ó  symbol "MERV - XMEV - AL30 - 24hs"
+    const isFuture = sec.startsWith("rx_DDF_DLR") || /^DLR\//.test(sym);
+    const isBond = sec.startsWith("bm_") || / - XMEV - /.test(sym) || /\bMERV\b/.test(sym);
+
+    let ticker = null, instrumentType = null, entryCurrency = null,
+      settlement = "CI", price = rawPrice, plazo = null, kind = "—";
+
+    if (isFuture) {
+      ticker = sym.replace("/", "").toUpperCase();
+      instrumentType = "future";
+      entryCurrency = "ARS";
+      settlement = "CI";
+      price = rawPrice; // futuros: precio tal cual (1461)
+      kind = "Futuro";
+    } else if (isBond) {
+      // ticker + plazo desde el symbol ("MERV - XMEV - AL30 - 24hs")
+      // o desde security_id ("bm_MERV_AL30_24hs").
+      if (sym.includes(" - ")) {
+        const parts = sym.split(" - ").map((s) => s.trim());
+        ticker = (parts[2] || "").toUpperCase();
+        plazo = (parts[3] || "").toLowerCase();
+      } else if (sec.startsWith("bm_")) {
+        const rest = sec.replace(/^bm_[A-Za-z]+_/, "");
+        const us = rest.lastIndexOf("_");
+        ticker = (us > 0 ? rest.slice(0, us) : rest).toUpperCase();
+        plazo = us > 0 ? rest.slice(us + 1).toLowerCase() : "";
+      }
+      // Moneda por sufijo del ticker: D = MEP, C = CCL, sino pesos.
+      const sfx = (ticker || "").slice(-1);
+      if (sfx === "D") { instrumentType = "bond_usd"; entryCurrency = "USD-MEP"; kind = "Bono USD"; }
+      else if (sfx === "C") { instrumentType = "bond_usd"; entryCurrency = "USD-CCL"; kind = "Bono USD"; }
+      else { instrumentType = "bond_ars"; entryCurrency = "ARS"; kind = "Bono $"; }
+      // Plazo: contado inmediato = CI; 24hs (u otros) = T1.
+      settlement = /(^|[^0-9])(ci|inmediato|000|00|0)([^0-9]|$)/.test(plazo || "") ? "CI" : "T1";
+      // Matriz cotiza los bonos ×100 respecto del feed/posiciones de Midas
+      // (AL30 94180 -> 941,80 ; AL30D 64,33 -> 0,6433). Dividimos las dos patas.
+      price = rawPrice / 100;
+    }
+
     let status, reason = null;
-    if (!isFuture) { status = "ignored"; reason = `no es futuro (${sym})`; }
+    if (!isFuture && !isBond) { status = "ignored"; reason = `no soportado (${sym || sec})`; }
     else if (cum <= 0) { status = "ignored"; reason = "sin ejecución"; }
     else if (!side || price <= 0) { status = "ignored"; reason = "datos incompletos"; }
     else if (existingOrderIds && existingOrderIds.has(oid)) { status = "dup"; }
     else { status = "new"; }
-    out.push({ orderId: oid, account, ticker, side, qty: cum, price, date, status, reason });
+
+    out.push({
+      orderId: oid, account, ticker, side, qty: cum, price, date, status, reason,
+      instrumentType, entryCurrency, settlement, plazo, kind,
+    });
   }
   return out;
 }
@@ -13049,14 +13093,14 @@ function ImportCsvModal({ existingPositions, addPosition, onClose }) {
     for (const r of newRows) {
       try {
         await addPosition({
-          instrument_type: "future",
+          instrument_type: r.instrumentType,
           operation_type: r.side,
           ticker: r.ticker,
           quantity: r.qty,
           entry_price: r.price,
-          entry_currency: "ARS",
+          entry_currency: r.entryCurrency,
           entry_date: r.date,
-          settlement: "CI",
+          settlement: r.settlement,
           broker: "cocos",
           notes: null,
           extra: { matriz_order_id: r.orderId, matriz_account: r.account, source: "csv_matriz" },
@@ -13102,7 +13146,7 @@ function ImportCsvModal({ existingPositions, addPosition, onClose }) {
           <button onClick={onClose} style={{ background: "none", border: "none", color: C.muted, cursor: "pointer", fontSize: 16 }}>×</button>
         </div>
         <div style={{ fontSize: 10.5, color: C.muted, marginBottom: 14, lineHeight: 1.5 }}>
-          Reporte de operaciones de Cocos/Matriz. Por ahora importa <b>solo futuros DLR</b>; lo demás (cauciones, bonos, acciones) se ignora. No pisa lo ya cargado — agrega solo las órdenes nuevas (dedup por order_id).
+          Reporte de operaciones de Cocos/Matriz. Importa <b>futuros DLR</b> y <b>bonos</b> (soberanos $ y MEP/CCL); las cauciones se ignoran. Agrupa los fills parciales por orden y normaliza el precio (los bonos en Matriz vienen ×100). No pisa lo ya cargado — agrega solo las órdenes nuevas (dedup por order_id).
         </div>
 
         <label style={{
@@ -13123,6 +13167,7 @@ function ImportCsvModal({ existingPositions, addPosition, onClose }) {
                 <thead>
                   <tr style={{ color: C.dim, textAlign: "left" }}>
                     <th style={{ padding: "5px 8px" }}>Estado</th>
+                    <th style={{ padding: "5px 8px" }}>Tipo</th>
                     <th style={{ padding: "5px 8px" }}>Ticker</th>
                     <th style={{ padding: "5px 8px" }}>Op</th>
                     <th style={{ padding: "5px 8px", textAlign: "right" }}>Cant.</th>
@@ -13134,6 +13179,7 @@ function ImportCsvModal({ existingPositions, addPosition, onClose }) {
                   {rows.map((r, i) => (
                     <tr key={r.orderId + i} style={{ borderTop: `1px solid ${C.border}`, opacity: r.status === "new" ? 1 : 0.55 }}>
                       <td style={{ padding: "5px 8px" }}>{badge(r.status)}{r.reason && <span style={{ color: C.dim, fontSize: 9 }}> · {r.reason}</span>}</td>
+                      <td style={{ padding: "5px 8px", color: C.muted, fontSize: 9.5 }}>{r.kind || "—"}{r.plazo ? ` · ${r.plazo}` : ""}</td>
                       <td style={{ padding: "5px 8px", color: C.text }}>{r.ticker || "—"}</td>
                       <td style={{ padding: "5px 8px", color: r.side === "buy" ? C.green : C.red }}>{r.side === "buy" ? "Compra" : r.side === "sell" ? "Venta" : "—"}</td>
                       <td style={{ padding: "5px 8px", textAlign: "right", color: C.text }}>{r.qty || "—"}</td>
