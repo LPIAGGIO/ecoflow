@@ -237,6 +237,59 @@ async function loadPositions(userIds) {
   return byUser;
 }
 
+// Lotes CRUDOS (sin consolidar): para el P&L del dia completo de futuros
+// (MTM del neto + realizado de hoy) hace falta entry_date y entry_price.
+async function loadPositionsRaw(userIds) {
+  const { data } = await supabase.from("positions")
+    .select("user_id,instrument_type,ticker,quantity,entry_price,entry_date,operation_type").in("user_id", userIds);
+  const byUser = {};
+  for (const p of data || []) (byUser[p.user_id] = byUser[p.user_id] || []).push(p);
+  return byUser;
+}
+
+/* P&L del dia de UN futuro (por ticker) settle-based, a partir de los lotes
+ * crudos. Devuelve:
+ *   dayPnl      = MTM completo del dia = realizado de hoy + MTM del neto abierto
+ *                 (lote arrastrado vs settle de ayer; lote de hoy vs su entrada).
+ *   realizedToday = solo lo realizado por trades de HOY que cerraron posicion
+ *                 (motor de costo promedio, cronologico).
+ */
+function futuresTickerDay(lotes, settleToday, settleYest, todayStr) {
+  const mult = FUTURE_MULT;
+  let dayPnl = 0;
+  for (const p of lotes) {
+    const q = Number(p.quantity) || 0;
+    if (!q) continue;
+    const sign = p.operation_type === "sell" ? -1 : 1;
+    const base = (p.entry_date === todayStr && Number(p.entry_price) > 0)
+      ? Number(p.entry_price) : settleYest;
+    if (base == null || !Number.isFinite(base)) continue;
+    dayPnl += sign * (settleToday - base) * q * mult;
+  }
+  // Realizado de hoy: motor de costo promedio recorriendo cronologicamente.
+  const sorted = lotes.slice().sort((a, b) => (a.entry_date < b.entry_date ? -1 : a.entry_date > b.entry_date ? 1 : 0));
+  let posQty = 0, avg = 0, realizedToday = 0;
+  for (const p of sorted) {
+    const q = (Number(p.quantity) || 0) * (p.operation_type === "sell" ? -1 : 1);
+    if (!q) continue;
+    const price = Number(p.entry_price) || 0;
+    const isToday = p.entry_date === todayStr;
+    if (posQty === 0 || Math.sign(posQty) === Math.sign(q)) {
+      const newQty = posQty + q;
+      avg = newQty !== 0 ? (avg * Math.abs(posQty) + price * Math.abs(q)) / Math.abs(newQty) : 0;
+      posQty = newQty;
+    } else {
+      const closeQty = Math.min(Math.abs(q), Math.abs(posQty));
+      const pnl = (posQty > 0 ? (price - avg) : (avg - price)) * closeQty * mult;
+      if (isToday) realizedToday += pnl;
+      const remainder = Math.abs(q) - closeQty;
+      posQty = posQty + q;
+      if (remainder > 0) avg = price; // flipo: nueva posicion al precio del trade
+    }
+  }
+  return { dayPnl, realizedToday };
+}
+
 /* ─────────────── Contexto del loop ─────────────── */
 
 function prefOn(prefs, key, defaultOn) {
@@ -385,42 +438,57 @@ async function evalVencimientos(users, positionsBy) {
 
 /* ─────────────── Resumen de cierre (EOD) ─────────────── */
 
-async function buildEodSummary(userId, positionsBy, fut) {
+async function buildEodSummary(userId, rawBy, fut) {
   const { dateStr } = artParts();
-  const pos = positionsBy[userId] || [];
-  if (!pos.length) return `📊 <b>Cierre ${dateStr}</b>\nNo tenes posiciones abiertas.`;
-
-  const futs = pos.filter((p) => p.type === "future");
-  const bonos = pos.filter((p) => p.type !== "future");
+  const raw = rawBy[userId] || [];
+  if (!raw.length) return `📊 <b>Cierre ${dateStr}</b>\nNo tenes posiciones.`;
+  const money = (n) => `${n >= 0 ? "+" : "−"}$${Math.round(Math.abs(n)).toLocaleString("es-AR")}`;
   const lines = [`📊 <b>Cierre ${dateStr}</b>`];
+  let grand = 0;
 
-  // Futuros: P&L del dia firme (settle hoy [feed] vs settle anterior [historico]).
-  if (futs.length) {
+  // ── Futuros: P&L del dia COMPLETO por ticker (MTM neto + realizado de hoy),
+  //    settle-based (como Cocos). Mas el realizado de lo cerrado hoy, aparte.
+  const futLotes = raw.filter((p) => p.instrument_type === "future");
+  if (futLotes.length) {
     const yest = await loadYestSettles(dateStr);
-    let total = 0; const fl = [];
-    for (const p of futs) {
-      const sToday = fut.settle[p.ticker], sYest = yest[p.ticker];
-      if (sToday == null || sYest == null) { fl.push(`• ${p.ticker}: s/settle`); continue; }
-      const pnl = p.net * (sToday - sYest) * FUTURE_MULT;
-      total += pnl;
-      fl.push(`• ${p.ticker} (${p.net > 0 ? "+" : ""}${p.net}): ${pnl >= 0 ? "+" : ""}$${Math.round(pnl).toLocaleString("es-AR")}  (${sYest}→${sToday})`);
+    const byTicker = {};
+    for (const p of futLotes) (byTicker[p.ticker] = byTicker[p.ticker] || []).push(p);
+    let subtotal = 0, realizedSum = 0; const fl = [];
+    for (const [ticker, lotes] of Object.entries(byTicker)) {
+      const sToday = fut.settle[ticker], sYest = yest[ticker];
+      const net = lotes.reduce((s, p) => s + (p.operation_type === "sell" ? -1 : 1) * (Number(p.quantity) || 0), 0);
+      if (sToday == null || sYest == null) { fl.push(`• ${ticker} (${net > 0 ? "+" : ""}${net}): s/settle`); continue; }
+      const { dayPnl, realizedToday } = futuresTickerDay(lotes, sToday, sYest, dateStr);
+      subtotal += dayPnl; realizedSum += realizedToday;
+      const realTxt = Math.abs(realizedToday) > 1 ? ` · realiz. aprox ${money(realizedToday)}` : "";
+      fl.push(`• ${ticker} (neto ${net > 0 ? "+" : ""}${net}): ${money(dayPnl)}  (${sYest}→${sToday})${realTxt}`);
     }
-    lines.push(`\n<b>Futuros DLR — P&L del dia (firme)</b>\n${fl.join("\n")}\nSubtotal: <b>${total >= 0 ? "+" : ""}$${Math.round(total).toLocaleString("es-AR")}</b>`);
+    grand += subtotal;
+    lines.push(`\n<b>Futuros DLR — P&L del dia</b>\n${fl.join("\n")}\nSubtotal: <b>${money(subtotal)}</b>${Math.abs(realizedSum) > 1 ? `\n  ↳ de eso, realizado hoy (cerrado, aprox): <b>${money(realizedSum)}</b>` : ""}`);
   }
 
-  // Bonos/acciones: variacion del dia (estimado, data912).
-  if (bonos.length) {
+  // ── Tenencias (bonos/acciones): P&L del dia EN PESOS (variacion data912).
+  const tenencias = raw.filter((p) => ["bond_ars", "bond_usd", "on", "stock", "cedear"].includes(p.instrument_type));
+  if (tenencias.length) {
     const d912 = await loadData912();
-    const bl = [];
-    for (const p of bonos) {
-      const d = d912[p.ticker];
-      if (!d || d.c == null) { bl.push(`• ${p.ticker}: s/precio`); continue; }
-      const pctTxt = d.pct != null ? ` (${d.pct >= 0 ? "+" : ""}${d.pct.toFixed(2)}%)` : "";
-      bl.push(`• ${p.ticker}: ${d.c}${pctTxt}`);
+    const netByTicker = {};
+    for (const p of tenencias) netByTicker[p.ticker] = (netByTicker[p.ticker] || 0) + (p.operation_type === "sell" ? -1 : 1) * (Number(p.quantity) || 0);
+    let subtotal = 0; const bl = [];
+    for (const [ticker, net] of Object.entries(netByTicker)) {
+      if (Math.abs(net) < 1e-6) continue;
+      const d = d912[ticker];
+      if (!d || d.c == null || d.pct == null) { bl.push(`• ${ticker}: s/precio`); continue; }
+      const prev = d.c / (1 + d.pct / 100);
+      const pnl = ((d.c - prev) * net) / 100; // bonos cotizan c/100 VN
+      subtotal += pnl;
+      bl.push(`• ${ticker}: ${money(pnl)} (${d.pct >= 0 ? "+" : ""}${d.pct.toFixed(2)}%)`);
     }
-    lines.push(`\n<b>Tenencias — precio y variacion del dia</b>\n${bl.join("\n")}`);
+    grand += subtotal;
+    lines.push(`\n<b>Tenencias — P&L del dia</b>\n${bl.join("\n")}\nSubtotal: <b>${money(subtotal)}</b>`);
   }
-  lines.push(`\n<i>Futuros = P&L del dia settle-based (como Cocos). Resto = precio/variacion del dia. FCI no incluidos.</i>`);
+
+  lines.push(`\n<b>TOTAL del dia: ${money(grand)}</b>`);
+  lines.push(`<i>Futuros settle-based (como Cocos); el P&L del dia YA incluye lo cerrado. El "realizado" es aprox (costo prom), puede diferir del detalle FIFO de la app. Tenencias por variacion data912. FCI no incluidos.</i>`);
   return lines.join("\n");
 }
 
@@ -429,7 +497,7 @@ async function evalEodScheduled(users) {
   if (!subs.length) return;
   const p = artParts();
   if (!isBizDay(p.dow)) return;
-  const positionsBy = await loadPositions(subs.map((u) => u.userId));
+  const positionsBy = await loadPositionsRaw(subs.map((u) => u.userId));
   const fut = await loadFutures();
   for (const u of subs) {
     const hour = Number((u.prefs || {}).eod_hour) || EOD_DEFAULT_HOUR;
@@ -474,7 +542,7 @@ async function userByChat(chatId) {
 async function cmdPnl(chatId) {
   const userId = await userByChat(chatId);
   if (!userId) { await sendMessage(chatId, "No estas vinculado. Vincula desde Midas → Configuracion → Notificaciones."); return; }
-  const positionsBy = await loadPositions([userId]);
+  const positionsBy = await loadPositionsRaw([userId]);
   const fut = await loadFutures();
   await sendMessage(chatId, await buildEodSummary(userId, positionsBy, fut));
 }
@@ -615,4 +683,4 @@ if (require.main === module) {
   setInterval(alertLoop, ALERT_INTERVAL_MS);
 }
 
-module.exports = { buildEodSummary, loadPositions, loadFutures, loadData912, supabase };
+module.exports = { buildEodSummary, loadPositions, loadPositionsRaw, loadFutures, loadData912, supabase };
