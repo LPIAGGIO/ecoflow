@@ -22119,13 +22119,16 @@ function CarryDlrWidget({ futurePrices }) {
  * dolar a un horizonte.
  *
  * Modelo (explicado con LP):
- *   - spotS = spot * (1 + dev)
+ *   - spotS = spot * (1 + dev). La curva de futuros se mueve con el spot:
+ *     cada futuro pasa de F a F*(1+dev).
  *   - Bonos: valor en pesos / spotS = valor en USD (cae si el dolar sube).
- *   - Futuros: P&L pesos = Σ net*1000*(spotS - F); /spotS = USD (sube si sube).
+ *   - Futuros: P&L pesos = Σ net*1000*(F*(1+dev) - F) = Σ net*1000*F*dev;
+ *     /spotS = USD. En dev=0 es 0 (baseline limpio, sin efecto futuros).
  *   - Neto USD = bonos USD + futuros P&L USD.
- * Supuestos: la curva de futuros se mueve con el spot; bonos a valor de hoy
- * (sin devengar el cupon del horizonte; los CER no proyectan inflacion futura).
- * Es una foto de SENSIBILIDAD al dolar, no un P&L contable exacto.
+ * Supuestos: la curva se mueve proporcional al spot (ignora el decaimiento de
+ * carry/theta al horizonte); bonos a valor de hoy (sin devengar cupon; los CER
+ * no proyectan inflacion futura). Es una foto de SENSIBILIDAD al dolar, no un
+ * P&L contable exacto.
  */
 function computeHedgeScenarios({ bondPesoTotal, futures, spot, devs }) {
   if (!Number.isFinite(spot) || spot <= 0) return null;
@@ -22133,7 +22136,7 @@ function computeHedgeScenarios({ bondPesoTotal, futures, spot, devs }) {
   return devs.map((dev) => {
     const spotS = spot * (1 + dev);
     const bondUsd = bondPesoTotal / spotS;
-    const futPnlPesos = futures.reduce((s, f) => s + f.net * 1000 * (spotS - f.F), 0);
+    const futPnlPesos = futures.reduce((s, f) => s + f.net * 1000 * f.F * dev, 0);
     const futPnlUsd = futPnlPesos / spotS;
     return { dev, spotS, bondUsd, futPnlUsd, netUsd: bondUsd + futPnlUsd };
   }).map((r) => ({ ...r, netVsHoy: r.netUsd - bondUsd0 }));
