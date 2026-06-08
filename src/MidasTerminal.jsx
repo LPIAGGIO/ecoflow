@@ -22235,6 +22235,154 @@ function ScalpingDLRModule({ embedded = false } = {}) {
   );
 }
 
+/* ─────────────── useDollarBonds + DollarBondsSection ───────────────
+ * Decision-support: para comprar/vender USD vía bonos soberanos, cuál deja
+ * el MEJOR tipo de cambio AHORA, con puntas EJECUTABLES (data912):
+ *   - Comprar USD (dolarizar): comprás el bono en $ (pagás ask$) y lo
+ *     vendés en D (cobrás bidD) → MEP_compra = ask$ / bidD. El más BAJO gana.
+ *   - Vender USD (pesificar): comprás en D (pagás askD) y vendés en $
+ *     (cobrás bid$) → MEP_venta = bid$ / askD. El más ALTO gana.
+ * Si el mejor de venta supera al mejor de compra por más que el costo
+ * (comisiones), hay un canje real — raro en líquidos, pero queda detectado.
+ */
+const DOLLAR_BOND_PAIRS = [
+  { label: "AL30", ars: "AL30", mep: "AL30D" },
+  { label: "GD30", ars: "GD30", mep: "GD30D" },
+  { label: "AL35", ars: "AL35", mep: "AL35D" },
+  { label: "GD35", ars: "GD35", mep: "GD35D" },
+  { label: "GD38", ars: "GD38", mep: "GD38D" },
+  { label: "AE38", ars: "AE38", mep: "AE38D" },
+  { label: "AL41", ars: "AL41", mep: "AL41D" },
+  { label: "GD41", ars: "GD41", mep: "GD41D" },
+];
+// Comisión round-trip aprox de un canje (compra+venta de 2 bonos). Solo se
+// usa para decidir si el spread comprar/vender deja un arbitraje real.
+const CANJE_COST_PCT = 0.5;
+
+function useDollarBonds() {
+  const [rows, setRows] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+  const [refreshKey, setRefreshKey] = useState(0);
+  const hasLoadedRef = useRef(false);
+  const refetch = useCallback(() => setRefreshKey((k) => k + 1), []);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!hasLoadedRef.current) setLoading(true);
+    fetch(`/api/data912?type=bonos&_=${Date.now()}`)
+      .then((r) => r.json())
+      .then((data) => {
+        if (cancelled) return;
+        const bySym = {};
+        for (const x of data || []) bySym[x.symbol] = x;
+        const out = [];
+        for (const p of DOLLAR_BOND_PAIRS) {
+          const a = bySym[p.ars], m = bySym[p.mep];
+          if (!a || !m) continue;
+          const bidA = Number(a.px_bid), askA = Number(a.px_ask);
+          const bidM = Number(m.px_bid), askM = Number(m.px_ask);
+          const volA = Number(a.q_op) || 0, volM = Number(m.q_op) || 0;
+          const mepCompra = askA > 0 && bidM > 0 ? askA / bidM : null; // dolarizar
+          const mepVenta = bidA > 0 && askM > 0 ? bidA / askM : null;  // pesificar
+          if (mepCompra == null && mepVenta == null) continue;
+          out.push({ label: p.label, mepCompra, mepVenta, vol: Math.min(volA, volM) });
+        }
+        setRows(out);
+        setError(null);
+        setLoading(false);
+        hasLoadedRef.current = true;
+      })
+      .catch((e) => { if (!cancelled) { setError(e.message); setLoading(false); } });
+    return () => { cancelled = true; };
+  }, [refreshKey]);
+
+  useEffect(() => {
+    const interval = setInterval(() => setRefreshKey((k) => k + 1), 60000);
+    const onVisible = () => { if (document.visibilityState === "visible") setRefreshKey((k) => k + 1); };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => { clearInterval(interval); document.removeEventListener("visibilitychange", onVisible); };
+  }, []);
+
+  return { rows, loading, error, refetch };
+}
+
+function DollarBondsSection() {
+  const { rows, loading } = useDollarBonds();
+  const fmt = (n, d = 2) => (n == null || !Number.isFinite(n) ? "—" : Number(n).toLocaleString("es-AR", { minimumFractionDigits: d, maximumFractionDigits: d }));
+  const buys = rows.filter((r) => r.mepCompra != null);
+  const sells = rows.filter((r) => r.mepVenta != null);
+  const bestBuy = buys.length ? buys.reduce((a, b) => (b.mepCompra < a.mepCompra ? b : a)) : null;
+  const bestSell = sells.length ? sells.reduce((a, b) => (b.mepVenta > a.mepVenta ? b : a)) : null;
+  const arbPct = bestBuy && bestSell ? (bestSell.mepVenta / bestBuy.mepCompra - 1) * 100 : null;
+  const hasArb = arbPct != null && arbPct > CANJE_COST_PCT;
+  const sorted = rows.slice().sort((a, b) => (a.mepCompra ?? Infinity) - (b.mepCompra ?? Infinity));
+
+  return (
+    <div style={{ border: `1px solid ${C.accentBorder}`, borderRadius: 6, background: C.panel, padding: "16px 18px", marginBottom: 18 }}>
+      <div className="flex items-baseline justify-between" style={{ marginBottom: 4 }}>
+        <h2 style={{ fontSize: 14, fontWeight: 600, color: C.text, margin: 0 }}>Dólar vía bonos — mejor entrada/salida</h2>
+        <span style={{ fontSize: 10.5, color: C.dim, letterSpacing: "0.02em" }}>data912 (puntas ejecutables) · 60s</span>
+      </div>
+      <p style={{ fontSize: 11, color: C.muted, margin: "0 0 14px 0", lineHeight: 1.5 }}>
+        Qué soberano te deja el mejor tipo de cambio AHORA, con puntas reales. <b>Comprar USD</b> = comprás el bono en $ (ask) y lo vendés en D (bid). <b>Vender USD</b> = al revés. Ya incluye el costo de cruzar las puntas.
+      </p>
+
+      {loading && !rows.length ? (
+        <div className="flex items-center justify-center" style={{ height: 90 }}>
+          <Loader2 size={20} color={C.muted} className="eco-spin" strokeWidth={1.5} />
+        </div>
+      ) : (
+        <>
+          <div className="flex gap-4" style={{ marginBottom: 14 }}>
+            <div style={{ flex: 1, border: `1px solid ${C.border}`, borderRadius: 6, padding: "12px 14px" }}>
+              <div style={{ fontSize: 10.5, color: C.green, letterSpacing: "0.06em", textTransform: "uppercase", marginBottom: 4 }}>Comprar USD (dolarizar)</div>
+              <div style={{ fontSize: 24, fontWeight: 700, color: C.text, fontVariantNumeric: "tabular-nums", lineHeight: 1 }}>
+                ${fmt(bestBuy?.mepCompra, 2)}
+              </div>
+              <div style={{ fontSize: 11, color: C.muted, marginTop: 4 }}>vía <b style={{ color: C.text }}>{bestBuy?.label || "—"}</b> · el más barato</div>
+            </div>
+            <div style={{ flex: 1, border: `1px solid ${C.border}`, borderRadius: 6, padding: "12px 14px" }}>
+              <div style={{ fontSize: 10.5, color: C.red, letterSpacing: "0.06em", textTransform: "uppercase", marginBottom: 4 }}>Vender USD (pesificar)</div>
+              <div style={{ fontSize: 24, fontWeight: 700, color: C.text, fontVariantNumeric: "tabular-nums", lineHeight: 1 }}>
+                ${fmt(bestSell?.mepVenta, 2)}
+              </div>
+              <div style={{ fontSize: 11, color: C.muted, marginTop: 4 }}>vía <b style={{ color: C.text }}>{bestSell?.label || "—"}</b> · el más caro</div>
+            </div>
+          </div>
+
+          {arbPct != null && (
+            <div style={{ fontSize: 11.5, color: hasArb ? C.green : C.muted, fontWeight: 600, marginBottom: 12 }}>
+              {hasArb
+                ? `Canje real: comprar por ${bestBuy.label} y vender por ${bestSell.label} deja ${fmt(arbPct, 2)}% (> costo ~${CANJE_COST_PCT}%). Confirmá puntas antes de operar.`
+                : `Sin canje: mejor compra vs mejor venta = ${fmt(arbPct, 2)}% (no cubre el costo ~${CANJE_COST_PCT}% del rulo).`}
+            </div>
+          )}
+
+          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11 }}>
+            <thead>
+              <tr style={{ color: C.dim, textAlign: "right" }}>
+                <th style={{ padding: "4px 6px", textAlign: "left" }}>Bono</th>
+                <th style={{ padding: "4px 6px" }}>Comprar USD</th>
+                <th style={{ padding: "4px 6px" }}>Vender USD</th>
+              </tr>
+            </thead>
+            <tbody>
+              {sorted.map((r) => (
+                <tr key={r.label} style={{ borderTop: `1px solid ${C.border}` }}>
+                  <td style={{ padding: "4px 6px", color: C.text }}>{r.label}</td>
+                  <td style={{ padding: "4px 6px", textAlign: "right", color: r.label === bestBuy?.label ? C.green : C.muted, fontWeight: r.label === bestBuy?.label ? 700 : 400, fontVariantNumeric: "tabular-nums" }}>{fmt(r.mepCompra, 2)}</td>
+                  <td style={{ padding: "4px 6px", textAlign: "right", color: r.label === bestSell?.label ? C.red : C.muted, fontWeight: r.label === bestSell?.label ? 700 : 400, fontVariantNumeric: "tabular-nums" }}>{fmt(r.mepVenta, 2)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </>
+      )}
+    </div>
+  );
+}
+
 function DesarbitrajesModule() {
   const { live, canje, loading, error, refetch } = useSovereignMep();
   const fmt = (n, d = 2) =>
@@ -22273,6 +22421,9 @@ function DesarbitrajesModule() {
           Actualizar
         </button>
       </div>
+
+      {/* Decision-support: mejor bono para comprar/vender USD (puntas ejecutables) */}
+      <DollarBondsSection />
 
       {/* Monitor de canje MEP-CCL en vivo (spread estructural real) */}
       <CanjeMonitorSection />

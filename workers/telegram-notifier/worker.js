@@ -493,6 +493,47 @@ async function cmdCanje(chatId) {
   await sendMessage(chatId, `🔁 <b>Canje MEP soberanos</b> (top spreads):\n${lines}\n<i>Indicativo.</i>`);
 }
 
+// Decision-support: mejor bono soberano para comprar/vender USD AHORA, con
+// puntas EJECUTABLES (data912 arg_bonds). Comprar USD = comprás el bono en $
+// (ask$) y lo vendés en D (bidD) → ask$/bidD, el más bajo. Vender al revés.
+const DOLAR_PAIRS = [["AL30", "AL30D"], ["GD30", "GD30D"], ["AL35", "AL35D"], ["GD35", "GD35D"], ["GD38", "GD38D"], ["AE38", "AE38D"], ["AL41", "AL41D"], ["GD41", "GD41D"]];
+async function cmdDolar(chatId) {
+  let bonds = [];
+  try {
+    const r = await fetch("https://data912.com/live/arg_bonds", { headers: { "User-Agent": "Midas/0.1" } });
+    if (r.ok) bonds = await r.json();
+  } catch (e) { console.error("[dolar]", e.message); }
+  const bySym = {};
+  for (const x of bonds || []) if (x && x.symbol) bySym[x.symbol] = x;
+  const rows = [];
+  for (const [ars, mep] of DOLAR_PAIRS) {
+    const a = bySym[ars], m = bySym[mep];
+    if (!a || !m) continue;
+    const bidA = Number(a.px_bid), askA = Number(a.px_ask), bidM = Number(m.px_bid), askM = Number(m.px_ask);
+    const compra = askA > 0 && bidM > 0 ? askA / bidM : null;
+    const venta = bidA > 0 && askM > 0 ? bidA / askM : null;
+    if (compra == null && venta == null) continue;
+    rows.push({ label: ars, compra, venta });
+  }
+  if (!rows.length) { await sendMessage(chatId, "Sin puntas de bonos ahora (¿mercado cerrado?)."); return; }
+  const buys = rows.filter((r) => r.compra != null);
+  const sells = rows.filter((r) => r.venta != null);
+  const bestBuy = buys.length ? buys.reduce((x, y) => (y.compra < x.compra ? y : x)) : null;
+  const bestSell = sells.length ? sells.reduce((x, y) => (y.venta > x.venta ? y : x)) : null;
+  const f = (n) => (n == null ? "s/d" : Number(n).toLocaleString("es-AR", { minimumFractionDigits: 2, maximumFractionDigits: 2 }));
+  let msg = "💵 <b>Dólar vía bonos</b> (puntas ejecutables)";
+  if (bestBuy) msg += `\n\n🟢 <b>Comprar USD</b>: $${f(bestBuy.compra)} vía <b>${bestBuy.label}</b> (el más barato)`;
+  if (bestSell) msg += `\n🔴 <b>Vender USD</b>: $${f(bestSell.venta)} vía <b>${bestSell.label}</b> (el más caro)`;
+  if (bestBuy && bestSell) {
+    const arb = (bestSell.venta / bestBuy.compra - 1) * 100;
+    msg += arb > 0.5
+      ? `\n\n⚡ Canje real ${arb.toFixed(2)}% (> costo ~0,5%). Confirmá puntas.`
+      : `\n\nSin canje: ${arb.toFixed(2)}% (no cubre el costo ~0,5% del rulo).`;
+  }
+  msg += "\n<i>Comprar = comprás el bono en $ y lo vendés en D; vender al revés. Incluye cruzar puntas.</i>";
+  await sendMessage(chatId, msg);
+}
+
 /* ─────────────── Linking + comandos ─────────────── */
 
 let offset = 0;
@@ -507,7 +548,7 @@ async function handleUpdate(u) {
   if (text.startsWith("/start")) {
     const code = text.split(/\s+/)[1];
     if (!code) {
-      await sendMessage(chatId, "Hola, soy <b>Midas Alertas</b>.\n\nVincula tu cuenta desde Midas → <b>Configuracion → Notificaciones</b> → <b>Conectar Telegram</b>.\n\nComandos: /pnl (resumen), /dlr (dolar futuro), /canje (desarbitrajes), /stop (pausar).");
+      await sendMessage(chatId, "Hola, soy <b>Midas Alertas</b>.\n\nVincula tu cuenta desde Midas → <b>Configuracion → Notificaciones</b> → <b>Conectar Telegram</b>.\n\nComandos: /pnl (resumen), /dlr (dolar futuro), /dolar (mejor bono USD), /canje (desarbitrajes), /stop (pausar).");
       return;
     }
     const nowIso = new Date().toISOString();
@@ -530,9 +571,10 @@ async function handleUpdate(u) {
   if (text.startsWith("/pnl") || text.startsWith("/resumen")) { await cmdPnl(chatId); return; }
   if (text.startsWith("/dlr")) { await cmdDlr(chatId); return; }
   if (text.startsWith("/canje")) { await cmdCanje(chatId); return; }
+  if (text.startsWith("/dolar") || text.startsWith("/dólar") || text.startsWith("/mep")) { await cmdDolar(chatId); return; }
   if (text.startsWith("/ping")) { await sendMessage(chatId, "pong"); return; }
   if (text.startsWith("/help")) {
-    await sendMessage(chatId, "Comandos:\n/pnl — resumen de cierre\n/dlr — dolar futuro + spread\n/canje — desarbitrajes MEP\n/stop — pausar\n/start &lt;codigo&gt; — vincular\n\nLa activacion y preferencias se manejan en Midas → Configuracion → Notificaciones.");
+    await sendMessage(chatId, "Comandos:\n/pnl — resumen de cierre\n/dlr — dolar futuro + spread\n/dolar — mejor bono para comprar/vender USD\n/canje — desarbitrajes MEP\n/stop — pausar\n/start &lt;codigo&gt; — vincular\n\nLa activacion y preferencias se manejan en Midas → Configuracion → Notificaciones.");
     return;
   }
 }
