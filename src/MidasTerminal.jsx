@@ -22188,7 +22188,13 @@ function HedgeScenarioWidget({ full = false }) {
   // Contratos para calzar el sintetico (cobertura dolar-neutra): cubrir el valor
   // en USD del carry. Cada contrato DLR = 1000 USD de exposicion.
   const carryUsd = spot ? carryPesoTotal / spot : null;
-  const neutralContracts = carryUsd != null ? carryUsd / 1000 : null;
+  // Calce exacto (valor USD plano ante saltos): N = carry / (1000 × F) con F del
+  // front (derivado del modelo: hace que la ganancia de futuros compense justo
+  // la licuacion de los bonos). Es el K = X/(1000F) del sintetico de Midas.
+  const frontF = futures.length
+    ? futures.slice().sort((a, b) => (flowExpiryKey(a.ticker) ?? 9e9) - (flowExpiryKey(b.ticker) ?? 9e9))[0].F
+    : spot;
+  const neutralContracts = (carryPesoTotal > 0 && frontF) ? carryPesoTotal / (1000 * frontF) : null;
   const excessContracts = neutralContracts != null ? futNet - neutralContracts : null;
 
   if (spot == null) return <div style={{ padding: "30px 20px", textAlign: "center", color: C.muted, fontSize: 11 }}>Esperando spot mayorista…</div>;
