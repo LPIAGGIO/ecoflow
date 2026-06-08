@@ -22142,8 +22142,9 @@ function computeHedgeScenarios({ bondPesoTotal, futures, spot, devs }) {
   }).map((r) => ({ ...r, netVsHoy: r.netUsd - bondUsd0 }));
 }
 
-// Widget compacto del Dashboard: foto de "como estoy parado" bajo escenarios.
-function HedgeScenarioWidget() {
+// Widget de "como estoy parado" bajo escenarios. full=true (Sintetico) agrega
+// mas escenarios + columna de dolar; compacto (Dashboard) = 4 escenarios.
+function HedgeScenarioWidget({ full = false }) {
   const { positions } = useUserPositions();
   const bondPricesState = useBondPrices();
   const bondPrices = bondPricesState?.prices || {};
@@ -22177,7 +22178,7 @@ function HedgeScenarioWidget() {
   if (spot == null) return <div style={{ padding: "30px 20px", textAlign: "center", color: C.muted, fontSize: 11 }}>Esperando spot mayorista…</div>;
   if (bonds.length === 0 && futures.length === 0) return <div style={{ padding: "30px 20px", textAlign: "center", color: C.muted, fontSize: 11 }}>Sin bonos en pesos ni futuros DLR en tu cartera.</div>;
 
-  const devs = [0, 0.10, 0.20, 0.30];
+  const devs = full ? [-0.05, 0, 0.10, 0.20, 0.30, 0.50] : [0, 0.10, 0.20, 0.30];
   const rows = computeHedgeScenarios({ bondPesoTotal, futures, spot, devs });
   const fmtU = (n) => (n == null || !Number.isFinite(n) ? "—" : Math.round(n).toLocaleString("es-AR"));
   const net0 = rows[0]?.netUsd ?? 0;
@@ -22191,6 +22192,7 @@ function HedgeScenarioWidget() {
         <thead>
           <tr style={{ color: C.dim, fontSize: 9, letterSpacing: "0.06em", textTransform: "uppercase" }}>
             <th style={{ textAlign: "left", padding: "4px 6px" }}>Salto $</th>
+            {full && <th style={{ textAlign: "right", padding: "4px 6px" }}>Dólar</th>}
             <th style={{ textAlign: "right", padding: "4px 6px" }}>Bonos USD</th>
             <th style={{ textAlign: "right", padding: "4px 6px" }}>Futuros USD</th>
             <th style={{ textAlign: "right", padding: "4px 6px" }}>Neto USD</th>
@@ -22201,7 +22203,8 @@ function HedgeScenarioWidget() {
             const better = r.netUsd >= net0;
             return (
               <tr key={r.dev} style={{ borderTop: `1px solid ${C.border}` }}>
-                <td style={{ textAlign: "left", padding: "5px 6px", color: C.text, fontWeight: 600 }}>{r.dev === 0 ? "0% (crawl)" : `+${Math.round(r.dev * 100)}%`}</td>
+                <td style={{ textAlign: "left", padding: "5px 6px", color: C.text, fontWeight: 600 }}>{r.dev === 0 ? "0% (crawl)" : `${r.dev > 0 ? "+" : ""}${Math.round(r.dev * 100)}%`}</td>
+                {full && <td style={{ textAlign: "right", padding: "5px 6px", color: C.dim, fontVariantNumeric: "tabular-nums" }}>{fmtU(r.spotS)}</td>}
                 <td style={{ textAlign: "right", padding: "5px 6px", color: C.muted, fontVariantNumeric: "tabular-nums" }}>{fmtU(r.bondUsd)}</td>
                 <td style={{ textAlign: "right", padding: "5px 6px", color: r.futPnlUsd >= 0 ? C.green : C.red, fontVariantNumeric: "tabular-nums" }}>{r.futPnlUsd >= 0 ? "+" : ""}{fmtU(r.futPnlUsd)}</td>
                 <td style={{ textAlign: "right", padding: "5px 6px", color: better ? C.green : C.text, fontWeight: 600, fontVariantNumeric: "tabular-nums" }}>{fmtU(r.netUsd)}</td>
@@ -27545,6 +27548,21 @@ TIR_USD    = USD_factor^(365/T) − 1`}
           Click en un bono → detalle con todos los horizontes y modelos.
         </div>
       </div>
+
+      {/* Mi cobertura · escenarios (solo en la tab Cartera = posicion real) */}
+      {activeTab === "cartera" && (
+        <div style={{ marginBottom: 16 }}>
+          <div style={{ fontSize: 13, fontWeight: 600, color: C.text, marginBottom: 2 }}>
+            Mi cobertura · escenarios de dólar
+          </div>
+          <div style={{ fontSize: 11, color: C.muted, marginBottom: 8 }}>
+            Valor en USD de tus bonos en pesos (el carry) + tus futuros DLR (la cobertura) bajo distintos saltos del dólar.
+          </div>
+          <div style={{ background: C.panel, border: `1px solid ${C.border}` }}>
+            <HedgeScenarioWidget full />
+          </div>
+        </div>
+      )}
 
       {/* Tabla */}
       <div style={{ backgroundColor: C.panel, border: `1px solid ${C.border}`, overflow: "auto" }}>
