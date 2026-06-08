@@ -325,22 +325,22 @@ async function evalScalping(users, fut) {
 
 async function evalDesarb(users) {
   const subs = users.filter((u) => prefOn(u.prefs, "desarbitrajes", false));
-  // Solo en horario de mercado: fuera de rueda los precios son stale y el
-  // spread cross-bond es ruido (la investigacion mostro que el real es ~0).
   if (!subs.length || !inBymaHours()) return;
-  const { data: rows } = await supabase.from("sovereign_mep_canje")
-    .select("plazo,comprar_pesos_vender_dolar,vender_dolar_caro,spread_pct").gte("spread_pct", DESARB_SPREAD_PCT);
-  if (!rows || !rows.length) return;
-  for (const r of rows) {
-    const key = `${r.plazo}`;
-    const plazo = PLAZO_LABEL[r.plazo] || r.plazo;
-    const text = `🔁 <b>Canje MEP ${plazo}</b>: spread <b>${Number(r.spread_pct).toFixed(2)}%</b>.\nComprar $ y vender USD via <b>${r.comprar_pesos_vender_dolar}</b>, vender USD caro via <b>${r.vender_dolar_caro}</b>.`;
-    for (const u of subs) {
-      if (await recentlySent(u.userId, "desarb", key, CD.desarb)) continue;
-      await sendMessage(u.chatId, `${text}\n<i>Indicativo (sin puntas, patas asincronicas). Verificar antes de operar.</i>`);
-      await logSent(u.userId, "desarb", key, `canje ${r.plazo}`, `spread ${r.spread_pct}`);
-      console.log(`[desarb] ${u.userId} ${r.plazo} ${r.spread_pct}`);
-    }
+  // PUNTAS EJECUTABLES (data912): solo avisamos si el mejor de venta supera al
+  // mejor de compra por mas que el costo del rulo (~0,5%). El enfoque viejo
+  // (ultimo precio MAE de sovereign_mep_canje) cantaba falsos por asincronia
+  // intradia aunque las patas fueran del mismo dia (ej: AL30 vs GD35 con last
+  // de momentos distintos del dia daba 3,7% fantasma). Esto es el canje REAL.
+  const { bestBuy, bestSell, arbPct } = await fetchDolarBonds();
+  if (arbPct == null || arbPct <= CANJE_PUSH_PCT) return;
+  const f = (n) => Number(n).toLocaleString("es-AR", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const key = `${bestBuy.label}-${bestSell.label}`;
+  const text = `⚡ <b>Canje real ${arbPct.toFixed(2)}%</b>\nComprar USD por <b>${bestBuy.label}</b> a $${f(bestBuy.compra)}, vender por <b>${bestSell.label}</b> a $${f(bestSell.venta)}.\n<i>Puntas ejecutables, neto de cruzar. Confirma antes de operar.</i>`;
+  for (const u of subs) {
+    if (await recentlySent(u.userId, "desarb", key, CD.desarb)) continue;
+    await sendMessage(u.chatId, text);
+    await logSent(u.userId, "desarb", key, "canje real", `arb ${arbPct.toFixed(2)}`);
+    console.log(`[desarb-real] ${u.userId} ${arbPct.toFixed(2)} ${bestBuy.label}->${bestSell.label}`);
   }
 }
 
@@ -497,7 +497,13 @@ async function cmdCanje(chatId) {
 // puntas EJECUTABLES (data912 arg_bonds). Comprar USD = comprás el bono en $
 // (ask$) y lo vendés en D (bidD) → ask$/bidD, el más bajo. Vender al revés.
 const DOLAR_PAIRS = [["AL30", "AL30D"], ["GD30", "GD30D"], ["AL35", "AL35D"], ["GD35", "GD35D"], ["GD38", "GD38D"], ["AE38", "AE38D"], ["AL41", "AL41D"], ["GD41", "GD41D"]];
-async function cmdDolar(chatId) {
+const CANJE_PUSH_PCT = 0.6; // umbral de alerta: canje real neto del costo (~0,5%)
+
+// Trae puntas EJECUTABLES (data912 arg_bonds) y calcula el mejor bono para
+// comprar/vender USD. Compartido por /dolar y la alerta de canje real.
+//   compra (dolarizar) = ask$ / bidD  → el más bajo gana
+//   venta  (pesificar) = bid$ / askD  → el más alto gana
+async function fetchDolarBonds() {
   let bonds = [];
   try {
     const r = await fetch("https://data912.com/live/arg_bonds", { headers: { "User-Agent": "Midas/0.1" } });
@@ -515,20 +521,25 @@ async function cmdDolar(chatId) {
     if (compra == null && venta == null) continue;
     rows.push({ label: ars, compra, venta });
   }
-  if (!rows.length) { await sendMessage(chatId, "Sin puntas de bonos ahora (¿mercado cerrado?)."); return; }
   const buys = rows.filter((r) => r.compra != null);
   const sells = rows.filter((r) => r.venta != null);
   const bestBuy = buys.length ? buys.reduce((x, y) => (y.compra < x.compra ? y : x)) : null;
   const bestSell = sells.length ? sells.reduce((x, y) => (y.venta > x.venta ? y : x)) : null;
+  const arbPct = bestBuy && bestSell ? (bestSell.venta / bestBuy.compra - 1) * 100 : null;
+  return { rows, bestBuy, bestSell, arbPct };
+}
+
+async function cmdDolar(chatId) {
+  const { rows, bestBuy, bestSell, arbPct } = await fetchDolarBonds();
+  if (!rows.length) { await sendMessage(chatId, "Sin puntas de bonos ahora (¿mercado cerrado?)."); return; }
   const f = (n) => (n == null ? "s/d" : Number(n).toLocaleString("es-AR", { minimumFractionDigits: 2, maximumFractionDigits: 2 }));
   let msg = "💵 <b>Dólar vía bonos</b> (puntas ejecutables)";
   if (bestBuy) msg += `\n\n🟢 <b>Comprar USD</b>: $${f(bestBuy.compra)} vía <b>${bestBuy.label}</b> (el más barato)`;
   if (bestSell) msg += `\n🔴 <b>Vender USD</b>: $${f(bestSell.venta)} vía <b>${bestSell.label}</b> (el más caro)`;
-  if (bestBuy && bestSell) {
-    const arb = (bestSell.venta / bestBuy.compra - 1) * 100;
-    msg += arb > 0.5
-      ? `\n\n⚡ Canje real ${arb.toFixed(2)}% (> costo ~0,5%). Confirmá puntas.`
-      : `\n\nSin canje: ${arb.toFixed(2)}% (no cubre el costo ~0,5% del rulo).`;
+  if (arbPct != null) {
+    msg += arbPct > CANJE_PUSH_PCT
+      ? `\n\n⚡ Canje real ${arbPct.toFixed(2)}% (> costo ~0,5%). Confirmá puntas.`
+      : `\n\nSin canje: ${arbPct.toFixed(2)}% (no cubre el costo ~0,5% del rulo).`;
   }
   msg += "\n<i>Comprar = comprás el bono en $ y lo vendés en D; vender al revés. Incluye cruzar puntas.</i>";
   await sendMessage(chatId, msg);
