@@ -24071,16 +24071,34 @@ function projectBand(targetDate, boundary, remIpcByMonth = {}) {
   return value;
 }
 
-function projectREMTC(targetDate, remTcByMonth = {}) {
+function projectREMTC(targetDate, remTcByMonth = {}, remIpcByMonth = {}) {
+  const keys = Object.keys(remTcByMonth).sort();
+  if (keys.length === 0) return null;
   const target = new Date(targetDate + "T00:00:00");
   const targetYM = `${target.getFullYear()}-${String(target.getMonth() + 1).padStart(2, "0")}`;
   if (remTcByMonth[targetYM] != null) return remTcByMonth[targetYM];
-  const sortedKeys = Object.keys(remTcByMonth).sort();
-  let lastBefore = null;
-  for (const k of sortedKeys) {
-    if (k <= targetYM) lastBefore = k;
+  const firstKey = keys[0], lastKey = keys[keys.length - 1];
+  if (targetYM <= firstKey) return remTcByMonth[firstKey];
+  if (targetYM < lastKey) {
+    // Mes intermedio sin dato puntual: usar el último mes REM <= target.
+    let lastBefore = firstKey;
+    for (const k of keys) if (k <= targetYM) lastBefore = k;
+    return remTcByMonth[lastBefore];
   }
-  return lastBefore ? remTcByMonth[lastBefore] : null;
+  // Más allá del último mes publicado: extrapolar con la inflación mensual
+  // del REM (T-2), igual criterio que las bandas. Fallback 2%/mes.
+  let value = remTcByMonth[lastKey];
+  const cursor = new Date(lastKey + "-01T00:00:00");
+  const targetCursor = new Date(targetYM + "-01T00:00:00");
+  while (cursor < targetCursor) {
+    cursor.setMonth(cursor.getMonth() + 1);
+    const ipcCursor = new Date(cursor);
+    ipcCursor.setMonth(ipcCursor.getMonth() - 2);
+    const ipcKey = `${ipcCursor.getFullYear()}-${String(ipcCursor.getMonth() + 1).padStart(2, "0")}`;
+    const infl = remIpcByMonth[ipcKey] != null ? remIpcByMonth[ipcKey] / 100 : 0.02;
+    value = value * (1 + infl);
+  }
+  return value;
 }
 
 function CarryTradeModule() {
@@ -24106,6 +24124,10 @@ function CarryTradeModule() {
     }, 1000);
     return () => clearInterval(i);
   }, []);
+
+  // Pago al vencimiento desde el worker (bond_emissions) — completa los bonos
+  // que no estan en el BOND_REGISTRY hardcodeado, para no asumir VN=100.
+  const { emissions } = useBondEmissions();
 
   const fetchAll = async (isManual = false) => {
     if (isManual) setRefreshing(true);
@@ -24162,7 +24184,8 @@ function CarryTradeModule() {
           const remData = await remRes.json();
           const map = {};
           (remData.datos || []).forEach((d) => {
-            if (d.periodo && d.mediana != null) map[d.periodo] = d.mediana;
+            const per = d["período"] ?? d.periodo;
+            if (per && d.mediana != null) map[String(per).slice(0, 7)] = d.mediana;
           });
           setRemTc(map);
         }
@@ -24175,7 +24198,8 @@ function CarryTradeModule() {
           const ipcData = await ipcRes.json();
           const map = {};
           (ipcData.datos || []).forEach((d) => {
-            if (d.periodo && d.mediana != null) map[d.periodo] = d.mediana;
+            const per = d["período"] ?? d.periodo;
+            if (per && d.mediana != null) map[String(per).slice(0, 7)] = d.mediana;
           });
           setRemIpc(map);
         }
@@ -24233,10 +24257,15 @@ function CarryTradeModule() {
 
         accepted.push(ticker);
 
-        // Pago final del bono: si está en el registry usamos el dato real (verificado en
-        // rendimientos.co), sino fallback a $100 VN (aproximación que subestima el rendimiento).
-        const valorFinal = resolved.finalPayoff ?? 100;
-        const hasFinalPayoff = resolved.finalPayoff != null;
+        // Pago final del bono: registry (verificado) → worker bond_emissions →
+        // si no hay ninguno, NO inventamos VN=100 (daria ROI basura): lo dejamos
+        // afuera. Asi la tabla no muestra rendimientos sin sentido.
+        const emPayoff = emissions?.get(ticker)?.pagoVencimiento;
+        const valorFinal = resolved.finalPayoff != null
+          ? resolved.finalPayoff
+          : (Number.isFinite(emPayoff) && emPayoff > 0 ? emPayoff : null);
+        if (valorFinal == null) { rejectedNoMap.push(ticker + " (sin pago vto)"); return null; }
+        const hasFinalPayoff = true;
 
         const roiArs = valorFinal / priceArs - 1;
         const tirAnual = Math.pow(1 + roiArs, 365 / days) - 1;
@@ -24264,7 +24293,7 @@ function CarryTradeModule() {
     }
 
     return result;
-  }, [bondsRaw]);
+  }, [bondsRaw, emissions]);
 
   // Bonos separados por tipo (para tablas separadas en modo "Por Dólar")
   const lecaps = processedBonds.filter((b) => b.type === "lecap");
@@ -24293,7 +24322,7 @@ function CarryTradeModule() {
   const exitFxByScenario = (bond) => ({
     floor: projectBand(bond.maturityDate, "floor", remIpc),
     ceiling: projectBand(bond.maturityDate, "ceiling", remIpc),
-    rem: projectREMTC(bond.maturityDate, remTc),
+    rem: projectREMTC(bond.maturityDate, remTc, remIpc),
   });
 
   // ROI USD = (capital_final_ARS / dolar_salida) / capital_inicial_USD - 1
@@ -24400,8 +24429,8 @@ function CarryTradeModule() {
       />
 
       <p style={{ fontSize: 10, color: C.dim, marginTop: 12, lineHeight: 1.5, maxWidth: 720 }}>
-        Precios de data912.com con delay ~2h respecto a BYMA. Cálculo asume VN=$100 al vencimiento (Lecaps/Boncaps capitalizables).
-        Bandas BCRA: crawling 1%/mes hasta 31/12/2025, luego inflación T-2 del REM. Para operaciones reales consultar tu plataforma de trading.
+        Precios de data912.com con delay ~2h respecto a BYMA. Pago al vencimiento real (registry verificado + emisiones del Tesoro); los bonos sin pago conocido se omiten.
+        Bandas BCRA: crawling 1%/mes hasta 31/12/2025, luego inflación T-2 del REM. El REM se extrapola con inflación más allá del último mes publicado. Para operaciones reales consultar tu plataforma de trading.
       </p>
     </div>
   );
@@ -25504,6 +25533,12 @@ function ByBandsMode({ bonds, fxRates, scenario, setScenario, usdAmount, setUsdA
           {activeScenarioObj?.desc}
         </p>
       </div>
+
+      {scenario === "rem" && bonds.length > 0 && enriched.every((b) => b.exitFx.rem == null) && (
+        <div style={{ marginBottom: 16, fontSize: 11.5, color: C.yellow, background: "rgba(250,204,21,0.08)", border: "1px solid rgba(250,204,21,0.25)", padding: "8px 12px" }}>
+          El REM del BCRA no está disponible en este momento (es una publicación mensual). Probá los escenarios Piso o Techo, o reintentá más tarde.
+        </div>
+      )}
 
       {/* Lead bond */}
       <div className="mb-5">
@@ -29386,7 +29421,8 @@ function FuturosVsCaucionModule() {
           const remData = await remRes.json();
           const map = {};
           (remData.datos || []).forEach((d) => {
-            if (d.periodo && d.mediana != null) map[d.periodo] = d.mediana;
+            const per = d["período"] ?? d.periodo;
+            if (per && d.mediana != null) map[String(per).slice(0, 7)] = d.mediana;
           });
           setRemTc(map);
         }
