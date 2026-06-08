@@ -20585,10 +20585,6 @@ function DashboardModule() {
     setDragId(null);
     setOverId(null);
   }, [dragId]);
-  const resetOrder = useCallback(() => {
-    persistDashboardOrder(DASHBOARD_WIDGET_IDS);
-    setOrder(DASHBOARD_WIDGET_IDS);
-  }, []);
 
   // Construcción de la curva. Reusa el helper global que también usa el
   // Sintético DLR — misma lógica de filtrado y mismo umbral de basis.
@@ -20600,24 +20596,13 @@ function DashboardModule() {
   return (
     <div style={{ padding: "20px 24px 32px", overflowY: "auto", height: "100%" }}>
       {/* Header del módulo */}
-      <div style={{ marginBottom: 18, paddingBottom: 12, borderBottom: `1px solid ${C.border}`, display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 12 }}>
-        <div>
-          <h1 style={{ fontSize: 16, fontWeight: 600, color: C.text, margin: 0, letterSpacing: "0.05em", textTransform: "uppercase" }}>
-            Dashboard
-          </h1>
-          <p style={{ fontSize: 11, color: C.muted, margin: "5px 0 0 0", letterSpacing: "0.02em" }}>
-            Panel modular · arrastrá un widget (⠿) para reordenar · ⛶ para expandir
-          </p>
-        </div>
-        <button
-          onClick={resetOrder}
-          title="Volver al orden original"
-          style={{ flexShrink: 0, background: "transparent", border: `1px solid ${C.border}`, color: C.muted, borderRadius: 4, padding: "5px 10px", fontSize: 10.5, letterSpacing: "0.04em", cursor: "pointer" }}
-          onMouseEnter={(e) => { e.currentTarget.style.borderColor = C.accent; e.currentTarget.style.color = C.text; }}
-          onMouseLeave={(e) => { e.currentTarget.style.borderColor = C.border; e.currentTarget.style.color = C.muted; }}
-        >
-          Restablecer orden
-        </button>
+      <div style={{ marginBottom: 18, paddingBottom: 12, borderBottom: `1px solid ${C.border}` }}>
+        <h1 style={{ fontSize: 16, fontWeight: 600, color: C.text, margin: 0, letterSpacing: "0.05em", textTransform: "uppercase" }}>
+          Dashboard
+        </h1>
+        <p style={{ fontSize: 11, color: C.muted, margin: "5px 0 0 0", letterSpacing: "0.02em" }}>
+          Panel modular · arrastrá un widget (⠿) para reordenar · ⛶ para expandir
+        </p>
       </div>
 
       {/* Grid responsive de widgets.
