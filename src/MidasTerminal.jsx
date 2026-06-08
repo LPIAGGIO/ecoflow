@@ -18744,24 +18744,28 @@ function Input({ value, onChange, placeholder, type = "text", step, hasError }) 
  *   - No soporta exponentes (1e6).
  *   - Negativos sí, pero raramente aplica para precios.
  */
-function MoneyInput({ value, onChange, placeholder, hasError, decimals = 2, bare = false, style: styleOverride, onBlur, onKeyDown: onKeyDownExtra }) {
+// emit: "js" → onChange recibe JS-number-string ("1500000.75"); "ar" → recibe
+// el string formateado AR ("1.500.000,75"). Usá "ar" cuando el consumidor lo
+// parsea con parseAmountString (espera puntos de miles).
+function MoneyInput({ value, onChange, placeholder, hasError, decimals = 2, bare = false, style: styleOverride, onBlur, onKeyDown: onKeyDownExtra, emit = "js" }) {
   const ref = useRef(null);
   const focusedRef = useRef(false);
-  const [display, setDisplay] = useState(() => numStrToArMask(value, decimals));
+  const toDisplay = (v) => emit === "ar" ? formatAmountInput(v == null ? "" : String(v), decimals) : numStrToArMask(v, decimals);
+  const [display, setDisplay] = useState(() => toDisplay(value));
 
   // Sincroniza el display con el value externo, salvo mientras el user tipea
   // (para no pisarle el caret/lo que está escribiendo).
   useEffect(() => {
     if (focusedRef.current) return;
-    setDisplay(numStrToArMask(value, decimals));
+    setDisplay(toDisplay(value));
   }, [value, decimals]);
 
-  // Reformatea en vivo, emite el JS-number-string (contrato existente del form)
-  // y restaura el caret contando caracteres significativos.
+  // Reformatea en vivo, emite según `emit` y restaura el caret contando
+  // caracteres significativos (los puntos de miles no cuentan).
   const pushFormatted = (rawAr, caretSig) => {
     const formatted = formatAmountInput(rawAr, decimals);
     setDisplay(formatted);
-    onChange(formatted === "" ? "" : formatted.replace(/\./g, "").replace(",", "."));
+    onChange(emit === "ar" ? formatted : (formatted === "" ? "" : formatted.replace(/\./g, "").replace(",", ".")));
     requestAnimationFrame(() => {
       const el = ref.current;
       if (!el) return;
@@ -25239,11 +25243,12 @@ function BreakevenChart({ bonds, fxRates, remIpc, loading }) {
         <label style={{ fontSize: 10, color: C.dim, letterSpacing: "0.16em", textTransform: "uppercase", fontWeight: 500 }}>
           MEP de cálculo
         </label>
-        <input
-          type="text"
+        <MoneyInput
           value={customMep}
-          onChange={(e) => setCustomMep(e.target.value)}
+          onChange={setCustomMep}
           placeholder={fmtARS(mepNow)}
+          emit="ar"
+          bare
           style={{
             backgroundColor: C.deep,
             border: `1px solid ${usingCustom ? C.cat.violet : C.border}`,
@@ -25252,7 +25257,6 @@ function BreakevenChart({ bonds, fxRates, remIpc, loading }) {
             fontSize: 13,
             padding: "6px 12px",
             width: 130,
-            outline: "none",
           }}
         />
         {usingCustom ? (
@@ -27756,13 +27760,12 @@ TIR_USD    = USD_factor^(365/T) − 1`}
                   <td style={tdLeft}>{row.bondMaturity}</td>
                   <td style={tdDim}>{row.days}</td>
                   <td style={td}>
-                    <input
-                      type="number"
+                    <MoneyInput
                       value={matRaw}
-                      onChange={(e) => setMaturity(row.bondTicker, e.target.value)}
+                      onChange={(v) => setMaturity(row.bondTicker, v)}
                       placeholder=""
-                      step="0.01"
-                      title={inputTitle}
+                      decimals={3}
+                      bare
                       style={{
                         width: 78,
                         padding: "3px 6px",
@@ -28713,11 +28716,11 @@ function BondDetailModal({ row, spotMayorista, spotMep, futuresLive, curveData, 
                   USD
                 </button>
               </div>
-              <input
-                type="text"
-                inputMode="decimal"
+              <MoneyInput
                 value={simInputAmount}
-                onChange={(e) => setSimInputAmount(formatAmountInput(e.target.value))}
+                onChange={setSimInputAmount}
+                emit="ar"
+                bare
                 style={{
                   width: simInputCurrency === "ARS" ? 160 : 120,
                   padding: "5px 10px",
