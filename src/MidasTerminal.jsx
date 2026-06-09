@@ -22903,6 +22903,54 @@ function saveDolarBaseline(b) {
   try { window.localStorage.setItem(DOLAR_BASELINE_LS_KEY, JSON.stringify(b)); } catch (e) { /* noop */ }
 }
 
+/* MEP/CCL EJECUTABLE desde el mercado de bonos (data912, puntas reales), para
+ * contrastar con el MEP/CCL de referencia de dolarapi (que es indicativo).
+ *   comprar USD: comprás el bono en $ (ask$) y lo vendés en D/C (bidD/bidC) → ask$/bid
+ *   vender USD : al revés → bid$/ask
+ * Tomamos el mejor (comprar = más barato, vender = más caro) entre los soberanos
+ * líquidos. Refresca 60s + al volver a la pestaña. */
+const EXEC_DOLAR_BONDS = ["AL30", "GD30", "AL35", "GD35"];
+function useExecutableDolar() {
+  const [data, setData] = useState(null);
+  useEffect(() => {
+    let cancel = false;
+    const num = (v) => { const n = Number(v); return Number.isFinite(n) && n > 0 ? n : null; };
+    const load = () => {
+      fetch(`/api/data912?type=bonos&_=${Date.now()}`)
+        .then((r) => r.json())
+        .then((rows) => {
+          if (cancel) return;
+          const bySym = {};
+          for (const x of rows || []) if (x && x.symbol) bySym[x.symbol] = x;
+          let mepBuy = null, mepSell = null, cclBuy = null, cclSell = null;
+          for (const b of EXEC_DOLAR_BONDS) {
+            const a = bySym[b], d = bySym[b + "D"], c = bySym[b + "C"];
+            if (!a) continue;
+            const bidA = num(a.px_bid), askA = num(a.px_ask);
+            if (d) {
+              const bidD = num(d.px_bid), askD = num(d.px_ask);
+              if (askA && bidD) { const v = askA / bidD; if (mepBuy == null || v < mepBuy) mepBuy = v; }
+              if (bidA && askD) { const v = bidA / askD; if (mepSell == null || v > mepSell) mepSell = v; }
+            }
+            if (c) {
+              const bidC = num(c.px_bid), askC = num(c.px_ask);
+              if (askA && bidC) { const v = askA / bidC; if (cclBuy == null || v < cclBuy) cclBuy = v; }
+              if (bidA && askC) { const v = bidA / askC; if (cclSell == null || v > cclSell) cclSell = v; }
+            }
+          }
+          setData({ mepBuy, mepSell, cclBuy, cclSell, ts: Date.now() });
+        })
+        .catch(() => { /* noop */ });
+    };
+    load();
+    const iv = setInterval(load, 60000);
+    const onVis = () => { if (document.visibilityState === "visible") load(); };
+    document.addEventListener("visibilitychange", onVis);
+    return () => { cancel = true; clearInterval(iv); document.removeEventListener("visibilitychange", onVis); };
+  }, []);
+  return data;
+}
+
 function ComparaDolarModule() {
   const [stableTab, setStableTab] = useState("ccl");
   const [direction, setDirection] = useState("buy");
@@ -22912,6 +22960,7 @@ function ComparaDolarModule() {
   const [stableData, setStableData] = useState({ ccl: [], usdt: [], usdc: [] });
   const [prevSnapshot, setPrevSnapshot] = useState({});
   const [baseline, setBaseline] = useState(() => loadDolarBaseline());
+  const exec = useExecutableDolar();
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState(null);
@@ -23076,7 +23125,11 @@ function ComparaDolarModule() {
     const value = numMid != null && denMid != null && denMid !== 0
       ? ((numMid - denMid) / denMid) * 100
       : null;
-    return { ...b, value };
+    // Variación del día de la brecha (pp): brecha actual − brecha de apertura.
+    const bn = baseline?.mids?.[b.num], bd = baseline?.mids?.[b.den];
+    const baseVal = bn != null && bd ? ((bn - bd) / bd) * 100 : null;
+    const dayChange = value != null && baseVal != null ? value - baseVal : null;
+    return { ...b, value, dayChange };
   });
 
   // Active stable rows
@@ -23198,6 +23251,11 @@ function ComparaDolarModule() {
 
       {/* Brecha card */}
       <BrechaCard rows={brechaRows} loading={loading} />
+
+      {/* Dólar ejecutable (bonos) — el operable, contra el de referencia */}
+      <div className="mt-3">
+        <ExecutableDolarCard exec={exec} refMep={usdByType.mep?.mid} refCcl={usdByType.ccl?.mid} />
+      </div>
 
       {/* Divider */}
       <div className="my-7" style={{ height: 1, backgroundColor: C.border }} />
@@ -23471,7 +23529,7 @@ function BrechaCard({ rows, loading }) {
           style={{ gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))" }}
         >
           {rows.map((b, i) => (
-            <BrechaRow key={i} label={b.label} value={b.value} />
+            <BrechaRow key={i} label={b.label} value={b.value} dayChange={b.dayChange} />
           ))}
         </div>
       )}
@@ -23479,7 +23537,55 @@ function BrechaCard({ rows, loading }) {
   );
 }
 
-function BrechaRow({ label, value }) {
+function ExecutableDolarCard({ exec, refMep, refCcl }) {
+  const has = exec && (exec.mepBuy != null || exec.mepSell != null || exec.cclBuy != null || exec.cclSell != null);
+  const midOf = (b, s) => (b != null && s != null ? (b + s) / 2 : (b ?? s ?? null));
+  const brechaOf = (m, ref) => (m != null && ref ? ((m - ref) / ref) * 100 : null);
+  const mepBrecha = brechaOf(midOf(exec?.mepBuy, exec?.mepSell), refMep);
+  const cclBrecha = brechaOf(midOf(exec?.cclBuy, exec?.cclSell), refCcl);
+
+  const Cell = ({ lbl, v }) => (
+    <div className="flex flex-col gap-1">
+      <span style={{ fontSize: 9, color: C.dim, letterSpacing: "0.18em", textTransform: "uppercase", fontWeight: 500, fontFamily: "'Roboto', sans-serif" }}>{lbl}</span>
+      <span className="eco-mono" style={{ fontSize: 16, color: C.text, fontWeight: 600, lineHeight: 1.1 }}>{v != null ? `$${fmtARS(v)}` : "—"}</span>
+    </div>
+  );
+  const Leg = ({ label, buy, sell, brecha }) => (
+    <div>
+      <div style={{ fontSize: 10, color: C.cat.emerald, fontWeight: 700, letterSpacing: "0.06em", textTransform: "uppercase", marginBottom: 6 }}>
+        {label}
+        {brecha != null && (
+          <span style={{ color: C.muted, fontWeight: 500, fontFamily: "'JetBrains Mono', monospace", marginLeft: 8 }}>
+            vs ref {brecha >= 0 ? "+" : ""}{brecha.toFixed(2)}%
+          </span>
+        )}
+      </div>
+      <div className="grid grid-cols-2 gap-2">
+        <Cell lbl="Comprás a" v={buy} />
+        <Cell lbl="Vendés a" v={sell} />
+      </div>
+    </div>
+  );
+
+  return (
+    <div style={{ backgroundColor: C.panel, borderTop: `2px solid ${C.cat.emerald}`, padding: "14px 18px" }}>
+      <CardHeader icon={Activity} iconColor={C.cat.emerald} label="Dólar bonos · ejecutable (puntas)" />
+      {!has ? (
+        <div style={{ fontSize: 11, color: C.dim, padding: "6px 0" }}>Sin puntas de bonos ahora (¿mercado cerrado?).</div>
+      ) : (
+        <div className="grid gap-x-8 gap-y-3" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))" }}>
+          <Leg label="MEP" buy={exec.mepBuy} sell={exec.mepSell} brecha={mepBrecha} />
+          <Leg label="CCL" buy={exec.cclBuy} sell={exec.cclSell} brecha={cclBrecha} />
+        </div>
+      )}
+      <div style={{ fontSize: 9.5, color: C.dim, marginTop: 10, lineHeight: 1.5 }}>
+        El dólar que realmente podés operar (puntas de bonos AL/GD vía data912). Comprás = ask del bono en $ / bid en D (o C); vendés al revés. La referencia (dolarapi) es indicativa.
+      </div>
+    </div>
+  );
+}
+
+function BrechaRow({ label, value, dayChange }) {
   // Color por magnitud: <5% verde, 5-30% yellow, >30% red
   let color = C.muted;
   if (value != null) {
@@ -23488,6 +23594,8 @@ function BrechaRow({ label, value }) {
     else if (abs < 30) color = C.cat.yellow;
     else color = C.red;
   }
+  // Variación del día: se ABRE (sube, rojo) o se CIERRA (baja, verde).
+  const showDay = dayChange != null && Math.abs(dayChange) >= 0.01;
 
   return (
     <div className="flex items-center justify-between py-1">
@@ -23501,16 +23609,32 @@ function BrechaRow({ label, value }) {
       >
         {label}
       </span>
-      <span
-        className="eco-mono"
-        style={{
-          fontSize: 13,
-          color: color,
-          fontWeight: 600,
-          letterSpacing: "0.01em",
-        }}
-      >
-        {value != null ? `${value >= 0 ? "+" : ""}${value.toFixed(2)}%` : "—"}
+      <span className="flex items-baseline gap-2">
+        {showDay && (
+          <span
+            title="Variación del día de la brecha (puntos porcentuales)"
+            style={{
+              fontSize: 9.5,
+              color: dayChange >= 0 ? C.red : C.green,
+              fontWeight: 600,
+              fontFamily: "'JetBrains Mono', monospace",
+              fontVariantNumeric: "tabular-nums",
+            }}
+          >
+            {dayChange >= 0 ? "+" : ""}{dayChange.toFixed(2)}pp
+          </span>
+        )}
+        <span
+          className="eco-mono"
+          style={{
+            fontSize: 13,
+            color: color,
+            fontWeight: 600,
+            letterSpacing: "0.01em",
+          }}
+        >
+          {value != null ? `${value >= 0 ? "+" : ""}${value.toFixed(2)}%` : "—"}
+        </span>
       </span>
     </div>
   );
