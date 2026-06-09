@@ -22984,12 +22984,27 @@ function ComparaDolarModule() {
     const todayAR = new Date().toLocaleDateString("en-CA", { timeZone: "America/Argentina/Buenos_Aires" });
     setBaseline((prev) => {
       const sameDay = prev && prev.date === todayAR;
-      const next = { date: todayAR, mids: sameDay ? { ...prev.mids } : {} };
+      const next = {
+        date: todayAR,
+        mids: sameDay ? { ...prev.mids } : {},
+        series: sameDay && prev.series ? { ...prev.series } : {},
+        seriesTs: sameDay ? (prev.seriesTs || 0) : 0,
+      };
       let changed = !sameDay;
+      const nowMs = Date.now();
+      const doSample = nowMs - (next.seriesTs || 0) >= 90000; // 1 punto cada ~90s
       for (const r of usdData) {
         const mid = r.buy != null && r.sell != null ? (r.buy + r.sell) / 2 : null;
-        if (mid != null && next.mids[r.typeId] == null) { next.mids[r.typeId] = mid; changed = true; }
+        if (mid == null) continue;
+        if (next.mids[r.typeId] == null) { next.mids[r.typeId] = mid; changed = true; }
+        if (doSample) {
+          const arr = (next.series[r.typeId] || []).slice();
+          arr.push(Number(mid.toFixed(2)));
+          if (arr.length > 300) arr.shift();
+          next.series[r.typeId] = arr;
+        }
       }
+      if (doSample) { next.seriesTs = nowMs; changed = true; }
       if (changed) { saveDolarBaseline(next); return next; }
       return prev;
     });
@@ -23113,7 +23128,8 @@ function ComparaDolarModule() {
     const base = baseline?.mids?.[r.typeId];
     const variation = mid != null && base ? ((mid - base) / base) * 100 : null;
     const spreadPct = r.buy != null && r.sell != null && r.buy ? ((r.sell - r.buy) / r.buy) * 100 : null;
-    return { ...r, mid, variation, spreadPct };
+    const series = baseline?.series?.[r.typeId] || null;
+    return { ...r, mid, variation, spreadPct, series };
   });
 
   // Map por typeId para cálculo de brechas
@@ -23399,6 +23415,27 @@ function SectionLabel({ children }) {
   );
 }
 
+function MiniSparkline({ data, width = 70, height = 20 }) {
+  if (!Array.isArray(data) || data.length < 3) return null;
+  const min = Math.min(...data), max = Math.max(...data);
+  const range = max - min || 1;
+  const n = data.length;
+  const pts = data
+    .map((v, i) => {
+      const x = (i / (n - 1)) * (width - 2) + 1;
+      const y = height - 1 - ((v - min) / range) * (height - 2);
+      return `${x.toFixed(1)},${y.toFixed(1)}`;
+    })
+    .join(" ");
+  const up = data[n - 1] >= data[0];
+  const color = up ? C.green : C.red;
+  return (
+    <svg width={width} height={height} style={{ display: "block", overflow: "visible" }} title="Recorrido del día">
+      <polyline points={pts} fill="none" stroke={color} strokeWidth="1.4" strokeLinejoin="round" strokeLinecap="round" opacity="0.85" />
+    </svg>
+  );
+}
+
 function DolarTypeCard({ row, loading }) {
   const hasData = row.buy != null && row.sell != null;
   const variation = row.variation;
@@ -23457,15 +23494,18 @@ function DolarTypeCard({ row, loading }) {
             <PriceBlock label="Venta" value={row.sell} />
           </div>
           {row.spreadPct != null && (
-            <div
-              title="Spread compra/venta"
-              style={{ marginTop: 8, fontSize: 9.5, color: C.dim, letterSpacing: "0.04em", fontFamily: "'Roboto', sans-serif" }}
-            >
-              spread{" "}
-              <span style={{ color: C.muted, fontFamily: "'JetBrains Mono', monospace" }}>{row.spreadPct.toFixed(2)}%</span>
-              {row.buy != null && row.sell != null && (
-                <span style={{ color: C.dim }}> · ${fmtARS(row.sell - row.buy)}</span>
-              )}
+            <div className="flex items-end justify-between" style={{ marginTop: 8, gap: 8 }}>
+              <div
+                title="Spread compra/venta"
+                style={{ fontSize: 9.5, color: C.dim, letterSpacing: "0.04em", fontFamily: "'Roboto', sans-serif" }}
+              >
+                spread{" "}
+                <span style={{ color: C.muted, fontFamily: "'JetBrains Mono', monospace" }}>{row.spreadPct.toFixed(2)}%</span>
+                {row.buy != null && row.sell != null && (
+                  <span style={{ color: C.dim }}> · ${fmtARS(row.sell - row.buy)}</span>
+                )}
+              </div>
+              <MiniSparkline data={row.series} />
             </div>
           )}
         </>
