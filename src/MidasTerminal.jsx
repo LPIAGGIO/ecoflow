@@ -22887,6 +22887,22 @@ const colorForId = (id, idx = 0) => {
   return PROVIDER_COLORS[(h + idx) % PROVIDER_COLORS.length];
 };
 
+// Baseline diario de cada tipo de dólar (primer mid observado en el día ART),
+// persistido en localStorage. Sirve para mostrar la variación DEL DÍA en vez de
+// la variación vs el último fetch de la sesión (que es ~0 y poco útil).
+const DOLAR_BASELINE_LS_KEY = "midas:dolar-baseline-v1";
+function loadDolarBaseline() {
+  if (typeof window === "undefined") return { date: null, mids: {} };
+  try {
+    const j = JSON.parse(window.localStorage.getItem(DOLAR_BASELINE_LS_KEY));
+    return j && j.mids ? j : { date: null, mids: {} };
+  } catch (e) { return { date: null, mids: {} }; }
+}
+function saveDolarBaseline(b) {
+  if (typeof window === "undefined") return;
+  try { window.localStorage.setItem(DOLAR_BASELINE_LS_KEY, JSON.stringify(b)); } catch (e) { /* noop */ }
+}
+
 function ComparaDolarModule() {
   const [stableTab, setStableTab] = useState("ccl");
   const [direction, setDirection] = useState("buy");
@@ -22895,6 +22911,7 @@ function ComparaDolarModule() {
   const [usdData, setUsdData] = useState([]);
   const [stableData, setStableData] = useState({ ccl: [], usdt: [], usdc: [] });
   const [prevSnapshot, setPrevSnapshot] = useState({});
+  const [baseline, setBaseline] = useState(() => loadDolarBaseline());
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState(null);
@@ -22909,6 +22926,24 @@ function ComparaDolarModule() {
     }, 1000);
     return () => clearInterval(i);
   }, []);
+
+  // Baseline diario: primer mid de cada tipo en el día ART (resetea al cambiar
+  // de día). Da la "variación del día" en las cards en vez de vs último fetch.
+  useEffect(() => {
+    if (!usdData.length) return;
+    const todayAR = new Date().toLocaleDateString("en-CA", { timeZone: "America/Argentina/Buenos_Aires" });
+    setBaseline((prev) => {
+      const sameDay = prev && prev.date === todayAR;
+      const next = { date: todayAR, mids: sameDay ? { ...prev.mids } : {} };
+      let changed = !sameDay;
+      for (const r of usdData) {
+        const mid = r.buy != null && r.sell != null ? (r.buy + r.sell) / 2 : null;
+        if (mid != null && next.mids[r.typeId] == null) { next.mids[r.typeId] = mid; changed = true; }
+      }
+      if (changed) { saveDolarBaseline(next); return next; }
+      return prev;
+    });
+  }, [usdData]);
 
   const fetchAll = async (isManual = false) => {
     if (isManual) setRefreshing(true);
@@ -23022,12 +23057,13 @@ function ComparaDolarModule() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [intervalMode]);
 
-  // Enriquecer USD con var
+  // Enriquecer USD: variación DEL DÍA (vs baseline diario) + spread compra/venta.
   const enrichedUsd = usdData.map((r) => {
     const mid = r.buy != null && r.sell != null ? (r.buy + r.sell) / 2 : null;
-    const prev = prevSnapshot[r.id];
-    const variation = mid != null && prev?.mid ? ((mid - prev.mid) / prev.mid) * 100 : null;
-    return { ...r, mid, variation };
+    const base = baseline?.mids?.[r.typeId];
+    const variation = mid != null && base ? ((mid - base) / base) * 100 : null;
+    const spreadPct = r.buy != null && r.sell != null && r.buy ? ((r.sell - r.buy) / r.buy) * 100 : null;
+    return { ...r, mid, variation, spreadPct };
   });
 
   // Map por typeId para cálculo de brechas
@@ -23335,6 +23371,7 @@ function DolarTypeCard({ row, loading }) {
         {variation != null && (
           <span
             className="flex items-center gap-1"
+            title="Variación del día (vs la primera cotización de hoy)"
             style={{
               fontSize: 10,
               color: variation >= 0 ? C.green : C.red,
@@ -23355,10 +23392,24 @@ function DolarTypeCard({ row, loading }) {
           <Loader2 size={14} color={C.dim} className="eco-spin" strokeWidth={1.8} />
         </div>
       ) : hasData ? (
-        <div className="grid grid-cols-2 gap-2 flex-1">
-          <PriceBlock label="Compra" value={row.buy} />
-          <PriceBlock label="Venta" value={row.sell} />
-        </div>
+        <>
+          <div className="grid grid-cols-2 gap-2 flex-1">
+            <PriceBlock label="Compra" value={row.buy} />
+            <PriceBlock label="Venta" value={row.sell} />
+          </div>
+          {row.spreadPct != null && (
+            <div
+              title="Spread compra/venta"
+              style={{ marginTop: 8, fontSize: 9.5, color: C.dim, letterSpacing: "0.04em", fontFamily: "'Roboto', sans-serif" }}
+            >
+              spread{" "}
+              <span style={{ color: C.muted, fontFamily: "'JetBrains Mono', monospace" }}>{row.spreadPct.toFixed(2)}%</span>
+              {row.buy != null && row.sell != null && (
+                <span style={{ color: C.dim }}> · ${fmtARS(row.sell - row.buy)}</span>
+              )}
+            </div>
+          )}
+        </>
       ) : (
         <div className="flex items-center justify-center flex-1" style={{ color: C.dim, fontSize: 11 }}>
           —
