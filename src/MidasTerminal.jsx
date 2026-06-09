@@ -16736,20 +16736,12 @@ function EditablePriceCell({ position, resolved, onSave }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState("");
   const [saving, setSaving] = useState(false);
-  const inputRef = useRef(null);
 
   const startEdit = () => {
     // Pre-poblamos el input con el precio actual (el que ve el user)
     setDraft(resolved?.price != null ? String(resolved.price) : "");
     setEditing(true);
   };
-
-  useEffect(() => {
-    if (editing && inputRef.current) {
-      inputRef.current.focus();
-      inputRef.current.select();
-    }
-  }, [editing]);
 
   const cancel = () => {
     setEditing(false);
@@ -16793,15 +16785,15 @@ function EditablePriceCell({ position, resolved, onSave }) {
   if (editing) {
     return (
       <div className="flex items-center justify-end gap-1">
-        <input
-          ref={inputRef}
-          type="text"
-          inputMode="decimal"
+        <MoneyInput
           value={draft}
-          onChange={(e) => setDraft(e.target.value)}
+          onChange={setDraft}
           onKeyDown={handleKey}
           disabled={saving}
+          autoFocus
+          decimals={2}
           placeholder="0,00"
+          bare
           style={{
             width: 90,
             backgroundColor: C.deep,
@@ -16810,8 +16802,6 @@ function EditablePriceCell({ position, resolved, onSave }) {
             padding: "4px 8px",
             fontSize: 12,
             textAlign: "right",
-            fontFamily: "'JetBrains Mono', monospace",
-            outline: "none",
           }}
         />
         <button
@@ -18687,9 +18677,14 @@ function Input({ value, onChange, placeholder, type = "text", step, hasError }) 
 // emit: "js" → onChange recibe JS-number-string ("1500000.75"); "ar" → recibe
 // el string formateado AR ("1.500.000,75"). Usá "ar" cuando el consumidor lo
 // parsea con parseAmountString (espera puntos de miles).
-function MoneyInput({ value, onChange, placeholder, hasError, decimals = 2, bare = false, style: styleOverride, onBlur, onKeyDown: onKeyDownExtra, emit = "js", allowNegative = false, disabled = false }) {
+function MoneyInput({ value, onChange, placeholder, hasError, decimals = 2, bare = false, style: styleOverride, onBlur, onKeyDown: onKeyDownExtra, emit = "js", allowNegative = false, disabled = false, autoFocus = false }) {
   const ref = useRef(null);
   const focusedRef = useRef(false);
+  // Foco + select al montar (para edición inline tipo EditablePriceCell).
+  useEffect(() => {
+    if (autoFocus && ref.current) { try { ref.current.focus(); ref.current.select(); } catch (e) { /* noop */ } }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   // Formatea preservando el signo "-" cuando allowNegative (formatAmountInput
   // descarta no-dígitos; numStrToArMask ya es neg-aware). El "-" no es char
   // "significativo" para countSigChars/posFromSigChars, así que el caret se
@@ -30617,19 +30612,18 @@ function PriceEditor({ contracts, buffer, setBuffer, caucion, setCaucion, onSave
             <label style={{ fontSize: 10, color: C.dim, letterSpacing: "0.10em", textTransform: "uppercase", fontWeight: 500 }}>
               {c.displayTicker}
             </label>
-            <input
-              type="text"
+            <MoneyInput
               value={buffer[c.ticker] ?? ""}
-              onChange={(e) => updateField(c.ticker, e.target.value)}
+              onChange={(v) => updateField(c.ticker, v)}
+              decimals={2}
               placeholder={String(c.priceSeed)}
+              bare
               style={{
                 backgroundColor: C.bg,
                 border: `1px solid ${C.border}`,
                 color: C.text,
-                fontFamily: "'JetBrains Mono', monospace",
                 fontSize: 13,
                 padding: "6px 10px",
-                outline: "none",
                 width: "100%",
               }}
             />
