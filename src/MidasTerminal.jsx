@@ -9194,14 +9194,41 @@ function TotalCard({ positions, fx, bondPrices, futurePrices, stockPrices, fciPr
     for (const g of closedToday) {
       // Futuros: su P&L del día YA está contado en dailyTotals (computeDailyPnL
       // marca cada op cruda contra su settle/entrada → el neto de las cerradas
-      // hoy ES el P&L del día). Sumarlo acá duplicaría. Solo no-futuros (contado
-      // realiza al vender y eso no lo captura el diario por previousClose).
+      // hoy ES el P&L del día). Sumarlo acá duplicaría.
       if (g.instrument_type === "future") continue;
-      const conv = convertValue(g.realizedPnl ?? 0, g.currency || "ARS", valuationCurrency, fx);
+      // CONTADO (bonos/ONs/acciones): al banner "P&L de HOY" le corresponde SOLO
+      // el tramo de hoy del realizado = (precio_venta − cierre_ayer) × qty, NO el
+      // lifetime (la ganancia vieja ya se contó día a día mientras la posición
+      // estuvo abierta; sumar el lifetime entero la cuenta dos veces — caso real
+      // T30J6 09/06: realizado +1,5M de ~6 semanas inflaba el P&L del día). El
+      // lifetime sigue mostrándose en "Posiciones cerradas hoy" (g.realizedPnl).
+      const tk = (g.ticker || "").toUpperCase();
+      const isEq = g.instrument_type === "stock" || g.instrument_type === "cedear";
+      const m = isEq ? stockPrices?.[tk] : bondPrices?.[tk];
+      let prev = m?.previousClose;
+      if (prev == null && m?.changePct != null) {
+        const den = 1 + Number(m.changePct) / 100;
+        if (den > 0) prev = Number(m.price) / den;
+      }
+      let dayValue;
+      if (prev != null && prev > 0) {
+        let dayRaw = 0;
+        for (const pair of (g.operations || [])) {
+          const qty = Number(pair.quantity) || 0;
+          const sell = Number(pair.sell_price) || 0;
+          if (qty > 0 && sell > 0) dayRaw += qty * (sell - prev);
+        }
+        dayValue = applyConventionToValue(g.instrument_type, 1, dayRaw);
+      } else {
+        // Sin cierre de ayer (ticker recién emitido / sin feed) → fallback al
+        // lifetime, igual que antes (mejor que 0; degradación segura).
+        dayValue = g.realizedPnl ?? 0;
+      }
+      const conv = convertValue(dayValue, g.currency || "ARS", valuationCurrency, fx);
       if (conv != null) sum += conv;
     }
     return sum;
-  }, [positions, bondPrices, futurePrices, fciPrices, fx, valuationCurrency]);
+  }, [positions, bondPrices, stockPrices, futurePrices, fciPrices, fx, valuationCurrency]);
 
   const showDaily = dailyTotals.hasAny && dailyTotals.pnl != null;
   const dailyPnlShown = (dailyTotals.pnl != null && !dailyTotals.marketClosed)
@@ -19926,14 +19953,36 @@ function PortfolioSummaryWidget({ expanded }) {
     const closedToday = filterClosedToToday(all.filter((g) => g.isClosed), futurePricesState.prices);
     let sum = 0;
     for (const g of closedToday) {
-      // Futuros: su P&L del día ya está en dailyTotals (ver TotalCard). Excluir
-      // para no duplicar; solo sumamos el realizado de no-futuros cerrados hoy.
+      // Futuros: su P&L del día ya está en dailyTotals (ver TotalCard). Excluir.
       if (g.instrument_type === "future") continue;
-      const conv = convertValue(g.realizedPnl ?? 0, g.currency || "ARS", valuationCurrency, fx);
+      // CONTADO: al P&L de HOY solo le toca el tramo de hoy del realizado
+      // = (venta − cierre_ayer) × qty, no el lifetime (ya contado día a día
+      // mientras estuvo abierto). Lifetime sigue en "Cerradas hoy". Ver TotalCard.
+      const tk = (g.ticker || "").toUpperCase();
+      const isEq = g.instrument_type === "stock" || g.instrument_type === "cedear";
+      const m = isEq ? stockPricesState.prices?.[tk] : bondPricesState.prices?.[tk];
+      let prev = m?.previousClose;
+      if (prev == null && m?.changePct != null) {
+        const den = 1 + Number(m.changePct) / 100;
+        if (den > 0) prev = Number(m.price) / den;
+      }
+      let dayValue;
+      if (prev != null && prev > 0) {
+        let dayRaw = 0;
+        for (const pair of (g.operations || [])) {
+          const qty = Number(pair.quantity) || 0;
+          const sell = Number(pair.sell_price) || 0;
+          if (qty > 0 && sell > 0) dayRaw += qty * (sell - prev);
+        }
+        dayValue = applyConventionToValue(g.instrument_type, 1, dayRaw);
+      } else {
+        dayValue = g.realizedPnl ?? 0;
+      }
+      const conv = convertValue(dayValue, g.currency || "ARS", valuationCurrency, fx);
       if (conv != null) sum += conv;
     }
     return sum;
-  }, [positions, bondPricesState.prices, futurePricesState.prices, fciPricesState.prices, fx, valuationCurrency]);
+  }, [positions, bondPricesState.prices, stockPricesState.prices, futurePricesState.prices, fciPricesState.prices, fx, valuationCurrency]);
 
   // Render
   if (!user) {
