@@ -22922,6 +22922,7 @@ function useExecutableDolar() {
           if (cancel) return;
           const bySym = {};
           for (const x of rows || []) if (x && x.symbol) bySym[x.symbol] = x;
+          // Cada mejor guarda { v, bond } para mostrar con qué bono se logra.
           let mepBuy = null, mepSell = null, cclBuy = null, cclSell = null;
           for (const b of EXEC_DOLAR_BONDS) {
             const a = bySym[b], d = bySym[b + "D"], c = bySym[b + "C"];
@@ -22929,13 +22930,13 @@ function useExecutableDolar() {
             const bidA = num(a.px_bid), askA = num(a.px_ask);
             if (d) {
               const bidD = num(d.px_bid), askD = num(d.px_ask);
-              if (askA && bidD) { const v = askA / bidD; if (mepBuy == null || v < mepBuy) mepBuy = v; }
-              if (bidA && askD) { const v = bidA / askD; if (mepSell == null || v > mepSell) mepSell = v; }
+              if (askA && bidD) { const v = askA / bidD; if (mepBuy == null || v < mepBuy.v) mepBuy = { v, bond: b }; }
+              if (bidA && askD) { const v = bidA / askD; if (mepSell == null || v > mepSell.v) mepSell = { v, bond: b }; }
             }
             if (c) {
               const bidC = num(c.px_bid), askC = num(c.px_ask);
-              if (askA && bidC) { const v = askA / bidC; if (cclBuy == null || v < cclBuy) cclBuy = v; }
-              if (bidA && askC) { const v = bidA / askC; if (cclSell == null || v > cclSell) cclSell = v; }
+              if (askA && bidC) { const v = askA / bidC; if (cclBuy == null || v < cclBuy.v) cclBuy = { v, bond: b }; }
+              if (bidA && askC) { const v = bidA / askC; if (cclSell == null || v > cclSell.v) cclSell = { v, bond: b }; }
             }
           }
           setData({ mepBuy, mepSell, cclBuy, cclSell, ts: Date.now() });
@@ -23538,16 +23539,17 @@ function BrechaCard({ rows, loading }) {
 }
 
 function ExecutableDolarCard({ exec, refMep, refCcl }) {
-  const has = exec && (exec.mepBuy != null || exec.mepSell != null || exec.cclBuy != null || exec.cclSell != null);
+  const has = exec && (exec.mepBuy || exec.mepSell || exec.cclBuy || exec.cclSell);
   const midOf = (b, s) => (b != null && s != null ? (b + s) / 2 : (b ?? s ?? null));
   const brechaOf = (m, ref) => (m != null && ref ? ((m - ref) / ref) * 100 : null);
-  const mepBrecha = brechaOf(midOf(exec?.mepBuy, exec?.mepSell), refMep);
-  const cclBrecha = brechaOf(midOf(exec?.cclBuy, exec?.cclSell), refCcl);
+  const mepBrecha = brechaOf(midOf(exec?.mepBuy?.v, exec?.mepSell?.v), refMep);
+  const cclBrecha = brechaOf(midOf(exec?.cclBuy?.v, exec?.cclSell?.v), refCcl);
 
-  const Cell = ({ lbl, v }) => (
+  const Cell = ({ lbl, side }) => (
     <div className="flex flex-col gap-1">
       <span style={{ fontSize: 9, color: C.dim, letterSpacing: "0.18em", textTransform: "uppercase", fontWeight: 500, fontFamily: "'Roboto', sans-serif" }}>{lbl}</span>
-      <span className="eco-mono" style={{ fontSize: 16, color: C.text, fontWeight: 600, lineHeight: 1.1 }}>{v != null ? `$${fmtARS(v)}` : "—"}</span>
+      <span className="eco-mono" style={{ fontSize: 16, color: C.text, fontWeight: 600, lineHeight: 1.1 }}>{side?.v != null ? `$${fmtARS(side.v)}` : "—"}</span>
+      {side?.bond && <span style={{ fontSize: 9, color: C.dim, fontFamily: "'Roboto', sans-serif" }}>vía {side.bond}</span>}
     </div>
   );
   const Leg = ({ label, buy, sell, brecha }) => (
@@ -23561,8 +23563,8 @@ function ExecutableDolarCard({ exec, refMep, refCcl }) {
         )}
       </div>
       <div className="grid grid-cols-2 gap-2">
-        <Cell lbl="Comprás a" v={buy} />
-        <Cell lbl="Vendés a" v={sell} />
+        <Cell lbl="Comprás a" side={buy} />
+        <Cell lbl="Vendés a" side={sell} />
       </div>
     </div>
   );
