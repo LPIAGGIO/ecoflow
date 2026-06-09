@@ -15023,19 +15023,19 @@ function ConsolidatedSection({
         />
       )}
 
-      {/* Canjes / conversiones de moneda (caja, sin posición de bono) */}
-      <CanjesSection />
     </div>
   );
 }
 
-/* ─────────────── CanjesSection ───────────────
- * Lista los canjes (conversiones de moneda vía soberanos) que se importaron
- * como movimientos de caja (notes que empiezan en "Canje"). No son posiciones
- * de bono — son pesos↔USD. Agrupa por día y muestra cada pata + el neto por
- * moneda. Self-contained: lee useCashMovements directo.
+/* ─────────────── CanjesSection (RETIRADA 09/06/2026) ───────────────
+ * Se quitó la sección dedicada de "Canjes / Conversiones" de la Cartera
+ * (decisión de LP: evitar un sector propio, demasiadas cosas en pantalla).
+ * Los canjes viejos (movimientos de caja deposit/withdrawal con nota "Canje")
+ * ya se ven en el LIBRO DE OPERACIONES como movimientos manuales. Y desde el
+ * 09/06 los soberanos entran como POSICIÓN (no caja), así que no se generan
+ * nuevos "Canje" cash. El componente queda sin render; se deja como referencia.
  */
-function CanjesSection() {
+function CanjesSection_UNUSED() {
   const { movements } = useCashMovements();
   const [open, setOpen] = useState(false);
   const legs = (movements || []).filter((m) => typeof m.notes === "string" && m.notes.startsWith("Canje"));
