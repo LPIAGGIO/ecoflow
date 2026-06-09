@@ -13169,8 +13169,17 @@ function parseMatrizFuturesCsv(text, existingOrderIds) {
       // short fantasma). El sufijo ya fijó instrumentType/entryCurrency arriba.
     }
 
+    // Cauciones: el símbolo BYMA es "MERV - XMEV - PESOS - 1D" (o DOLARES) →
+    // matchea el patrón de bono y parsea ticker "PESOS"/"DOLARES". NO es un
+    // bono. El CSV de operaciones no trae el lado (tomadora/colocadora) ni
+    // distingue tasa de precio de forma confiable, así que se IGNORAN y se
+    // cargan a mano (instrument_type 'caucion', capital NEGATIVO si es
+    // tomadora = pasivo). Evita que entren como bono basura "PESOS".
+    const esCaucion = isBond && /^(PESOS|D[OÓ]LAR)/i.test(ticker || "");
+
     let status, reason = null;
-    if (!isFuture && !isBond) { status = "ignored"; reason = `no soportado (${sym || sec})`; }
+    if (esCaucion) { status = "ignored"; reason = "caución (cargar a mano)"; }
+    else if (!isFuture && !isBond) { status = "ignored"; reason = `no soportado (${sym || sec})`; }
     else if (cum <= 0) { status = "ignored"; reason = "sin ejecución"; }
     else if (!side || price <= 0) { status = "ignored"; reason = "datos incompletos"; }
     else if (existingOrderIds && existingOrderIds.has(oid)) { status = "dup"; }
