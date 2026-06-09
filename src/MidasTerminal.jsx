@@ -10546,11 +10546,20 @@ function computeDailyPnL(p, bondPrices, futurePrices, stockPrices, futureAdjLook
       }
       // Si tenemos previousClose válido, calculamos P&L del día estándar.
       if (prev != null && prev > 0) {
-        // Bonos cotizan cada 100 VN. P&L unidad = (price - prev) / 100 × cantidad
-        const diffPer100 = m.price - prev;
+        // Base del día: un lote COMPRADO HOY no estaba ayer al cierre, así que
+        // su base es el precio de ENTRADA, no el cierre anterior. Sin esto se
+        // le cuenta el tramo cierre_ayer→entrada como "ganancia de hoy" (caso
+        // T30A7 09/06: +138k cuando lo real era ~+9k). Ventas y lotes viejos
+        // siguen usando el cierre anterior. Mismo criterio que la rama futuros.
+        const todayAR = new Date().toLocaleDateString("en-CA", { timeZone: "America/Argentina/Buenos_Aires" });
+        const base = (p.entry_date === todayAR && p.operation_type !== "sell" && Number(p.entry_price) > 0)
+          ? Number(p.entry_price)
+          : prev;
+        // Bonos cotizan cada 100 VN. P&L unidad = (price - base) / 100 × cantidad
+        const diffPer100 = m.price - base;
         const sign = (p.operation_type === "sell") ? -1 : 1;
         const pnl = sign * (diffPer100 / 100) * qty;
-        const pct = (diffPer100 / prev) * 100;
+        const pct = (diffPer100 / base) * 100;
         return { pnl, pct };
       }
       // Sin previousClose disponible (ticker recién emitido o no
@@ -10593,10 +10602,15 @@ function computeDailyPnL(p, bondPrices, futurePrices, stockPrices, futureAdjLook
         if (denom > 0) prev = Number(m.price) / denom;
       }
       if (prev != null && prev > 0) {
-        const diffPerUnit = m.price - prev;
+        // Lote comprado HOY: base = entrada (no el cierre de ayer). Ver bonos.
+        const todayAR = new Date().toLocaleDateString("en-CA", { timeZone: "America/Argentina/Buenos_Aires" });
+        const base = (p.entry_date === todayAR && p.operation_type !== "sell" && Number(p.entry_price) > 0)
+          ? Number(p.entry_price)
+          : prev;
+        const diffPerUnit = m.price - base;
         const sign = (p.operation_type === "sell") ? -1 : 1;
         const pnl = sign * diffPerUnit * qty;
-        const pct = (diffPerUnit / prev) * 100;
+        const pct = (diffPerUnit / base) * 100;
         return { pnl, pct };
       }
       // Sin previousClose disponible: fallback a P&L TOTAL contra PPP.
@@ -15566,23 +15580,30 @@ function ConsolidatedRow({ group, bondPrices, futurePrices, stockPrices, fciPric
     // delta y lo multiplicamos por la cantidad neta del grupo (signed):
     // así una posición SHORT genera P&L negativo si el precio sube.
     if (group.instrument_type !== "future") {
-      // Tomamos cualquier op del grupo (todas tienen el mismo ticker)
-      // pero le inyectamos la cantidad NETA del grupo (con signo), un
-      // operation_type 'compra' (el signo ya queda capturado por netQty)
-      // y el PPP agregado del grupo como entry_price. Este último sirve
-      // como fallback en computeDailyPnL si el ticker no tiene cierre
-      // histórico todavía (recién emitido o sin datos en
-      // daily_close_prices) — en ese caso P&L HOY = P&L TOTAL hasta que
-      // se guarde el primer cierre de ayer.
-      const sampleOp = {
-        ...group.operations[0],
-        quantity: group.netQty,
-        operation_type: "compra",
-        entry_price: group.ppp != null ? group.ppp : group.operations[0]?.entry_price,
-      };
-      const d = computeDailyPnL(sampleOp, bondPrices, futurePrices, stockPrices, futureAdjLookup, fciPrices);
-      if (!d) return { dailyPnl: null, dailyPct: null, marketClosed: false };
-      return { dailyPnl: d.pnl, dailyPct: d.pct, marketClosed: false };
+      // P&L del día POR OPERACIÓN y sumado (igual que la rama de futuros), para
+      // que cada lote use su base correcta: un lote comprado HOY se mide desde
+      // su precio de ENTRADA (computeDailyPnL ya lo hace), los lotes viejos
+      // desde el cierre de ayer. Antes se calculaba un solo delta sobre el neto
+      // con el cierre de ayer → a un lote nuevo le contaba el tramo
+      // cierre_ayer→entrada como ganancia de hoy (caso T30A7 09/06: +138k
+      // cuando lo real era ~+9k). Las ventas usan el cierre anterior y netean
+      // contra las compras viejas → el neto queda igual que antes.
+      const netQ = Number(group.netQty) || 0;
+      if (netQ === 0) return { dailyPnl: null, dailyPct: null, marketClosed: false };
+      let dayTotal = 0;
+      let anyData = false;
+      for (const op of group.operations) {
+        if (op?.isSynthetic) continue; // sólo operaciones reales (no pares sintéticos)
+        const d = computeDailyPnL(op, bondPrices, futurePrices, stockPrices, futureAdjLookup, fciPrices);
+        if (!d || d.pnl == null || !Number.isFinite(d.pnl)) continue;
+        anyData = true;
+        dayTotal += d.pnl;
+      }
+      if (!anyData) return { dailyPnl: null, dailyPct: null, marketClosed: false };
+      // % del día sobre el valor de mercado actual del neto del grupo.
+      const denom = Math.abs(Number(group.valueAtMarket) || 0);
+      const dailyPct = denom > 0 ? (dayTotal / denom) * 100 : null;
+      return { dailyPnl: dayTotal, dailyPct, marketClosed: false };
     }
 
     // Futuros: el P&L del día se calcula POR OPERACIÓN y se suma. Cada
