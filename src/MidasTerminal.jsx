@@ -4338,6 +4338,23 @@ const BONAR_PATTERN = /^AL\d{2,3}[CD]?$/;
 const GLOBAL_PATTERN = /^GD\d{2,3}[CD]?$/;
 const HARD_DOLLAR_OTHER = /^(AE|GE)\d{2,3}[CD]?$/;
 
+/**
+ * Soberanos hard-dollar (Bonares AL / Globales GD / AE / GE). La misma
+ * especie se opera en tres plazas: AL30 (pesos), AL30D (MEP/USD) y AL30C
+ * (CCL/USD). Son UN solo bono, distinta moneda. Vender AL30D teniendo AL30
+ * NO es un short: es un canje (cambiás la especie del mismo bono). Por eso
+ * los consolidamos por bono BASE y matcheamos las ventas contra la tenencia
+ * en nominal (VN), sin importar la plaza.
+ *
+ * Devuelve el ticker base (sin sufijo C/D) si es uno de estos soberanos;
+ * sino null. Ej: "AL30D" → "AL30", "GD35" → "GD35", "TZX27" → null.
+ */
+function soberanoCanjeBase(ticker) {
+  if (!ticker || typeof ticker !== "string") return null;
+  const m = ticker.toUpperCase().trim().match(/^((?:AL|GD|AE|GE)\d{2,3})[CD]?$/);
+  return m ? m[1] : null;
+}
+
 
 /* ─────────────── STOCK_REGISTRY (acciones argentinas BYMA) ─────────────
  *
@@ -11866,9 +11883,49 @@ function consolidatePositions(positions, bondPrices, futurePrices, fciPrices) {
     };
   };
 
+  // ─── Normalización de soberanos hard-dollar (canje por bono base) ──────
+  // AL30 / AL30D / AL30C son el MISMO bono en distinta plaza/moneda. Para
+  // que vender AL30D teniendo AL30 sea un canje (cierre de la tenencia) y
+  // no un short fantasma, los unificamos por bono BASE y, como la moneda de
+  // referencia es PESOS, convertimos las patas en USD a pesos al MEP
+  // implícito del feed (precio_pesos / precio_usd del mismo bono, ambos por
+  // 100 VN). Si no hay MEP disponible, dejamos la pata sin tocar (degradación
+  // segura: vuelve al comportamiento viejo, no rompe nada).
+  const soberanoMep = (base) => {
+    const arsP = bondPrices?.[base]?.price;
+    const usdP = bondPrices?.[base + "D"]?.price ?? bondPrices?.[base + "C"]?.price;
+    return arsP > 0 && usdP > 0 ? arsP / usdP : null;
+  };
+  const normalizedPositions = [];
+  for (const p of positions) {
+    const base = soberanoCanjeBase(p.ticker);
+    if (!base) { normalizedPositions.push(p); continue; }
+    const tkUpper = (p.ticker || "").toUpperCase().trim();
+    const isUsdLeg =
+      p.instrument_type === "bond_usd" ||
+      /^USD/.test(p.entry_currency || "") ||
+      /[CD]$/.test(tkUpper);
+    let price = Number(p.entry_price) || 0;
+    if (isUsdLeg) {
+      const mep = soberanoMep(base);
+      if (!mep) { normalizedPositions.push(p); continue; } // sin MEP → no unifico
+      price = price * mep;
+    }
+    normalizedPositions.push({
+      ...p,
+      ticker: base,
+      instrument_type: "bond_ars",
+      entry_currency: "ARS",
+      entry_price: price,
+      // Conservamos el origen para el detalle expandible / debugging.
+      _soberanoOrigTicker: tkUpper,
+      _soberanoOrigCurrency: p.entry_currency || "ARS",
+    });
+  }
+
   const groups = new Map();
 
-  for (const p of positions) {
+  for (const p of normalizedPositions) {
     const ticker = (p.ticker || "").trim().toUpperCase();
     const cur = p.entry_currency || "ARS";
     const t = p.instrument_type;
@@ -13101,22 +13158,21 @@ function parseMatrizFuturesCsv(text, existingOrderIds) {
       // (AL30 94180 -> 941,80 ; AL30D 64,33 -> 0,6433). Dividimos las dos patas.
       price = rawPrice / 100;
 
-      // Soberanos hard-dollar (AL/GD/AE/GE): son vehículo de compra/venta
-      // de USD (MEP/canje), no tenencias. Comprar AL30 en $ y venderlo en
-      // AL30D = convertir pesos→USD; la posición del bono queda PLANA. Se
-      // importan como MOVIMIENTO DE CAJA (la conversión), no como posición,
-      // así no aparecen shorts fantasma. Estos cotizan por 1 VN, así que el
-      // monto es qty × precio (sin el /100 de la fórmula genérica de bonos).
-      const baseTicker = (ticker || "").replace(/[DC]$/, "");
-      if (/^(AL|GD|AE|GE)\d{2}$/.test(baseTicker)) {
-        route = "cash";
-        // El canje es caja SIN posición. La tabla cash_movements exige que
-        // purchase_cost/sale_proceeds tengan posición asociada, y que
-        // deposit/withdrawal NO la tengan → usamos deposit/withdrawal:
-        //   compra (gastás esa moneda) → withdrawal ; venta (cobrás) → deposit.
-        movementType = side === "buy" ? "withdrawal" : "deposit";
-        cashAmount = (Number(cum) || 0) * price;
-        kind = entryCurrency === "ARS" ? "Canje $" : "Canje USD";
+      // Soberanos hard-dollar (AL/GD/AE/GE): la misma especie se opera en
+      // pesos (AL30), MEP (AL30D) y CCL (AL30C) — es UN bono, distinta plaza.
+      // Se importan como POSICIÓN real: consolidatePositions los unifica por
+      // bono base y matchea las ventas contra la tenencia (en nominal), así
+      // vender AL30D teniendo AL30 es un canje (cierra/reduce), NO un short
+      // fantasma — y se preserva el P&L del bono como inversión.
+      //
+      // ESCALA: estos cotizan por 100 VN igual que bondPrices (AL30 ≈ 94180,
+      // AL30D ≈ 64,33), así que NO se dividen por 100 (a diferencia de los
+      // demás bonos del feed). El valor pesos = qty × precio / 100 reproduce
+      // exacto el monto que mueve la caja.
+      if (soberanoCanjeBase(ticker)) {
+        price = rawPrice; // sin /100: ya viene por 100 VN
+        // instrumentType / entryCurrency ya quedaron por el sufijo (D=USD-MEP,
+        // C=USD-CCL, sino ARS). kind queda "Bono USD"/"Bono $".
       }
     }
 
