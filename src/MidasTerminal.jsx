@@ -13154,26 +13154,19 @@ function parseMatrizFuturesCsv(text, existingOrderIds) {
       else { instrumentType = "bond_ars"; entryCurrency = "ARS"; kind = "Bono $"; }
       // Plazo: contado inmediato = CI; 24hs (u otros) = T1.
       settlement = /(^|[^0-9])(ci|inmediato|000|00|0)([^0-9]|$)/.test(plazo || "") ? "CI" : "T1";
-      // Matriz cotiza los bonos ×100 respecto del feed/posiciones de Midas
-      // (AL30 94180 -> 941,80 ; AL30D 64,33 -> 0,6433). Dividimos las dos patas.
-      price = rawPrice / 100;
-
-      // Soberanos hard-dollar (AL/GD/AE/GE): la misma especie se opera en
-      // pesos (AL30), MEP (AL30D) y CCL (AL30C) — es UN bono, distinta plaza.
-      // Se importan como POSICIÓN real: consolidatePositions los unifica por
-      // bono base y matchea las ventas contra la tenencia (en nominal), así
-      // vender AL30D teniendo AL30 es un canje (cierra/reduce), NO un short
-      // fantasma — y se preserva el P&L del bono como inversión.
-      //
-      // ESCALA: estos cotizan por 100 VN igual que bondPrices (AL30 ≈ 94180,
-      // AL30D ≈ 64,33), así que NO se dividen por 100 (a diferencia de los
-      // demás bonos del feed). El valor pesos = qty × precio / 100 reproduce
-      // exacto el monto que mueve la caja.
-      if (soberanoCanjeBase(ticker)) {
-        price = rawPrice; // sin /100: ya viene por 100 VN
-        // instrumentType / entryCurrency ya quedaron por el sufijo (D=USD-MEP,
-        // C=USD-CCL, sino ARS). kind queda "Bono USD"/"Bono $".
-      }
+      // ESCALA: Matriz cotiza TODOS los bonos POR 100 VN, igual que el feed y
+      // las posiciones de Midas (T30J6 143,28 ; T30A7 127,38 ; AL30 94180 — los
+      // hard-dollar en pesos llevan el MEP embebido, de ahí el número grande).
+      // NO se divide por 100: el valor pesos = qty × precio / 100
+      // (applyConventionToValue) reproduce exacto el monto que mueve la caja.
+      // BUG PREVIO (corregido 09/06): un rawPrice/100 dejaba los bonos 100×
+      // chicos → rompía el P&L realizado al vender (ej. T30J6: venta cargada a
+      // 1,4328 vs compra 139,09 daba un quebranto falso de −49,5M).
+      price = rawPrice;
+      // Soberanos hard-dollar (AL/GD/AE/GE) entran como posición igual que
+      // cualquier bono; consolidatePositions los unifica por bono base y matchea
+      // las ventas contra la tenencia (vender AL30D teniendo AL30 = canje, no
+      // short fantasma). El sufijo ya fijó instrumentType/entryCurrency arriba.
     }
 
     let status, reason = null;
