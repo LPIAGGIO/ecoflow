@@ -1819,6 +1819,9 @@ function useLinkedBrokers(userId) {
   useEffect(() => {
     if (!userId) return;
     const interval = setInterval(() => {
+      // Tab oculta: no pollear — el listener de visibilitychange de abajo
+      // refetchea al instante cuando el usuario vuelve.
+      if (document.visibilityState !== "visible") return;
       setRefreshKey((k) => k + 1);
     }, 60000);
     const onVisible = () => {
@@ -1892,7 +1895,7 @@ function useApiQuota(userId, broker = "iol") {
 
   useEffect(() => {
     if (!userId) return;
-    const interval = setInterval(() => setRefreshKey((k) => k + 1), 60000);
+    const interval = setInterval(() => { if (document.visibilityState !== "visible") return; setRefreshKey((k) => k + 1); }, 60000);
     const onVisible = () => {
       if (document.visibilityState === "visible") setRefreshKey((k) => k + 1);
     };
@@ -1949,7 +1952,7 @@ function useApiCallLog(userId, limit = 60) {
 
   useEffect(() => {
     if (!userId) return;
-    const interval = setInterval(() => setRefreshKey((k) => k + 1), 60000);
+    const interval = setInterval(() => { if (document.visibilityState !== "visible") return; setRefreshKey((k) => k + 1); }, 60000);
     const onVisible = () => {
       if (document.visibilityState === "visible") setRefreshKey((k) => k + 1);
     };
@@ -2011,6 +2014,9 @@ function useBrokerCashSnapshots(userId) {
   useEffect(() => {
     if (!userId) return;
     const interval = setInterval(() => {
+      // Tab oculta: no pollear — el listener de visibilitychange de abajo
+      // refetchea al instante cuando el usuario vuelve.
+      if (document.visibilityState !== "visible") return;
       setRefreshKey((k) => k + 1);
     }, 60000);
     const onVisible = () => {
@@ -9113,6 +9119,56 @@ function ValuationToggle({ value, onChange }) {
 
 /* ─────────────── Card 1: Total de cartera ─────────────── */
 
+/**
+ * Realizado del DÍA de las posiciones de CONTADO cerradas hoy, en la moneda
+ * de valuación. ÚNICA FUENTE para TotalCard y PortfolioSummaryWidget — antes
+ * estaba duplicada en ambos y el fix del doble-conteo (09/06, caso T30J6)
+ * hubo que aplicarlo dos veces; no volver a duplicar.
+ *
+ * Reglas:
+ *  - Futuros se EXCLUYEN: su P&L del día ya está en dailyTotals (computeDailyPnL
+ *    marca cada op cruda contra su settle/entrada → el neto de las cerradas
+ *    hoy ES el P&L del día; sumarlo acá duplicaría).
+ *  - Contado (bonos/ONs/acciones): solo el tramo de HOY del realizado
+ *    = (precio_venta − cierre_ayer) × qty, NO el lifetime (la ganancia vieja
+ *    ya se contó día a día mientras la posición estuvo abierta). El lifetime
+ *    sigue en "Posiciones cerradas hoy" (g.realizedPnl).
+ *  - Sin cierre de ayer (ticker sin feed): fallback al lifetime (degradación
+ *    segura, mejor que 0).
+ */
+function computeRealizedTodayContado(positions, bondPrices, stockPrices, futurePrices, fciPrices, valuationCurrency, fx) {
+  if (!fx || !positions || !isTradingDayAndMarketOpened()) return 0;
+  const all = consolidatePositions(positions, bondPrices, futurePrices, fciPrices);
+  const closedToday = filterClosedToToday(all.filter((g) => g.isClosed), futurePrices);
+  let sum = 0;
+  for (const g of closedToday) {
+    if (g.instrument_type === "future") continue;
+    const tk = (g.ticker || "").toUpperCase();
+    const isEq = g.instrument_type === "stock" || g.instrument_type === "cedear";
+    const m = isEq ? stockPrices?.[tk] : bondPrices?.[tk];
+    let prev = m?.previousClose;
+    if (prev == null && m?.changePct != null) {
+      const den = 1 + Number(m.changePct) / 100;
+      if (den > 0) prev = Number(m.price) / den;
+    }
+    let dayValue;
+    if (prev != null && prev > 0) {
+      let dayRaw = 0;
+      for (const pair of (g.operations || [])) {
+        const qty = Number(pair.quantity) || 0;
+        const sell = Number(pair.sell_price) || 0;
+        if (qty > 0 && sell > 0) dayRaw += qty * (sell - prev);
+      }
+      dayValue = applyConventionToValue(g.instrument_type, 1, dayRaw);
+    } else {
+      dayValue = g.realizedPnl ?? 0;
+    }
+    const conv = convertValue(dayValue, g.currency || "ARS", valuationCurrency, fx);
+    if (conv != null) sum += conv;
+  }
+  return sum;
+}
+
 function TotalCard({ positions, fx, bondPrices, futurePrices, stockPrices, fciPrices, valuationCurrency, balanceByCurrency, futureAdjLookup, onIngresar, onRetirar }) {
   const { hidden: privHidden } = usePrivacy();
   // V2: ahora usamos precios de mercado de data912 cuando están disponibles.
@@ -9186,49 +9242,10 @@ function TotalCard({ positions, fx, bondPrices, futurePrices, stockPrices, fciPr
   // alto, recomprar abajo) tienen su realizado que ahí no aparece (los lotes
   // calzados se cancelan entre sí). Lo sumamos para que "P&L hoy" sea todo lo
   // que pasó hoy. Mismo gate de mercado que el diario.
-  const realizedToday = useMemo(() => {
-    if (!fx || !positions || !isTradingDayAndMarketOpened()) return 0;
-    const all = consolidatePositions(positions, bondPrices, futurePrices, fciPrices);
-    const closedToday = filterClosedToToday(all.filter((g) => g.isClosed), futurePrices);
-    let sum = 0;
-    for (const g of closedToday) {
-      // Futuros: su P&L del día YA está contado en dailyTotals (computeDailyPnL
-      // marca cada op cruda contra su settle/entrada → el neto de las cerradas
-      // hoy ES el P&L del día). Sumarlo acá duplicaría.
-      if (g.instrument_type === "future") continue;
-      // CONTADO (bonos/ONs/acciones): al banner "P&L de HOY" le corresponde SOLO
-      // el tramo de hoy del realizado = (precio_venta − cierre_ayer) × qty, NO el
-      // lifetime (la ganancia vieja ya se contó día a día mientras la posición
-      // estuvo abierta; sumar el lifetime entero la cuenta dos veces — caso real
-      // T30J6 09/06: realizado +1,5M de ~6 semanas inflaba el P&L del día). El
-      // lifetime sigue mostrándose en "Posiciones cerradas hoy" (g.realizedPnl).
-      const tk = (g.ticker || "").toUpperCase();
-      const isEq = g.instrument_type === "stock" || g.instrument_type === "cedear";
-      const m = isEq ? stockPrices?.[tk] : bondPrices?.[tk];
-      let prev = m?.previousClose;
-      if (prev == null && m?.changePct != null) {
-        const den = 1 + Number(m.changePct) / 100;
-        if (den > 0) prev = Number(m.price) / den;
-      }
-      let dayValue;
-      if (prev != null && prev > 0) {
-        let dayRaw = 0;
-        for (const pair of (g.operations || [])) {
-          const qty = Number(pair.quantity) || 0;
-          const sell = Number(pair.sell_price) || 0;
-          if (qty > 0 && sell > 0) dayRaw += qty * (sell - prev);
-        }
-        dayValue = applyConventionToValue(g.instrument_type, 1, dayRaw);
-      } else {
-        // Sin cierre de ayer (ticker recién emitido / sin feed) → fallback al
-        // lifetime, igual que antes (mejor que 0; degradación segura).
-        dayValue = g.realizedPnl ?? 0;
-      }
-      const conv = convertValue(dayValue, g.currency || "ARS", valuationCurrency, fx);
-      if (conv != null) sum += conv;
-    }
-    return sum;
-  }, [positions, bondPrices, stockPrices, futurePrices, fciPrices, fx, valuationCurrency]);
+  const realizedToday = useMemo(
+    () => computeRealizedTodayContado(positions, bondPrices, stockPrices, futurePrices, fciPrices, valuationCurrency, fx),
+    [positions, bondPrices, stockPrices, futurePrices, fciPrices, fx, valuationCurrency]
+  );
 
   const showDaily = dailyTotals.hasAny && dailyTotals.pnl != null;
   const dailyPnlShown = (dailyTotals.pnl != null && !dailyTotals.marketClosed)
@@ -15054,88 +15071,6 @@ function ConsolidatedSection({
   );
 }
 
-/* ─────────────── CanjesSection (RETIRADA 09/06/2026) ───────────────
- * Se quitó la sección dedicada de "Canjes / Conversiones" de la Cartera
- * (decisión de LP: evitar un sector propio, demasiadas cosas en pantalla).
- * Los canjes viejos (movimientos de caja deposit/withdrawal con nota "Canje")
- * ya se ven en el LIBRO DE OPERACIONES como movimientos manuales. Y desde el
- * 09/06 los soberanos entran como POSICIÓN (no caja), así que no se generan
- * nuevos "Canje" cash. El componente queda sin render; se deja como referencia.
- */
-function CanjesSection_UNUSED() {
-  const { movements } = useCashMovements();
-  const [open, setOpen] = useState(false);
-  const legs = (movements || []).filter((m) => typeof m.notes === "string" && m.notes.startsWith("Canje"));
-  if (!legs.length) return null;
-
-  const fmt = (n) => Number(n).toLocaleString("es-AR", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-  const signed = (m) => (m.movement_type === "deposit" ? 1 : -1) * Number(m.amount);
-  const parse = (notes) => {
-    const mt = /^Canje\s+(\S+)\s+\((compra|venta)\)/.exec(notes || "");
-    return mt ? { ticker: mt[1], op: mt[2] } : { ticker: notes, op: null };
-  };
-
-  const byDate = new Map();
-  for (const m of legs) {
-    if (!byDate.has(m.movement_date)) byDate.set(m.movement_date, []);
-    byDate.get(m.movement_date).push(m);
-  }
-  const days = Array.from(byDate.entries()).sort((a, b) => (a[0] < b[0] ? 1 : -1));
-  const netArsTotal = legs.filter((m) => m.currency === "ARS").reduce((s, m) => s + signed(m), 0);
-
-  return (
-    <div style={{ marginTop: 16 }}>
-      <button
-        onClick={() => setOpen((v) => !v)}
-        style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "space-between", backgroundColor: C.panel, border: `1px solid ${C.border}`, padding: "10px 14px", cursor: "pointer", textAlign: "left", fontFamily: "'Roboto', sans-serif" }}
-      >
-        <div className="flex items-center gap-2">
-          {open ? <ChevronDown size={13} strokeWidth={1.8} color={C.dim} /> : <ChevronRight size={13} strokeWidth={1.8} color={C.dim} />}
-          <span style={{ fontSize: 9, letterSpacing: "0.22em", color: C.dim, textTransform: "uppercase", fontWeight: 600 }}>Canjes / Conversiones</span>
-          <span style={{ fontSize: 10, color: C.muted }}>({legs.length} patas)</span>
-        </div>
-        <span style={{ fontSize: 12, fontWeight: 700, fontVariantNumeric: "tabular-nums", color: netArsTotal >= 0 ? C.green : C.red }}>
-          {netArsTotal >= 0 ? "+" : ""}{fmt(netArsTotal)} ARS
-        </span>
-      </button>
-
-      {open && (
-        <div style={{ border: `1px solid ${C.border}`, borderTop: "none" }}>
-          {days.map(([date, ms]) => {
-            const netByCur = {};
-            for (const m of ms) netByCur[m.currency] = (netByCur[m.currency] || 0) + signed(m);
-            const netStr = Object.entries(netByCur).map(([c, v]) => `${v >= 0 ? "+" : ""}${fmt(v)} ${c}`).join(" · ");
-            return (
-              <div key={date} style={{ borderBottom: `1px solid ${C.border}` }}>
-                <div className="flex items-center justify-between" style={{ padding: "7px 14px", background: "rgba(255,255,255,0.02)" }}>
-                  <span style={{ fontSize: 11, color: C.text, fontWeight: 600 }}>{date}</span>
-                  <span style={{ fontSize: 11, fontWeight: 700, fontVariantNumeric: "tabular-nums", color: (netByCur.ARS ?? 0) >= 0 ? C.green : C.red }}>neto {netStr}</span>
-                </div>
-                {ms.map((m) => {
-                  const { ticker, op } = parse(m.notes);
-                  const isIn = m.movement_type === "deposit";
-                  return (
-                    <div key={m.source_ref || m.id} className="flex items-center" style={{ gap: 10, padding: "6px 14px 6px 24px", fontSize: 11.5, borderTop: `1px solid ${C.border}` }}>
-                      <span style={{ color: C.text, fontWeight: 600, width: 60 }}>{ticker}</span>
-                      <span style={{ color: op === "compra" ? C.green : C.red, fontSize: 9.5, fontWeight: 700, width: 48 }}>{op === "compra" ? "COMPRA" : op === "venta" ? "VENTA" : "—"}</span>
-                      <span style={{ flex: 1, textAlign: "right", fontVariantNumeric: "tabular-nums", color: isIn ? C.green : C.red }}>
-                        {isIn ? "+" : "−"}{fmt(Number(m.amount))} {m.currency}
-                      </span>
-                    </div>
-                  );
-                })}
-              </div>
-            );
-          })}
-          <div style={{ padding: "8px 14px", fontSize: 10, color: C.dim, lineHeight: 1.5 }}>
-            El canje es conversión de moneda (pesos↔USD vía soberanos), no deja posición de bono. El neto en pesos es el resultado del rulo (incluye cruzar puntas; sin comisiones del CSV).
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
-
 
 /* ─────────────── ClosedPositionsSection ───────────────
  *
@@ -19947,42 +19882,10 @@ function PortfolioSummaryWidget({ expanded }) {
 
   // Realizado del día (ver TotalCard): el P&L diario marca a mercado solo lo
   // abierto; sumamos el realizado de las posiciones cerradas hoy.
-  const realizedToday = useMemo(() => {
-    if (!fx || !positions || !isTradingDayAndMarketOpened()) return 0;
-    const all = consolidatePositions(positions, bondPricesState.prices, futurePricesState.prices, fciPricesState.prices);
-    const closedToday = filterClosedToToday(all.filter((g) => g.isClosed), futurePricesState.prices);
-    let sum = 0;
-    for (const g of closedToday) {
-      // Futuros: su P&L del día ya está en dailyTotals (ver TotalCard). Excluir.
-      if (g.instrument_type === "future") continue;
-      // CONTADO: al P&L de HOY solo le toca el tramo de hoy del realizado
-      // = (venta − cierre_ayer) × qty, no el lifetime (ya contado día a día
-      // mientras estuvo abierto). Lifetime sigue en "Cerradas hoy". Ver TotalCard.
-      const tk = (g.ticker || "").toUpperCase();
-      const isEq = g.instrument_type === "stock" || g.instrument_type === "cedear";
-      const m = isEq ? stockPricesState.prices?.[tk] : bondPricesState.prices?.[tk];
-      let prev = m?.previousClose;
-      if (prev == null && m?.changePct != null) {
-        const den = 1 + Number(m.changePct) / 100;
-        if (den > 0) prev = Number(m.price) / den;
-      }
-      let dayValue;
-      if (prev != null && prev > 0) {
-        let dayRaw = 0;
-        for (const pair of (g.operations || [])) {
-          const qty = Number(pair.quantity) || 0;
-          const sell = Number(pair.sell_price) || 0;
-          if (qty > 0 && sell > 0) dayRaw += qty * (sell - prev);
-        }
-        dayValue = applyConventionToValue(g.instrument_type, 1, dayRaw);
-      } else {
-        dayValue = g.realizedPnl ?? 0;
-      }
-      const conv = convertValue(dayValue, g.currency || "ARS", valuationCurrency, fx);
-      if (conv != null) sum += conv;
-    }
-    return sum;
-  }, [positions, bondPricesState.prices, stockPricesState.prices, futurePricesState.prices, fciPricesState.prices, fx, valuationCurrency]);
+  const realizedToday = useMemo(
+    () => computeRealizedTodayContado(positions, bondPricesState.prices, stockPricesState.prices, futurePricesState.prices, fciPricesState.prices, valuationCurrency, fx),
+    [positions, bondPricesState.prices, stockPricesState.prices, futurePricesState.prices, fciPricesState.prices, fx, valuationCurrency]
+  );
 
   // Render
   if (!user) {
@@ -21455,7 +21358,7 @@ function useSovereignMep() {
 
   // Refresco automático cada 60s + al volver a la pestaña.
   useEffect(() => {
-    const interval = setInterval(() => setRefreshKey((k) => k + 1), 60000);
+    const interval = setInterval(() => { if (document.visibilityState !== "visible") return; setRefreshKey((k) => k + 1); }, 60000);
     const onVisible = () => {
       if (document.visibilityState === "visible") setRefreshKey((k) => k + 1);
     };
@@ -21556,7 +21459,7 @@ function useCanjeMonitor() {
   }, [refreshKey]);
 
   useEffect(() => {
-    const interval = setInterval(() => setRefreshKey((k) => k + 1), 60000);
+    const interval = setInterval(() => { if (document.visibilityState !== "visible") return; setRefreshKey((k) => k + 1); }, 60000);
     const onVisible = () => {
       if (document.visibilityState === "visible") setRefreshKey((k) => k + 1);
     };
@@ -22587,7 +22490,7 @@ function useDollarBonds() {
   }, [refreshKey]);
 
   useEffect(() => {
-    const interval = setInterval(() => setRefreshKey((k) => k + 1), 60000);
+    const interval = setInterval(() => { if (document.visibilityState !== "visible") return; setRefreshKey((k) => k + 1); }, 60000);
     const onVisible = () => { if (document.visibilityState === "visible") setRefreshKey((k) => k + 1); };
     document.addEventListener("visibilitychange", onVisible);
     return () => { clearInterval(interval); document.removeEventListener("visibilitychange", onVisible); };
@@ -24781,17 +24684,6 @@ function CarryTradeModule() {
       })
       .filter(Boolean)
       .sort((a, b) => a.days - b.days);
-
-    if (typeof window !== "undefined") {
-      console.log("🔍 [Carry Trade] Diagnóstico de bonos:", {
-        totalRecibidos: bondsRaw.length,
-        ignoradosRuido: ignoredCount,
-        aceptados: accepted,
-        rechazadosSinMapa: rejectedNoMap,
-        rechazadosVencidos: rejectedExpired,
-        rechazadosSinPrecio: rejectedNoPrice,
-      });
-    }
 
     return result;
   }, [bondsRaw, emissions]);
