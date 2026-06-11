@@ -985,6 +985,8 @@ function MidasApp() {
                 seriesId="89.2_TS_INTE_PM_0_D_16"
                 units="% TNA"
               />
+            ) : active === "rem" ? (
+              <RemTcModule key={active} />
             ) : active === "desarbitrajes" ? (
               <DesarbitrajesModule key={active} />
             ) : active === "flujo-posiciones" ? (
@@ -22770,6 +22772,338 @@ function MacroChartModule({ title, subtitle, seriesId, units }) {
           </div>
         )}
       </div>
+    </div>
+  );
+}
+
+/* ─────────────── REM vs Realidad (Estadísticas BCRA → REM) ───────────────
+ *
+ * Compara el pronóstico de tipo de cambio del REM (mediana de ~40-50
+ * consultoras, publicación mensual del BCRA) contra el dólar mayorista
+ * REAL (Com. A 3500, promedio mensual — la misma referencia que pronostica
+ * el REM). Historia completa: jun-2016 (primer REM) a hoy.
+ *
+ * Datos (Supabase, carga 10/06/2026 + refresh mensual pendiente):
+ *   - rem_tc_history: survey_date, period_month, mediana ($/USD prom. mens.)
+ *     Fuente: BCRA historico-relevamiento-expectativas-mercado.xlsx
+ *   - usd_mayorista_monthly: month, avg_a3500 (promedio mensual del A3500)
+ *     Fuente: api.bcra.gob.ar v4 idVariable=5
+ *
+ * Lecturas que habilita:
+ *   - "REM hace N meses": en cada mes, qué decía el consenso N meses antes
+ *     vs lo que efectivamente pasó. El gap son los errores.
+ *   - Sesgo por régimen: el REM es casi insesgado en promedio, pero
+ *     asimétrico: NUNCA ve los saltos (ago-18, ago-19, dic-23: -25% a -44%
+ *     de error a 6 meses) y sobreestima la devaluación en regímenes que
+ *     aguantan (crawl 2024: +12% promedio a 6m).
+ *   - "REM corregido": última encuesta ajustada por el sesgo promedio del
+ *     RÉGIMEN ACTUAL (bandas, abr-25+) por horizonte, con su MAE como banda.
+ */
+function useRemVsReal() {
+  const [rem, setRem] = useState(null);
+  const [real, setReal] = useState(null);
+  const [error, setError] = useState(null);
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const [r1, r2] = await Promise.all([
+          supabase.from("rem_tc_history").select("survey_date, period_month, mediana").order("survey_date", { ascending: true }).limit(2000),
+          supabase.from("usd_mayorista_monthly").select("month, avg_a3500").order("month", { ascending: true }).limit(500),
+        ]);
+        if (cancelled) return;
+        if (r1.error) throw r1.error;
+        if (r2.error) throw r2.error;
+        setRem(r1.data || []);
+        setReal(r2.data || []);
+      } catch (e) {
+        if (!cancelled) setError(e.message || String(e));
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+  return { rem, real, error, loading: !error && (!rem || !real) };
+}
+
+// Diferencia en meses entre dos fechas ISO (YYYY-MM-DD), por calendario.
+function remMonthDiff(fromIso, toIso) {
+  const fy = +fromIso.slice(0, 4), fm = +fromIso.slice(5, 7);
+  const ty = +toIso.slice(0, 4), tm = +toIso.slice(5, 7);
+  return (ty * 12 + tm) - (fy * 12 + fm);
+}
+
+function RemTcModule() {
+  const { rem, real, error, loading } = useRemVsReal();
+  const [horizon, setHorizon] = useState(3);   // 1 | 3 | 6 meses
+  const [rangeYears, setRangeYears] = useState(10); // 10 | 5 | 2
+
+  const model = useMemo(() => {
+    if (!rem || !real || !rem.length || !real.length) return null;
+
+    // real por mes (clave YYYY-MM)
+    const realByMonth = new Map();
+    for (const r of real) realByMonth.set(r.month.slice(0, 7), Number(r.avg_a3500));
+
+    // pronóstico por (mes target, horizonte)
+    const fcByTargetH = new Map();
+    let lastSurvey = "";
+    for (const f of rem) {
+      if (f.survey_date > lastSurvey) lastSurvey = f.survey_date;
+      const h = remMonthDiff(f.survey_date, f.period_month);
+      fcByTargetH.set(f.period_month.slice(0, 7) + "|" + h, Number(f.mediana));
+    }
+
+    // errores por horizonte: full period y régimen actual (bandas, abr-25+)
+    const errs = {};   // h -> { all: [], era: [] }
+    for (const f of rem) {
+      const h = remMonthDiff(f.survey_date, f.period_month);
+      if (h < 1 || h > 6) continue;
+      const realV = realByMonth.get(f.period_month.slice(0, 7));
+      if (realV == null || !(realV > 0)) continue;
+      const e = Number(f.mediana) / realV - 1;
+      if (!errs[h]) errs[h] = { all: [], era: [] };
+      errs[h].all.push(e);
+      if (f.period_month >= "2025-04-01") errs[h].era.push(e);
+    }
+    const stats = {};
+    for (const h of Object.keys(errs)) {
+      const mk = (arr) => arr.length
+        ? {
+            n: arr.length,
+            bias: arr.reduce((s, x) => s + x, 0) / arr.length,
+            mae: arr.reduce((s, x) => s + Math.abs(x), 0) / arr.length,
+            sub: arr.filter((x) => x < 0).length / arr.length,
+          }
+        : null;
+      stats[h] = { all: mk(errs[h].all), era: mk(errs[h].era) };
+    }
+
+    // serie del gráfico principal: real + REM hace `horizon` meses
+    const months = Array.from(realByMonth.keys()).sort();
+    const chart = months.map((m) => ({
+      m,
+      real: realByMonth.get(m),
+      rem: fcByTargetH.get(m + "|" + horizon) ?? null,
+    }));
+
+    // futuro: pronósticos de la última encuesta (meses sin dato real),
+    // con versión corregida por el sesgo del régimen actual a su horizonte
+    const lastRealMonth = months[months.length - 1];
+    const future = [];
+    for (const f of rem) {
+      if (f.survey_date !== lastSurvey) continue;
+      const tm = f.period_month.slice(0, 7);
+      if (tm <= lastRealMonth) continue;
+      const h = remMonthDiff(f.survey_date, f.period_month);
+      const st = stats[h]?.era && stats[h].era.n >= 6 ? stats[h].era : stats[h]?.all;
+      const med = Number(f.mediana);
+      future.push({
+        m: tm,
+        remFut: med,
+        remCorr: st ? med / (1 + st.bias) : med,
+        h,
+        mae: st ? st.mae : null,
+      });
+    }
+    future.sort((a, b) => (a.m < b.m ? -1 : 1));
+
+    // errores mes a mes para el subgráfico (al horizonte elegido)
+    const errSeries = months
+      .map((m) => {
+        const fc = fcByTargetH.get(m + "|" + horizon);
+        const rv = realByMonth.get(m);
+        return fc != null && rv > 0 ? { m, err: (fc / rv - 1) * 100 } : null;
+      })
+      .filter(Boolean);
+
+    return { chart, future, errSeries, stats, lastSurvey, lastRealMonth };
+  }, [rem, real, horizon]);
+
+  const fmtN = (n, d = 0) => Number(n).toLocaleString("es-AR", { minimumFractionDigits: d, maximumFractionDigits: d });
+  const fmtPct = (x, d = 1) => `${x >= 0 ? "+" : ""}${(x * 100).toFixed(d)}%`;
+  const fmtMonth = (m) => {
+    const meses = ["ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sep", "oct", "nov", "dic"];
+    return `${meses[+m.slice(5, 7) - 1]}-${m.slice(2, 4)}`;
+  };
+
+  // serie final del gráfico (histórico + futuro), recortada al rango elegido
+  const display = useMemo(() => {
+    if (!model) return [];
+    const cutoff = (() => {
+      const d = new Date();
+      d.setFullYear(d.getFullYear() - rangeYears);
+      return d.toISOString().slice(0, 7);
+    })();
+    const hist = model.chart.filter((p) => p.m >= cutoff);
+    const fut = model.future.map((f) => ({ m: f.m, real: null, rem: null, remFut: f.remFut, remCorr: f.remCorr }));
+    if (hist.length && fut.length) {
+      // empalmar las líneas futuras al último real
+      const lastH = hist[hist.length - 1];
+      lastH.remFut = lastH.real;
+      lastH.remCorr = lastH.real;
+    }
+    return [...hist, ...fut];
+  }, [model, rangeYears]);
+
+  const st = model?.stats?.[horizon];
+  const useLog = rangeYears >= 5;
+
+  return (
+    <div style={{ padding: "24px 32px", maxWidth: 1100, margin: "0 auto" }}>
+      <div style={{ marginBottom: 16 }}>
+        <h1 style={{ fontSize: 22, fontWeight: 600, color: C.text, letterSpacing: "-0.01em", margin: 0 }}>
+          REM — Expectativas vs Realidad
+        </h1>
+        <p style={{ fontSize: 12, color: C.muted, margin: "6px 0 0 0", letterSpacing: "0.02em" }}>
+          Mediana del REM (tipo de cambio nominal, prom. mensual) contra el mayorista real (Com. A 3500) · jun-2016 → hoy · fuente: BCRA
+        </p>
+      </div>
+
+      {/* Controles */}
+      <div className="flex items-center gap-3" style={{ marginBottom: 14, flexWrap: "wrap" }}>
+        <div className="flex items-center gap-1">
+          <span style={{ fontSize: 10, color: C.dim, textTransform: "uppercase", letterSpacing: "0.12em", marginRight: 6 }}>Pronóstico hecho</span>
+          {[1, 3, 6].map((h) => (
+            <button key={h} onClick={() => setHorizon(h)}
+              style={{ padding: "4px 10px", fontSize: 11, fontWeight: 600, cursor: "pointer", border: `1px solid ${horizon === h ? C.accent : C.border}`, background: horizon === h ? "rgba(124,156,255,0.12)" : "transparent", color: horizon === h ? C.accent : C.muted, borderRadius: 4 }}>
+              {h} {h === 1 ? "mes" : "meses"} antes
+            </button>
+          ))}
+        </div>
+        <div className="flex items-center gap-1" style={{ marginLeft: "auto" }}>
+          {[2, 5, 10].map((y) => (
+            <button key={y} onClick={() => setRangeYears(y)}
+              style={{ padding: "4px 10px", fontSize: 11, fontWeight: 600, cursor: "pointer", border: `1px solid ${rangeYears === y ? C.accent : C.border}`, background: rangeYears === y ? "rgba(124,156,255,0.12)" : "transparent", color: rangeYears === y ? C.accent : C.muted, borderRadius: 4 }}>
+              {y}A{y >= 5 ? " (log)" : ""}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {loading ? (
+        <div className="flex items-center justify-center" style={{ height: 420 }}>
+          <Loader2 size={24} color={C.muted} className="eco-spin" strokeWidth={1.5} />
+        </div>
+      ) : error ? (
+        <div className="flex items-center justify-center" style={{ height: 200, fontSize: 12, color: C.red }}>
+          Error leyendo histórico REM: {error}
+        </div>
+      ) : !model ? null : (
+        <>
+          {/* Stats del horizonte elegido */}
+          <div className="grid" style={{ gridTemplateColumns: "repeat(4, minmax(0,1fr))", gap: 12, marginBottom: 14 }}>
+            {[
+              { label: `Error promedio (10 años)`, value: st?.all ? fmtPct(st.all.bias) : "—", hint: "positivo = REM pronosticó de más" },
+              { label: `Error absoluto medio`, value: st?.all ? fmtPct(st.all.mae) : "—", hint: `cuánto le erra en promedio a ${horizon}m, para cualquier lado` },
+              { label: `Subestimó el dólar`, value: st?.all ? `${(st.all.sub * 100).toFixed(0)}% de las veces` : "—", hint: "real terminó arriba del pronóstico" },
+              { label: `Régimen actual (abr-25+)`, value: st?.era ? `${fmtPct(st.era.bias)} · MAE ${fmtPct(st.era.mae)}` : "—", hint: "sesgo y error en bandas" },
+            ].map((c) => (
+              <div key={c.label} style={{ border: `1px solid ${C.border}`, borderRadius: 6, background: C.panel, padding: "10px 12px" }}>
+                <div style={{ fontSize: 9.5, color: C.dim, textTransform: "uppercase", letterSpacing: "0.12em", marginBottom: 4 }}>{c.label}</div>
+                <div style={{ fontSize: 16, fontWeight: 700, color: C.text, fontVariantNumeric: "tabular-nums" }}>{c.value}</div>
+                <div style={{ fontSize: 10, color: C.dim, marginTop: 2 }}>{c.hint}</div>
+              </div>
+            ))}
+          </div>
+
+          {/* Gráfico principal */}
+          <div style={{ border: `1px solid ${C.border}`, borderRadius: 6, background: C.panel, padding: 16, marginBottom: 14 }}>
+            <div style={{ fontSize: 11, color: C.muted, marginBottom: 8 }}>
+              $/USD mayorista (prom. mensual) — <span style={{ color: C.text, fontWeight: 600 }}>real</span> vs{" "}
+              <span style={{ color: C.accent, fontWeight: 600 }}>lo que el REM pronosticaba {horizon} {horizon === 1 ? "mes" : "meses"} antes</span>
+              {model.future.length > 0 && (
+                <> · <span style={{ color: C.cat.amber, fontWeight: 600 }}>REM actual ({fmtMonth(model.lastSurvey.slice(0, 7))})</span> y{" "}
+                <span style={{ color: C.green, fontWeight: 600 }}>corregido por sesgo del régimen</span></>
+              )}
+            </div>
+            <ResponsiveContainer width="100%" height={400}>
+              <ComposedChart data={display} margin={{ top: 6, right: 12, bottom: 4, left: 8 }}>
+                <CartesianGrid stroke={C.border} strokeDasharray="3 3" vertical={false} />
+                <XAxis dataKey="m" tick={{ fontSize: 10, fill: C.dim }} tickFormatter={fmtMonth} minTickGap={40} />
+                <YAxis
+                  tick={{ fontSize: 10, fill: C.dim }}
+                  scale={useLog ? "log" : "auto"}
+                  domain={["auto", "auto"]}
+                  tickFormatter={(v) => fmtN(v)}
+                  width={62}
+                />
+                <RechartsTooltip
+                  contentStyle={{ background: C.bg, border: `1px solid ${C.border}`, borderRadius: 6, fontSize: 11 }}
+                  labelFormatter={fmtMonth}
+                  formatter={(value, name) => [
+                    `$ ${fmtN(value, 1)}`,
+                    { real: "Mayorista real", rem: `REM ${horizon}m antes`, remFut: "REM última encuesta", remCorr: "REM corregido" }[name] || name,
+                  ]}
+                />
+                <Line type="monotone" dataKey="real" stroke={C.text} strokeWidth={2} dot={false} connectNulls={false} />
+                <Line type="monotone" dataKey="rem" stroke={C.accent} strokeWidth={1.6} dot={false} connectNulls={false} />
+                <Line type="monotone" dataKey="remFut" stroke={C.cat.amber} strokeWidth={1.6} strokeDasharray="5 4" dot={{ r: 2.5 }} connectNulls />
+                <Line type="monotone" dataKey="remCorr" stroke={C.green} strokeWidth={1.6} strokeDasharray="2 3" dot={{ r: 2.5 }} connectNulls />
+              </ComposedChart>
+            </ResponsiveContainer>
+          </div>
+
+          {/* Subgráfico: error % mes a mes */}
+          <div style={{ border: `1px solid ${C.border}`, borderRadius: 6, background: C.panel, padding: 16, marginBottom: 14 }}>
+            <div style={{ fontSize: 11, color: C.muted, marginBottom: 8 }}>
+              Error del pronóstico a {horizon} {horizon === 1 ? "mes" : "meses"} (% · positivo = REM pronosticó de más, negativo = el dólar real le pasó por arriba)
+            </div>
+            <ResponsiveContainer width="100%" height={180}>
+              <ComposedChart data={model.errSeries} margin={{ top: 4, right: 12, bottom: 2, left: 8 }}>
+                <CartesianGrid stroke={C.border} strokeDasharray="3 3" vertical={false} />
+                <XAxis dataKey="m" tick={{ fontSize: 10, fill: C.dim }} tickFormatter={fmtMonth} minTickGap={40} />
+                <YAxis tick={{ fontSize: 10, fill: C.dim }} tickFormatter={(v) => `${v}%`} width={48} />
+                <RechartsTooltip
+                  contentStyle={{ background: C.bg, border: `1px solid ${C.border}`, borderRadius: 6, fontSize: 11 }}
+                  labelFormatter={fmtMonth}
+                  formatter={(v) => [`${v >= 0 ? "+" : ""}${Number(v).toFixed(1)}%`, "Error REM"]}
+                />
+                <ReferenceLine y={0} stroke={C.muted} strokeWidth={1} />
+                <Line type="monotone" dataKey="err" stroke={C.cat.amber} strokeWidth={1.4} dot={false} />
+              </ComposedChart>
+            </ResponsiveContainer>
+          </div>
+
+          {/* Proyección corregida */}
+          {model.future.length > 0 && (
+            <div style={{ border: `1px solid ${C.border}`, borderRadius: 6, background: C.panel, padding: 16, marginBottom: 14 }}>
+              <div style={{ fontSize: 11, color: C.muted, marginBottom: 10 }}>
+                Última encuesta ({fmtMonth(model.lastSurvey.slice(0, 7))}) y proyección corregida por el sesgo del régimen actual
+              </div>
+              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+                <thead>
+                  <tr style={{ color: C.dim, fontSize: 10, textTransform: "uppercase", letterSpacing: "0.1em" }}>
+                    <th style={{ textAlign: "left", padding: "4px 8px" }}>Mes</th>
+                    <th style={{ textAlign: "right", padding: "4px 8px" }}>REM mediana</th>
+                    <th style={{ textAlign: "right", padding: "4px 8px" }}>Corregido</th>
+                    <th style={{ textAlign: "right", padding: "4px 8px" }}>± error típico</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {model.future.map((f) => (
+                    <tr key={f.m} style={{ borderTop: `1px solid ${C.border}` }}>
+                      <td style={{ padding: "5px 8px", color: C.text, fontWeight: 600 }}>{fmtMonth(f.m)}</td>
+                      <td style={{ padding: "5px 8px", textAlign: "right", color: C.cat.amber, fontVariantNumeric: "tabular-nums" }}>$ {fmtN(f.remFut, 1)}</td>
+                      <td style={{ padding: "5px 8px", textAlign: "right", color: C.green, fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>$ {fmtN(f.remCorr, 1)}</td>
+                      <td style={{ padding: "5px 8px", textAlign: "right", color: C.dim, fontVariantNumeric: "tabular-nums" }}>
+                        {f.mae != null ? `±${(f.mae * 100).toFixed(1)}% → ${fmtN(f.remCorr * (1 - f.mae))} / ${fmtN(f.remCorr * (1 + f.mae))}` : "—"}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+
+          <div style={{ fontSize: 11, color: C.dim, lineHeight: 1.6 }}>
+            Lectura de 10 años de datos: el REM es <strong style={{ color: C.muted }}>casi insesgado en promedio</strong> pero
+            <strong style={{ color: C.muted }}> asimétrico por régimen</strong> — nunca anticipó los saltos (ago-18, ago-19, dic-23: erró hasta −44% a 6 meses)
+            y sobreestimó la devaluación cuando el régimen aguantó (crawl 2024: +12% promedio a 6m). El error crece ~1,8 puntos por mes de horizonte.
+            "Corregido" = mediana de la última encuesta dividida por (1 + sesgo promedio del régimen de bandas a ese horizonte); el ± usa el error absoluto medio del mismo régimen.
+            No es una predicción de Midas: es el consenso del mercado ajustado por cómo viene errando.
+          </div>
+        </>
+      )}
     </div>
   );
 }
