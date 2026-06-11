@@ -20622,7 +20622,7 @@ function DashboardModule() {
             { id: "nav", title: "Evolución del patrimonio", render: ({ expanded }) => <NavCurveSection userId={user?.id} C={C} compact={!expanded} /> },
             { id: "carry", title: "Carry Trade · Top TEA", render: ({ expanded }) => <CarryTradeWidget expanded={expanded} /> },
             { id: "macro", title: "Indicadores Macro", render: ({ expanded }) => <BcraIndicatorsWidget expanded={expanded} /> },
-            { id: "rem-dolar", title: "REM vs Realidad · Dólar", render: () => <RemVsRealWidget /> },
+            { id: "rem-dolar", title: "REM vs Realidad · Dólar", render: () => <RemVsRealWidget futurePrices={futurePrices} /> },
             { id: "alertas-activas", title: "Alertas activas", render: () => (
               <div style={{ height: "100%", minHeight: 240, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 8, padding: "20px 24px", textAlign: "center" }}>
                 <span style={{ fontSize: 10, color: C.dim, letterSpacing: "0.18em", textTransform: "uppercase", fontWeight: 600 }}>Próximamente</span>
@@ -23025,9 +23025,15 @@ function buildRemVsRealModel(rem, real, horizon) {
 }
 
 /* Widget compacto del Dashboard: mes en curso (REM vs cómo viene vs cierre
- * estimado) + próximos meses con el "REM corregido". Detalle completo en
- * Estadísticas BCRA → REM. */
-function RemVsRealWidget() {
+ * estimado) + próximos meses con el "REM corregido" y el FUTURO DLR del mes
+ * (último operado en rueda; settle fuera de horario) para ver cuánta
+ * devaluación pricea el mercado vs el consenso. Detalle completo en
+ * Estadísticas BCRA → REM.
+ *
+ * Ojo conceptual (en el pie): el futuro DLR liquida contra el A3500 de FIN
+ * de mes; el REM pronostica el PROMEDIO mensual. En un crawl suave el fin
+ * de mes corre ~medio mes de devaluación arriba del promedio. */
+function RemVsRealWidget({ futurePrices = {} }) {
   const { rem, real, error, loading } = useRemVsReal();
   const model = useMemo(() => buildRemVsRealModel(rem, real, 3), [rem, real]);
 
@@ -23035,6 +23041,19 @@ function RemVsRealWidget() {
   const fmtMonth = (m) => {
     const meses = ["ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sep", "oct", "nov", "dic"];
     return `${meses[+m.slice(5, 7) - 1]}-${m.slice(2, 4)}`;
+  };
+
+  // "2026-07" → "DLRJUL26"; precio: last en rueda, settle fuera de horario.
+  const marketOpen = isActiveMarketWindow();
+  const dlrForMonth = (m) => {
+    const ABBR = ["ENE", "FEB", "MAR", "ABR", "MAY", "JUN", "JUL", "AGO", "SEP", "OCT", "NOV", "DIC"];
+    const tk = `DLR${ABBR[+m.slice(5, 7) - 1]}${m.slice(2, 4)}`;
+    const fp = futurePrices[tk];
+    if (!fp || fp.error) return null;
+    const live = fp.last != null ? Number(fp.last) : null;
+    const settle = fp.settlement != null ? Number(fp.settlement) : null;
+    const value = marketOpen ? (live ?? settle) : (settle ?? live);
+    return value != null && Number.isFinite(value) ? value : null;
   };
 
   if (loading) {
@@ -23083,37 +23102,60 @@ function RemVsRealWidget() {
                 $ {fmtN(cur.estClose)}
               </span>
             </div>
+            {(() => {
+              const fut = dlrForMonth(cur.m);
+              return fut != null ? (
+                <div style={{ fontSize: 11, color: C.dim }}>
+                  futuro DLR{" "}
+                  <span style={{ fontSize: 15, fontWeight: 700, color: C.accent, fontVariantNumeric: "tabular-nums" }}>
+                    $ {fmtN(fut, 1)}
+                  </span>{" "}
+                  <span style={{ fontSize: 9.5 }}>{marketOpen ? "live" : "settle"}</span>
+                </div>
+              ) : null;
+            })()}
           </div>
         </div>
       )}
 
-      {/* Próximos meses: REM y corregido */}
+      {/* Próximos meses: REM, corregido y futuro DLR (mercado) */}
       <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11.5 }}>
         <thead>
           <tr style={{ color: C.dim, fontSize: 9.5, textTransform: "uppercase", letterSpacing: "0.1em" }}>
             <th style={{ textAlign: "left", padding: "3px 6px" }}>Mes</th>
             <th style={{ textAlign: "right", padding: "3px 6px" }}>REM</th>
             <th style={{ textAlign: "right", padding: "3px 6px" }}>Corregido</th>
-            <th style={{ textAlign: "right", padding: "3px 6px" }}>Rango típico</th>
+            <th style={{ textAlign: "right", padding: "3px 6px" }}>Futuro {marketOpen ? "· live" : "· settle"}</th>
+            <th style={{ textAlign: "right", padding: "3px 6px" }}>vs REM</th>
           </tr>
         </thead>
         <tbody>
-          {model.future.slice(0, 5).map((f) => (
-            <tr key={f.m} style={{ borderTop: `1px solid ${C.border}` }}>
-              <td style={{ padding: "4px 6px", color: C.text, fontWeight: 600 }}>{fmtMonth(f.m)}</td>
-              <td style={{ padding: "4px 6px", textAlign: "right", color: C.cat.amber, fontVariantNumeric: "tabular-nums" }}>$ {fmtN(f.remFut)}</td>
-              <td style={{ padding: "4px 6px", textAlign: "right", color: C.green, fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>$ {fmtN(f.remCorr)}</td>
-              <td style={{ padding: "4px 6px", textAlign: "right", color: C.dim, fontVariantNumeric: "tabular-nums" }}>
-                {f.mae != null ? `${fmtN(f.remCorr * (1 - f.mae))} – ${fmtN(f.remCorr * (1 + f.mae))}` : "—"}
-              </td>
-            </tr>
-          ))}
+          {model.future.slice(0, 5).map((f) => {
+            const fut = dlrForMonth(f.m);
+            const diff = fut != null && f.remFut > 0 ? (fut / f.remFut - 1) * 100 : null;
+            return (
+              <tr key={f.m} style={{ borderTop: `1px solid ${C.border}` }}>
+                <td style={{ padding: "4px 6px", color: C.text, fontWeight: 600 }}>{fmtMonth(f.m)}</td>
+                <td style={{ padding: "4px 6px", textAlign: "right", color: C.cat.amber, fontVariantNumeric: "tabular-nums" }}>$ {fmtN(f.remFut)}</td>
+                <td style={{ padding: "4px 6px", textAlign: "right", color: C.green, fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>$ {fmtN(f.remCorr)}</td>
+                <td style={{ padding: "4px 6px", textAlign: "right", color: C.accent, fontWeight: 600, fontVariantNumeric: "tabular-nums" }}>
+                  {fut != null ? `$ ${fmtN(fut, 1)}` : "—"}
+                </td>
+                <td style={{ padding: "4px 6px", textAlign: "right", fontVariantNumeric: "tabular-nums", fontWeight: 600, color: diff == null ? C.dim : diff > 0 ? C.red : C.green }}>
+                  {diff != null ? `${diff >= 0 ? "+" : ""}${diff.toFixed(1)}%` : "—"}
+                </td>
+              </tr>
+            );
+          })}
         </tbody>
       </table>
 
       <div style={{ fontSize: 10, color: C.dim, lineHeight: 1.5, marginTop: "auto" }}>
-        Corregido = mediana de la última encuesta ({fmtMonth(model.lastSurvey.slice(0, 7))}) ajustada por el sesgo del régimen actual.
-        {st ? ` A 3 meses el REM erra ±${(st.mae * 100).toFixed(1)}% típico (10 años).` : ""} Detalle: Estadísticas BCRA → REM.
+        Corregido = última encuesta ({fmtMonth(model.lastSurvey.slice(0, 7))}) ajustada por el sesgo del régimen.
+        {st ? ` A 3m el REM erra ±${(st.mae * 100).toFixed(1)}% típico.` : ""}{" "}
+        <span style={{ color: C.red }}>vs REM rojo</span> = el futuro pricea más devaluación que el consenso.
+        Ojo: el futuro liquida contra el A3500 de fin de mes; el REM pronostica el promedio mensual (~medio mes de crawl de diferencia).
+        Detalle: Estadísticas BCRA → REM.
       </div>
     </div>
   );
