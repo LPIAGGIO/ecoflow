@@ -23084,7 +23084,7 @@ function RemVsRealWidget({ futurePrices = {} }) {
           </div>
           <div className="flex items-baseline" style={{ gap: 16, flexWrap: "wrap" }}>
             <div style={{ fontSize: 11, color: C.dim }}>
-              REM decía{" "}
+              REM ({fmtMonth(model.lastSurvey.slice(0, 7))}) decía{" "}
               <span style={{ fontSize: 15, fontWeight: 700, color: C.cat.amber, fontVariantNumeric: "tabular-nums" }}>
                 {cur.rem != null ? `$ ${fmtN(cur.rem)}` : "—"}
               </span>
@@ -23123,7 +23123,7 @@ function RemVsRealWidget({ futurePrices = {} }) {
         <thead>
           <tr style={{ color: C.dim, fontSize: 9.5, textTransform: "uppercase", letterSpacing: "0.1em" }}>
             <th style={{ textAlign: "left", padding: "3px 6px" }}>Mes</th>
-            <th style={{ textAlign: "right", padding: "3px 6px" }}>REM</th>
+            <th style={{ textAlign: "right", padding: "3px 6px" }}>REM {fmtMonth(model.lastSurvey.slice(0, 7))}</th>
             <th style={{ textAlign: "right", padding: "3px 6px" }}>Corregido</th>
             <th style={{ textAlign: "right", padding: "3px 6px" }}>Futuro {marketOpen ? "· live" : "· settle"}</th>
             <th style={{ textAlign: "right", padding: "3px 6px" }}>vs REM</th>
