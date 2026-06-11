@@ -20521,7 +20521,7 @@ function NavCurveSection({ userId, C, compact = false }) {
 const DASHBOARD_ORDER_LS_KEY = "midas:dashboard-order-v1";
 const DASHBOARD_WIDGET_IDS = [
   "curva-dlr", "cobertura-dlr", "mi-cobertura", "fx", "resumen",
-  "flujo", "nav", "carry", "macro", "alertas-activas",
+  "flujo", "nav", "carry", "macro", "rem-dolar", "alertas-activas",
 ];
 function loadDashboardOrder(allIds) {
   let saved = [];
@@ -20622,6 +20622,7 @@ function DashboardModule() {
             { id: "nav", title: "Evolución del patrimonio", render: ({ expanded }) => <NavCurveSection userId={user?.id} C={C} compact={!expanded} /> },
             { id: "carry", title: "Carry Trade · Top TEA", render: ({ expanded }) => <CarryTradeWidget expanded={expanded} /> },
             { id: "macro", title: "Indicadores Macro", render: ({ expanded }) => <BcraIndicatorsWidget expanded={expanded} /> },
+            { id: "rem-dolar", title: "REM vs Realidad · Dólar", render: () => <RemVsRealWidget /> },
             { id: "alertas-activas", title: "Alertas activas", render: () => (
               <div style={{ height: "100%", minHeight: 240, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 8, padding: "20px 24px", textAlign: "center" }}>
                 <span style={{ fontSize: 10, color: C.dim, letterSpacing: "0.18em", textTransform: "uppercase", fontWeight: 600 }}>Próximamente</span>
@@ -22911,12 +22912,10 @@ function RemTvChart({ series, useLog, rangeYears, height = 420 }) {
   );
 }
 
-function RemTcModule() {
-  const { rem, real, error, loading } = useRemVsReal();
-  const [horizon, setHorizon] = useState(3);   // 1 | 3 | 6 meses
-  const [rangeYears, setRangeYears] = useState(10); // 10 | 5 | 2
-
-  const model = useMemo(() => {
+/* Modelo compartido REM vs real (módulo de Estadísticas BCRA + widget del
+ * Dashboard): series del gráfico, stats de error por horizonte, proyección
+ * corregida y mes en curso. Función pura — memoizar en el caller. */
+function buildRemVsRealModel(rem, real, horizon) {
     if (!rem || !real || !rem.length || !real.length) return null;
 
     // real por mes (clave YYYY-MM)
@@ -23023,7 +23022,108 @@ function RemTcModule() {
 
     const tv = { real: tvReal, rem: tvRem, fut: tvFut, corr: tvCorr, remLabel: `REM ${horizon}m antes` };
     return { tv, future, errSeries, stats, lastSurvey, lastRealMonth, curMonth };
-  }, [rem, real, horizon]);
+}
+
+/* Widget compacto del Dashboard: mes en curso (REM vs cómo viene vs cierre
+ * estimado) + próximos meses con el "REM corregido". Detalle completo en
+ * Estadísticas BCRA → REM. */
+function RemVsRealWidget() {
+  const { rem, real, error, loading } = useRemVsReal();
+  const model = useMemo(() => buildRemVsRealModel(rem, real, 3), [rem, real]);
+
+  const fmtN = (n, d = 0) => Number(n).toLocaleString("es-AR", { minimumFractionDigits: d, maximumFractionDigits: d });
+  const fmtMonth = (m) => {
+    const meses = ["ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sep", "oct", "nov", "dic"];
+    return `${meses[+m.slice(5, 7) - 1]}-${m.slice(2, 4)}`;
+  };
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center" style={{ height: "100%", minHeight: 220 }}>
+        <Loader2 size={20} color={C.muted} className="eco-spin" strokeWidth={1.5} />
+      </div>
+    );
+  }
+  if (error || !model) {
+    return (
+      <div className="flex items-center justify-center" style={{ height: "100%", minHeight: 220, fontSize: 11, color: C.muted }}>
+        {error ? `Error leyendo REM: ${error}` : "Sin datos REM."}
+      </div>
+    );
+  }
+
+  const cur = model.curMonth;
+  const st = model.stats?.[3]?.all;
+
+  return (
+    <div style={{ padding: "14px 18px", display: "flex", flexDirection: "column", gap: 10, height: "100%" }}>
+      {/* Mes en curso */}
+      {cur && (
+        <div style={{ border: `1px solid ${C.border}`, borderRadius: 6, padding: "10px 12px", background: "rgba(124,156,255,0.05)" }}>
+          <div style={{ fontSize: 9.5, color: C.dim, textTransform: "uppercase", letterSpacing: "0.12em", marginBottom: 6 }}>
+            {fmtMonth(cur.m)} en curso · mayorista prom. mensual
+          </div>
+          <div className="flex items-baseline" style={{ gap: 16, flexWrap: "wrap" }}>
+            <div style={{ fontSize: 11, color: C.dim }}>
+              REM decía{" "}
+              <span style={{ fontSize: 15, fontWeight: 700, color: C.cat.amber, fontVariantNumeric: "tabular-nums" }}>
+                {cur.rem != null ? `$ ${fmtN(cur.rem)}` : "—"}
+              </span>
+            </div>
+            <div style={{ fontSize: 11, color: C.dim }}>
+              va{" "}
+              <span style={{ fontSize: 15, fontWeight: 700, color: C.text, fontVariantNumeric: "tabular-nums" }}>
+                $ {fmtN(cur.mtd, 1)}
+              </span>{" "}
+              ({cur.daysIn} ruedas)
+            </div>
+            <div style={{ fontSize: 11, color: C.dim }}>
+              cierre est.{" "}
+              <span style={{ fontSize: 15, fontWeight: 700, color: C.green, fontVariantNumeric: "tabular-nums" }}>
+                $ {fmtN(cur.estClose)}
+              </span>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Próximos meses: REM y corregido */}
+      <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11.5 }}>
+        <thead>
+          <tr style={{ color: C.dim, fontSize: 9.5, textTransform: "uppercase", letterSpacing: "0.1em" }}>
+            <th style={{ textAlign: "left", padding: "3px 6px" }}>Mes</th>
+            <th style={{ textAlign: "right", padding: "3px 6px" }}>REM</th>
+            <th style={{ textAlign: "right", padding: "3px 6px" }}>Corregido</th>
+            <th style={{ textAlign: "right", padding: "3px 6px" }}>Rango típico</th>
+          </tr>
+        </thead>
+        <tbody>
+          {model.future.slice(0, 5).map((f) => (
+            <tr key={f.m} style={{ borderTop: `1px solid ${C.border}` }}>
+              <td style={{ padding: "4px 6px", color: C.text, fontWeight: 600 }}>{fmtMonth(f.m)}</td>
+              <td style={{ padding: "4px 6px", textAlign: "right", color: C.cat.amber, fontVariantNumeric: "tabular-nums" }}>$ {fmtN(f.remFut)}</td>
+              <td style={{ padding: "4px 6px", textAlign: "right", color: C.green, fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>$ {fmtN(f.remCorr)}</td>
+              <td style={{ padding: "4px 6px", textAlign: "right", color: C.dim, fontVariantNumeric: "tabular-nums" }}>
+                {f.mae != null ? `${fmtN(f.remCorr * (1 - f.mae))} – ${fmtN(f.remCorr * (1 + f.mae))}` : "—"}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+
+      <div style={{ fontSize: 10, color: C.dim, lineHeight: 1.5, marginTop: "auto" }}>
+        Corregido = mediana de la última encuesta ({fmtMonth(model.lastSurvey.slice(0, 7))}) ajustada por el sesgo del régimen actual.
+        {st ? ` A 3 meses el REM erra ±${(st.mae * 100).toFixed(1)}% típico (10 años).` : ""} Detalle: Estadísticas BCRA → REM.
+      </div>
+    </div>
+  );
+}
+
+function RemTcModule() {
+  const { rem, real, error, loading } = useRemVsReal();
+  const [horizon, setHorizon] = useState(3);   // 1 | 3 | 6 meses
+  const [rangeYears, setRangeYears] = useState(10); // 10 | 5 | 2
+  const model = useMemo(() => buildRemVsRealModel(rem, real, horizon), [rem, real, horizon]);
 
   const fmtN = (n, d = 0) => Number(n).toLocaleString("es-AR", { minimumFractionDigits: d, maximumFractionDigits: d });
   const fmtPct = (x, d = 1) => `${x >= 0 ? "+" : ""}${(x * 100).toFixed(d)}%`;
