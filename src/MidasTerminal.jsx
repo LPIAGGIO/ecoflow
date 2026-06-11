@@ -23097,7 +23097,7 @@ function RemVsRealWidget({ futurePrices = {} }) {
               ({cur.daysIn} ruedas)
             </div>
             <div style={{ fontSize: 11, color: C.dim }}>
-              cierre est.{" "}
+              prom. mes est.{" "}
               <span style={{ fontSize: 15, fontWeight: 700, color: C.green, fontVariantNumeric: "tabular-nums" }}>
                 $ {fmtN(cur.estClose)}
               </span>
@@ -23106,7 +23106,7 @@ function RemVsRealWidget({ futurePrices = {} }) {
               const fut = dlrForMonth(cur.m);
               return fut != null ? (
                 <div style={{ fontSize: 11, color: C.dim }}>
-                  futuro DLR{" "}
+                  futuro DLR (fin de mes){" "}
                   <span style={{ fontSize: 15, fontWeight: 700, color: C.accent, fontVariantNumeric: "tabular-nums" }}>
                     $ {fmtN(fut, 1)}
                   </span>{" "}
