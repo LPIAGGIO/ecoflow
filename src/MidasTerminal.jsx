@@ -22809,7 +22809,7 @@ function useRemVsReal() {
     (async () => {
       try {
         const [r1, r2] = await Promise.all([
-          supabase.from("rem_tc_history").select("survey_date, period_month, mediana").order("survey_date", { ascending: true }).limit(2000),
+          supabase.from("rem_tc_history").select("survey_date, period_month, mediana, p90, p10").order("survey_date", { ascending: true }).limit(2000),
           supabase.from("usd_mayorista_monthly").select("month, avg_a3500, eom_a3500, days").order("month", { ascending: true }).limit(500),
         ]);
         if (cancelled) return;
@@ -23020,8 +23020,37 @@ function buildRemVsRealModel(rem, real, horizon) {
       })
       .filter(Boolean);
 
+    // Semáforo de riesgo de régimen: dispersión relativa de cada encuesta
+    // = promedio de (p90 − p10) / mediana sobre horizontes 3-6 meses.
+    // Backtest 10 años: dic-23 avisó 6 meses antes (pctl 85→100 desde jun-23),
+    // PASO-19 parcial (pctl 56-77), 2018 NO avisó (shock súbito). Detecta
+    // quiebres ANTICIPABLES; los shocks de la nada no los ve.
+    const dispBySurvey = new Map();
+    for (const f of rem) {
+      if (f.p90 == null || f.p10 == null) continue;
+      const h = remMonthDiff(f.survey_date, f.period_month);
+      if (h < 3 || h > 6) continue;
+      const d = (Number(f.p90) - Number(f.p10)) / Number(f.mediana);
+      if (!Number.isFinite(d) || d <= 0) continue;
+      const e = dispBySurvey.get(f.survey_date) || { s: 0, n: 0 };
+      e.s += d; e.n++;
+      dispBySurvey.set(f.survey_date, e);
+    }
+    let regime = null;
+    if (dispBySurvey.size >= 24 && dispBySurvey.has(lastSurvey)) {
+      const all = Array.from(dispBySurvey.values()).map((e) => e.s / e.n);
+      const ce = dispBySurvey.get(lastSurvey);
+      const cur = ce.s / ce.n;
+      const pctl = all.filter((x) => x < cur).length / all.length;
+      regime = {
+        disp: cur,
+        pctl,
+        level: pctl < 0.70 ? "verde" : pctl < 0.85 ? "amarillo" : "rojo",
+      };
+    }
+
     const tv = { real: tvReal, rem: tvRem, fut: tvFut, corr: tvCorr, remLabel: `REM ${horizon}m antes` };
-    return { tv, future, errSeries, stats, lastSurvey, lastRealMonth, curMonth };
+    return { tv, future, errSeries, stats, lastSurvey, lastRealMonth, curMonth, regime };
 }
 
 /* Widget compacto del Dashboard: mes en curso (REM vs cómo viene vs cierre
@@ -23150,11 +23179,31 @@ function RemVsRealWidget({ futurePrices = {} }) {
         </tbody>
       </table>
 
+      {/* Semáforo de riesgo de régimen (dispersión del consenso) */}
+      {model.regime && (() => {
+        const lv = model.regime.level;
+        const color = lv === "verde" ? C.green : lv === "amarillo" ? C.cat.amber : C.red;
+        const label = lv === "verde" ? "VERDE" : lv === "amarillo" ? "AMARILLO" : "ROJO";
+        return (
+          <div className="flex items-center" style={{ gap: 8, border: `1px solid ${C.border}`, borderRadius: 6, padding: "7px 10px" }}>
+            <span style={{ width: 9, height: 9, borderRadius: "50%", background: color, flexShrink: 0, boxShadow: `0 0 6px ${color}` }} />
+            <span style={{ fontSize: 11, color: C.text, fontWeight: 600 }}>
+              Riesgo de régimen: <span style={{ color }}>{label}</span>
+            </span>
+            <span style={{ fontSize: 10.5, color: C.dim }}>
+              desacuerdo entre consultoras en percentil {Math.round(model.regime.pctl * 100)} de 10 años
+              {lv !== "verde" ? " — los rangos históricos subestiman el riesgo" : ""}
+            </span>
+          </div>
+        );
+      })()}
+
       <div style={{ fontSize: 10, color: C.dim, lineHeight: 1.5, marginTop: "auto" }}>
         Corregido = última encuesta ({fmtMonth(model.lastSurvey.slice(0, 7))}) ajustada por el sesgo del régimen.
         {st ? ` A 3m el REM erra ±${(st.mae * 100).toFixed(1)}% típico.` : ""}{" "}
         <span style={{ color: C.red }}>vs REM rojo</span> = el futuro pricea más devaluación que el consenso.
         Ojo: el futuro liquida contra el A3500 de fin de mes; el REM pronostica el promedio mensual (~medio mes de crawl de diferencia).
+        El semáforo (dispersión del REM, mensual) detecta quiebres anticipables — avisó dic-23 con 6 meses; los shocks súbitos tipo 2018 no los ve.
         Detalle: Estadísticas BCRA → REM.
       </div>
     </div>
