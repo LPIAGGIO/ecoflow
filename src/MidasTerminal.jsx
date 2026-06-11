@@ -22809,7 +22809,7 @@ function useRemVsReal() {
       try {
         const [r1, r2] = await Promise.all([
           supabase.from("rem_tc_history").select("survey_date, period_month, mediana").order("survey_date", { ascending: true }).limit(2000),
-          supabase.from("usd_mayorista_monthly").select("month, avg_a3500").order("month", { ascending: true }).limit(500),
+          supabase.from("usd_mayorista_monthly").select("month, avg_a3500, eom_a3500, days").order("month", { ascending: true }).limit(500),
         ]);
         if (cancelled) return;
         if (r1.error) throw r1.error;
@@ -22830,6 +22830,85 @@ function remMonthDiff(fromIso, toIso) {
   const fy = +fromIso.slice(0, 4), fm = +fromIso.slice(5, 7);
   const ty = +toIso.slice(0, 4), tm = +toIso.slice(5, 7);
   return (ty * 12 + tm) - (fy * 12 + fm);
+}
+
+/* Gráfico REM vs real con lightweight-charts (la lib de TradingView):
+ * zoom con la rueda, paneo arrastrando, crosshair con leyenda en vivo.
+ * Recibe las series completas (10 años); los botones de rango solo mueven
+ * la ventana visible (setVisibleRange), así siempre podés alejar.
+ */
+function RemTvChart({ series, useLog, rangeYears, height = 420 }) {
+  const containerRef = useRef(null);
+  const legendRef = useRef(null);
+
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el || !series) return;
+    const chart = createChart(el, {
+      autoSize: true,
+      layout: {
+        background: { type: "solid", color: "transparent" },
+        textColor: C.muted,
+        fontFamily: "inherit",
+        fontSize: 11,
+      },
+      grid: { vertLines: { color: C.border }, horzLines: { color: C.border } },
+      rightPriceScale: { borderColor: C.border, mode: useLog ? 1 : 0 },
+      timeScale: { borderColor: C.border, timeVisible: false },
+      crosshair: { mode: 0 },
+    });
+    const mk = (color, opts = {}) => chart.addLineSeries({ color, lineWidth: 2, priceLineVisible: false, lastValueVisible: false, ...opts });
+    const sReal = mk(C.text, { lastValueVisible: true });
+    const sRem = mk(C.accent);
+    const sFut = mk(C.cat.amber, { lineStyle: 2 });
+    const sCorr = mk(C.green, { lineStyle: 2 });
+    sReal.setData(series.real);
+    sRem.setData(series.rem);
+    sFut.setData(series.fut);
+    sCorr.setData(series.corr);
+
+    // ventana inicial según el rango elegido (la data completa queda
+    // disponible para alejar con la rueda)
+    if (rangeYears >= 10 || !series.real.length) {
+      chart.timeScale().fitContent();
+    } else {
+      const lastTime = (series.fut.length ? series.fut[series.fut.length - 1] : series.real[series.real.length - 1]).time;
+      const from = new Date();
+      from.setFullYear(from.getFullYear() - rangeYears);
+      chart.timeScale().setVisibleRange({ from: from.toISOString().slice(0, 10), to: lastTime });
+    }
+
+    // leyenda en vivo bajo el crosshair
+    const legend = legendRef.current;
+    const fmtL = (v) => Number(v).toLocaleString("es-AR", { maximumFractionDigits: 1 });
+    const entries = [
+      ["Real", sReal, C.text],
+      [series.remLabel || "REM", sRem, C.accent],
+      ["REM últ. encuesta", sFut, C.cat.amber],
+      ["Corregido", sCorr, C.green],
+    ];
+    chart.subscribeCrosshairMove((param) => {
+      if (!legend) return;
+      if (!param || !param.time || !param.seriesData) { legend.innerHTML = ""; return; }
+      const meses = ["ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sep", "oct", "nov", "dic"];
+      const t = typeof param.time === "string" ? param.time : `${param.time.year}-${String(param.time.month).padStart(2, "0")}-01`;
+      const parts = [`<span style="color:${C.dim}">${meses[+t.slice(5, 7) - 1]}-${t.slice(2, 4)}</span>`];
+      for (const [label, s, color] of entries) {
+        const v = param.seriesData.get(s);
+        if (v && v.value != null) parts.push(`<span style="color:${color};font-weight:600">${label}: $ ${fmtL(v.value)}</span>`);
+      }
+      legend.innerHTML = parts.length > 1 ? parts.join('<span style="color:' + C.dim + '"> · </span>') : "";
+    });
+
+    return () => { chart.remove(); };
+  }, [series, useLog, rangeYears, height]);
+
+  return (
+    <div style={{ position: "relative" }}>
+      <div ref={legendRef} style={{ position: "absolute", top: 4, left: 8, zIndex: 3, fontSize: 11, fontVariantNumeric: "tabular-nums", pointerEvents: "none", background: "rgba(10,14,22,0.75)", padding: "2px 6px", borderRadius: 4 }} />
+      <div ref={containerRef} style={{ width: "100%", height }} />
+    </div>
+  );
 }
 
 function RemTcModule() {
@@ -22878,13 +22957,12 @@ function RemTcModule() {
       stats[h] = { all: mk(errs[h].all), era: mk(errs[h].era) };
     }
 
-    // serie del gráfico principal: real + REM hace `horizon` meses
+    // series del gráfico (lightweight-charts): real + REM hace `horizon` meses
     const months = Array.from(realByMonth.keys()).sort();
-    const chart = months.map((m) => ({
-      m,
-      real: realByMonth.get(m),
-      rem: fcByTargetH.get(m + "|" + horizon) ?? null,
-    }));
+    const tvReal = months.map((m) => ({ time: m + "-01", value: realByMonth.get(m) }));
+    const tvRem = months
+      .map((m) => { const v = fcByTargetH.get(m + "|" + horizon); return v != null ? { time: m + "-01", value: v } : null; })
+      .filter(Boolean);
 
     // futuro: pronósticos de la última encuesta (meses sin dato real),
     // con versión corregida por el sesgo del régimen actual a su horizonte
@@ -22907,6 +22985,33 @@ function RemTcModule() {
     }
     future.sort((a, b) => (a.m < b.m ? -1 : 1));
 
+    // las líneas futuras arrancan empalmadas al último dato real
+    const seam = { time: lastRealMonth + "-01", value: realByMonth.get(lastRealMonth) };
+    const tvFut = future.length ? [seam, ...future.map((f) => ({ time: f.m + "-01", value: f.remFut }))] : [];
+    const tvCorr = future.length ? [seam, ...future.map((f) => ({ time: f.m + "-01", value: f.remCorr }))] : [];
+
+    // mes EN CURSO: qué decía el REM, cómo viene el promedio acumulado y
+    // cierre estimado (acumulado + resto del mes al spot actual, ~20 ruedas)
+    const todayMonth = new Date().toISOString().slice(0, 7);
+    let curMonth = null;
+    const lastRow = real[real.length - 1];
+    if (lastRow && lastRow.month.slice(0, 7) === todayMonth) {
+      const h = remMonthDiff(lastSurvey, lastRow.month);
+      const med = fcByTargetH.get(todayMonth + "|" + h) ?? null;
+      const st = stats[h]?.era && stats[h].era.n >= 6 ? stats[h].era : stats[h]?.all;
+      const daysIn = Number(lastRow.days) || 0;
+      const mtd = Number(lastRow.avg_a3500);
+      const spot = Number(lastRow.eom_a3500);
+      const restDays = Math.max(0, 20 - daysIn);
+      const estClose = (mtd * daysIn + spot * restDays) / Math.max(1, daysIn + restDays);
+      curMonth = {
+        m: todayMonth, h,
+        rem: med,
+        corr: med != null && st ? med / (1 + st.bias) : med,
+        mtd, daysIn, estClose,
+      };
+    }
+
     // errores mes a mes para el subgráfico (al horizonte elegido)
     const errSeries = months
       .map((m) => {
@@ -22916,7 +23021,8 @@ function RemTcModule() {
       })
       .filter(Boolean);
 
-    return { chart, future, errSeries, stats, lastSurvey, lastRealMonth };
+    const tv = { real: tvReal, rem: tvRem, fut: tvFut, corr: tvCorr, remLabel: `REM ${horizon}m antes` };
+    return { tv, future, errSeries, stats, lastSurvey, lastRealMonth, curMonth };
   }, [rem, real, horizon]);
 
   const fmtN = (n, d = 0) => Number(n).toLocaleString("es-AR", { minimumFractionDigits: d, maximumFractionDigits: d });
@@ -22925,25 +23031,6 @@ function RemTcModule() {
     const meses = ["ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sep", "oct", "nov", "dic"];
     return `${meses[+m.slice(5, 7) - 1]}-${m.slice(2, 4)}`;
   };
-
-  // serie final del gráfico (histórico + futuro), recortada al rango elegido
-  const display = useMemo(() => {
-    if (!model) return [];
-    const cutoff = (() => {
-      const d = new Date();
-      d.setFullYear(d.getFullYear() - rangeYears);
-      return d.toISOString().slice(0, 7);
-    })();
-    const hist = model.chart.filter((p) => p.m >= cutoff);
-    const fut = model.future.map((f) => ({ m: f.m, real: null, rem: null, remFut: f.remFut, remCorr: f.remCorr }));
-    if (hist.length && fut.length) {
-      // empalmar las líneas futuras al último real
-      const lastH = hist[hist.length - 1];
-      lastH.remFut = lastH.real;
-      lastH.remCorr = lastH.real;
-    }
-    return [...hist, ...fut];
-  }, [model, rangeYears]);
 
   const st = model?.stats?.[horizon];
   const useLog = rangeYears >= 5;
@@ -23006,41 +23093,20 @@ function RemTcModule() {
             ))}
           </div>
 
-          {/* Gráfico principal */}
+          {/* Gráfico principal (lightweight-charts: zoom rueda + paneo arrastre) */}
           <div style={{ border: `1px solid ${C.border}`, borderRadius: 6, background: C.panel, padding: 16, marginBottom: 14 }}>
-            <div style={{ fontSize: 11, color: C.muted, marginBottom: 8 }}>
-              $/USD mayorista (prom. mensual) — <span style={{ color: C.text, fontWeight: 600 }}>real</span> vs{" "}
-              <span style={{ color: C.accent, fontWeight: 600 }}>lo que el REM pronosticaba {horizon} {horizon === 1 ? "mes" : "meses"} antes</span>
-              {model.future.length > 0 && (
-                <> · <span style={{ color: C.cat.amber, fontWeight: 600 }}>REM actual ({fmtMonth(model.lastSurvey.slice(0, 7))})</span> y{" "}
-                <span style={{ color: C.green, fontWeight: 600 }}>corregido por sesgo del régimen</span></>
-              )}
+            <div className="flex items-center justify-between" style={{ marginBottom: 8, gap: 12, flexWrap: "wrap" }}>
+              <div style={{ fontSize: 11, color: C.muted }}>
+                $/USD mayorista (prom. mensual) — <span style={{ color: C.text, fontWeight: 600 }}>real</span> vs{" "}
+                <span style={{ color: C.accent, fontWeight: 600 }}>lo que el REM pronosticaba {horizon} {horizon === 1 ? "mes" : "meses"} antes</span>
+                {model.future.length > 0 && (
+                  <> · <span style={{ color: C.cat.amber, fontWeight: 600 }}>REM actual ({fmtMonth(model.lastSurvey.slice(0, 7))})</span> y{" "}
+                  <span style={{ color: C.green, fontWeight: 600 }}>corregido por sesgo del régimen</span></>
+                )}
+              </div>
+              <span style={{ fontSize: 10, color: C.dim }}>rueda = zoom · arrastrar = mover · doble clic eje = reset</span>
             </div>
-            <ResponsiveContainer width="100%" height={400}>
-              <ComposedChart data={display} margin={{ top: 6, right: 12, bottom: 4, left: 8 }}>
-                <CartesianGrid stroke={C.border} strokeDasharray="3 3" vertical={false} />
-                <XAxis dataKey="m" tick={{ fontSize: 10, fill: C.dim }} tickFormatter={fmtMonth} minTickGap={40} />
-                <YAxis
-                  tick={{ fontSize: 10, fill: C.dim }}
-                  scale={useLog ? "log" : "auto"}
-                  domain={["auto", "auto"]}
-                  tickFormatter={(v) => fmtN(v)}
-                  width={62}
-                />
-                <RechartsTooltip
-                  contentStyle={{ background: C.bg, border: `1px solid ${C.border}`, borderRadius: 6, fontSize: 11 }}
-                  labelFormatter={fmtMonth}
-                  formatter={(value, name) => [
-                    `$ ${fmtN(value, 1)}`,
-                    { real: "Mayorista real", rem: `REM ${horizon}m antes`, remFut: "REM última encuesta", remCorr: "REM corregido" }[name] || name,
-                  ]}
-                />
-                <Line type="monotone" dataKey="real" stroke={C.text} strokeWidth={2} dot={false} connectNulls={false} />
-                <Line type="monotone" dataKey="rem" stroke={C.accent} strokeWidth={1.6} dot={false} connectNulls={false} />
-                <Line type="monotone" dataKey="remFut" stroke={C.cat.amber} strokeWidth={1.6} strokeDasharray="5 4" dot={{ r: 2.5 }} connectNulls />
-                <Line type="monotone" dataKey="remCorr" stroke={C.green} strokeWidth={1.6} strokeDasharray="2 3" dot={{ r: 2.5 }} connectNulls />
-              </ComposedChart>
-            </ResponsiveContainer>
+            <RemTvChart series={model.tv} useLog={useLog} rangeYears={rangeYears} height={400} />
           </div>
 
           {/* Subgráfico: error % mes a mes */}
@@ -23064,11 +23130,12 @@ function RemTcModule() {
             </ResponsiveContainer>
           </div>
 
-          {/* Proyección corregida */}
-          {model.future.length > 0 && (
+          {/* Proyección corregida — ESTO es el "predictor": última encuesta
+              ajustada por el sesgo histórico del régimen, con su error típico */}
+          {(model.future.length > 0 || model.curMonth) && (
             <div style={{ border: `1px solid ${C.border}`, borderRadius: 6, background: C.panel, padding: 16, marginBottom: 14 }}>
               <div style={{ fontSize: 11, color: C.muted, marginBottom: 10 }}>
-                Última encuesta ({fmtMonth(model.lastSurvey.slice(0, 7))}) y proyección corregida por el sesgo del régimen actual
+                Proyección: última encuesta ({fmtMonth(model.lastSurvey.slice(0, 7))}) corregida por el sesgo del régimen actual
               </div>
               <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
                 <thead>
@@ -23080,6 +23147,22 @@ function RemTcModule() {
                   </tr>
                 </thead>
                 <tbody>
+                  {model.curMonth && (
+                    <tr style={{ borderTop: `1px solid ${C.border}`, background: "rgba(124,156,255,0.05)" }}>
+                      <td style={{ padding: "5px 8px", color: C.text, fontWeight: 600 }}>
+                        {fmtMonth(model.curMonth.m)} <span style={{ color: C.accent, fontSize: 10 }}>(en curso)</span>
+                      </td>
+                      <td style={{ padding: "5px 8px", textAlign: "right", color: C.cat.amber, fontVariantNumeric: "tabular-nums" }}>
+                        {model.curMonth.rem != null ? `$ ${fmtN(model.curMonth.rem, 1)}` : "—"}
+                      </td>
+                      <td style={{ padding: "5px 8px", textAlign: "right", color: C.green, fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>
+                        $ {fmtN(model.curMonth.estClose, 1)} <span style={{ color: C.dim, fontWeight: 400, fontSize: 10 }}>cierre est.</span>
+                      </td>
+                      <td style={{ padding: "5px 8px", textAlign: "right", color: C.dim, fontVariantNumeric: "tabular-nums", fontSize: 11 }}>
+                        va $ {fmtN(model.curMonth.mtd, 1)} prom. ({model.curMonth.daysIn} ruedas) · resto al spot
+                      </td>
+                    </tr>
+                  )}
                   {model.future.map((f) => (
                     <tr key={f.m} style={{ borderTop: `1px solid ${C.border}` }}>
                       <td style={{ padding: "5px 8px", color: C.text, fontWeight: 600 }}>{fmtMonth(f.m)}</td>
