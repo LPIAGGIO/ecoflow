@@ -23153,7 +23153,7 @@ function RemVsRealWidget({ futurePrices = {} }) {
           <tr style={{ color: C.dim, fontSize: 9.5, textTransform: "uppercase", letterSpacing: "0.1em" }}>
             <th style={{ textAlign: "left", padding: "3px 6px" }}>Mes</th>
             <th style={{ textAlign: "right", padding: "3px 6px" }}>REM {fmtMonth(model.lastSurvey.slice(0, 7))}</th>
-            <th style={{ textAlign: "right", padding: "3px 6px" }}>Corregido</th>
+            <th style={{ textAlign: "right", padding: "3px 6px" }}>Est. Midas</th>
             <th style={{ textAlign: "right", padding: "3px 6px" }}>Futuro {marketOpen ? "· live" : "· settle"}</th>
             <th style={{ textAlign: "right", padding: "3px 6px" }}>vs REM</th>
           </tr>
@@ -23199,7 +23199,7 @@ function RemVsRealWidget({ futurePrices = {} }) {
       })()}
 
       <div style={{ fontSize: 10, color: C.dim, lineHeight: 1.5, marginTop: "auto" }}>
-        Corregido = última encuesta ({fmtMonth(model.lastSurvey.slice(0, 7))}) ajustada por el sesgo del régimen.
+        <strong style={{ color: C.muted }}>Est. Midas</strong> = cálculo propio de esta app (no lo publica nadie): la encuesta {fmtMonth(model.lastSurvey.slice(0, 7))} del REM ajustada por el error promedio que el REM viene teniendo en el régimen actual, medido contra 10 años de datos oficiales.
         {st ? ` A 3m el REM erra ±${(st.mae * 100).toFixed(1)}% típico.` : ""}{" "}
         <span style={{ color: C.red }}>vs REM rojo</span> = el futuro pricea más devaluación que el consenso.
         Ojo: el futuro liquida contra el A3500 de fin de mes; el REM pronostica el promedio mensual (~medio mes de crawl de diferencia).
@@ -23333,7 +23333,7 @@ function RemTcModule() {
                   <tr style={{ color: C.dim, fontSize: 10, textTransform: "uppercase", letterSpacing: "0.1em" }}>
                     <th style={{ textAlign: "left", padding: "4px 8px" }}>Mes</th>
                     <th style={{ textAlign: "right", padding: "4px 8px" }}>REM mediana</th>
-                    <th style={{ textAlign: "right", padding: "4px 8px" }}>Corregido</th>
+                    <th style={{ textAlign: "right", padding: "4px 8px" }}>Est. Midas (REM corregido)</th>
                     <th style={{ textAlign: "right", padding: "4px 8px" }}>± error típico</th>
                   </tr>
                 </thead>
