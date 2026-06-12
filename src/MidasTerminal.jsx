@@ -20645,7 +20645,7 @@ const DASHBOARD_WIDGET_IDS = [
  * 3 lados (futuro sube / spot baja / caución baja) y suele PERSISTIR por
  * oferta estructural de exportadores en la parte corta.
  */
-function DolarCompassWidget({ fx, dlrCurve }) {
+function DolarCompassWidget({ fx, dlrCurve, remIpc }) {
   const { rem, real } = useRemVsReal();
   const remModel = useMemo(() => buildRemVsRealModel(rem, real, 3), [rem, real]);
 
@@ -20674,6 +20674,30 @@ function DolarCompassWidget({ fx, dlrCurve }) {
     return { front: f, frontShort: s };
   }, [dlrCurve]);
   const caucion = dlrCurve?.caucionRate ?? null;
+
+  // Posición del spot dentro de la banda cambiaria HOY (reusa projectBand,
+  // la misma proyección que el módulo Bandas: crawl 1%/mes hasta dic-25,
+  // luego inflación T-2 del REM con fallback 2%).
+  const band = useMemo(() => {
+    if (!(spot > 0)) return null;
+    try {
+      const today = new Date().toLocaleDateString("en-CA", { timeZone: "America/Argentina/Buenos_Aires" });
+      const piso = projectBand(today, "floor", remIpc || {});
+      const techo = projectBand(today, "ceiling", remIpc || {});
+      if (!(techo > piso)) return null;
+      const pos = Math.min(1, Math.max(0, (spot - piso) / (techo - piso)));
+      return { piso, techo, pos };
+    } catch (e) { return null; }
+  }, [spot, remIpc]);
+
+  // Dirección: el spot contra el promedio del mes que va — si está arriba,
+  // viene empujando hacia el techo; abajo, aflojando hacia el piso.
+  const drift = useMemo(() => {
+    const mtd = remModel?.curMonth?.mtd;
+    if (!(mtd > 0) || !(spot > 0)) return null;
+    const d = (spot / mtd - 1) * 100;
+    return { pct: d, dir: d > 0.15 ? "up" : d < -0.15 ? "down" : "flat" };
+  }, [remModel, spot]);
 
   // ── Señales con regla explícita ──
   const signals = useMemo(() => {
@@ -20746,8 +20770,25 @@ function DolarCompassWidget({ fx, dlrCurve }) {
       else out.push({ tone: "warn", title: `Canje negativo (${fmtPct(cj)})`, detail: "CCL debajo del MEP: anomalía — conviene canjear hacia afuera." });
     }
 
+    // 5) Extremos de banda: solo habla cuando el spot está pegado a un borde
+    if (band) {
+      if (band.pos >= 0.85) {
+        out.push({
+          tone: "warn",
+          title: `Spot pegado al TECHO de la banda (${Math.round(band.pos * 100)}%)`,
+          detail: "Zona donde el BCRA vende reservas para defender: o el techo aguanta (spot rebota) o el régimen se testea. Subir el nivel de alerta.",
+        });
+      } else if (band.pos <= 0.15) {
+        out.push({
+          tone: "buy",
+          title: `Spot pegado al PISO de la banda (${Math.round(band.pos * 100)}%)`,
+          detail: "Zona donde el BCRA compra (acumula reservas): piso firme abajo del spot — el riesgo a la baja del dólar está acotado por diseño.",
+        });
+      }
+    }
+
     return out;
-  }, [front, frontShort, caucion, spot, mep, ccl, remModel]);
+  }, [front, frontShort, caucion, spot, mep, ccl, remModel, band]);
 
   // Síntesis: carry + momentum definen el sesgo en futuros
   const bias = useMemo(() => {
@@ -20787,6 +20828,45 @@ function DolarCompassWidget({ fx, dlrCurve }) {
           </div>
         ))}
       </div>
+
+      {/* Posición en la banda cambiaria */}
+      {band && (
+        <div style={{ border: `1px solid ${C.border}`, borderRadius: 6, padding: "8px 10px" }}>
+          <div className="flex items-baseline justify-between" style={{ marginBottom: 6 }}>
+            <span style={{ fontSize: 9.5, color: C.green, fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>
+              PISO $ {fmtN(band.piso, 0)}
+            </span>
+            <span style={{ fontSize: 10, color: C.muted }}>
+              spot al <span style={{ color: C.text, fontWeight: 700 }}>{Math.round(band.pos * 100)}%</span> de la banda
+              {drift && drift.dir !== "flat" && (
+                <span style={{ color: drift.dir === "up" ? C.red : C.green, fontWeight: 700 }}>
+                  {" "}{drift.dir === "up" ? "▲ empujando al techo" : "▼ aflojando al piso"}
+                </span>
+              )}
+              {drift && drift.dir === "flat" && <span style={{ color: C.dim }}> · estable</span>}
+            </span>
+            <span style={{ fontSize: 9.5, color: C.red, fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>
+              TECHO $ {fmtN(band.techo, 0)}
+            </span>
+          </div>
+          <div style={{ position: "relative", height: 10, borderRadius: 5, background: `linear-gradient(90deg, ${C.green} 0%, ${C.cat.yellow} 55%, ${C.red} 100%)`, opacity: 0.9 }}>
+            <div style={{
+              position: "absolute", top: -3, bottom: -3,
+              left: `calc(${(band.pos * 100).toFixed(1)}% - 2px)`,
+              width: 4, borderRadius: 2, background: C.text,
+              boxShadow: "0 0 6px rgba(255,255,255,0.9)",
+            }} />
+          </div>
+          <div className="flex justify-between" style={{ marginTop: 5 }}>
+            <span style={{ fontSize: 9.5, color: C.dim, fontVariantNumeric: "tabular-nums" }}>
+              al piso −{(((spot - band.piso) / spot) * 100).toFixed(1)}%
+            </span>
+            <span style={{ fontSize: 9.5, color: C.dim, fontVariantNumeric: "tabular-nums" }}>
+              al techo +{(((band.techo - spot) / spot) * 100).toFixed(1)}%
+            </span>
+          </div>
+        </div>
+      )}
 
       {/* Sesgo */}
       <div className="flex items-center" style={{ gap: 8, border: `1px solid ${bias.color === C.dim ? C.border : bias.color}`, borderRadius: 6, padding: "8px 10px" }}>
@@ -21091,7 +21171,7 @@ function DashboardModule() {
             { id: "macro", title: "Indicadores Macro", render: ({ expanded }) => <BcraIndicatorsWidget expanded={expanded} /> },
             { id: "rem-dolar", title: "REM vs Realidad · Dólar", render: () => <RemVsRealWidget futurePrices={futurePrices} /> },
             { id: "pulso", title: "Pulso de Mercado · Noticias", render: () => <MarketPulseWidget fx={fx} dlrCurve={dlrCurve} /> },
-            { id: "brujula", title: "Brújula Dólar · ¿Qué está barato?", render: () => <DolarCompassWidget fx={fx} dlrCurve={dlrCurve} /> },
+            { id: "brujula", title: "Brújula Dólar · ¿Qué está barato?", render: () => <DolarCompassWidget fx={fx} dlrCurve={dlrCurve} remIpc={remIpc} /> },
             { id: "alertas-activas", title: "Alertas activas", render: () => (
               <div style={{ height: "100%", minHeight: 240, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 8, padding: "20px 24px", textAlign: "center" }}>
                 <span style={{ fontSize: 10, color: C.dim, letterSpacing: "0.18em", textTransform: "uppercase", fontWeight: 600 }}>Próximamente</span>
