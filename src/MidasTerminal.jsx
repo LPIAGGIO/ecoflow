@@ -20532,8 +20532,164 @@ function NavCurveSection({ userId, C, compact = false }) {
 const DASHBOARD_ORDER_LS_KEY = "midas:dashboard-order-v1";
 const DASHBOARD_WIDGET_IDS = [
   "curva-dlr", "cobertura-dlr", "mi-cobertura", "fx", "resumen",
-  "flujo", "nav", "carry", "macro", "rem-dolar", "alertas-activas",
+  "flujo", "nav", "carry", "macro", "rem-dolar", "pulso", "alertas-activas",
 ];
+
+/* ─────────────── Pulso de Mercado (Dashboard) ───────────────
+ * Noticias de mercado clasificadas (tabla market_news, la llena el worker
+ * news-pulse del VPS cada 30 min desde Google News RSS) + termómetro
+ * rápido calculado acá con datos de mercado en vivo que ya fluyen al
+ * Dashboard (brecha MEP/blue contra mayorista, deval implícita de la
+ * curva DLR vs caución). Las flechas de las noticias salen de keywords
+ * (sin LLM): USD↑ = la noticia presiona el dólar para arriba; MERVAL↑ =
+ * alcista para acciones/bonos. Sin señal clara → sin flecha.
+ */
+function useMarketNews() {
+  const [news, setNews] = useState(null);
+  const [error, setError] = useState(null);
+  const [refreshKey, setRefreshKey] = useState(0);
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const since = new Date(Date.now() - 36 * 3600 * 1000).toISOString();
+      const { data, error: err } = await supabase
+        .from("market_news")
+        .select("title, link, source, published_at, dolar_dir, merval_dir, relevance, topics")
+        .gte("fetched_at", since)
+        .order("published_at", { ascending: false })
+        .limit(120);
+      if (cancelled) return;
+      if (err) setError(err.message);
+      else setNews(data || []);
+    })();
+    return () => { cancelled = true; };
+  }, [refreshKey]);
+  useEffect(() => {
+    const interval = setInterval(() => {
+      if (document.visibilityState !== "visible") return;
+      setRefreshKey((k) => k + 1);
+    }, 10 * 60 * 1000);
+    const onVisible = () => { if (document.visibilityState === "visible") setRefreshKey((k) => k + 1); };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => { clearInterval(interval); document.removeEventListener("visibilitychange", onVisible); };
+  }, []);
+  return { news, error, loading: !error && news == null };
+}
+
+function MarketPulseWidget({ fx, dlrCurve }) {
+  const { news, error, loading } = useMarketNews();
+
+  // ── Termómetro: mercado en vivo, no opiniones ──
+  const gauges = useMemo(() => {
+    const out = [];
+    const may = fx?.mayorista?.mid;
+    const mep = fx?.mep?.mid;
+    const blue = fx?.blue?.mid;
+    const lvl = (v, warn, hot) => (v == null ? null : v >= hot ? 2 : v >= warn ? 1 : 0);
+    if (may > 0 && mep > 0) {
+      const v = (mep / may - 1) * 100;
+      out.push({ label: "Brecha MEP", value: `${v >= 0 ? "+" : ""}${v.toFixed(1)}%`, level: lvl(v, 2, 5) });
+    }
+    if (may > 0 && blue > 0) {
+      const v = (blue / may - 1) * 100;
+      out.push({ label: "Brecha blue", value: `${v >= 0 ? "+" : ""}${v.toFixed(1)}%`, level: lvl(v, 3, 6) });
+    }
+    if (dlrCurve?.annualDevRate != null && Number.isFinite(dlrCurve?.caucionRate)) {
+      const v = dlrCurve.annualDevRate * 100 - dlrCurve.caucionRate;
+      out.push({ label: "DLR − caución", value: `${v >= 0 ? "+" : ""}${v.toFixed(1)} pts`, level: lvl(v, 3, 8) });
+    }
+    return out;
+  }, [fx, dlrCurve]);
+  const worst = gauges.reduce((m, g) => Math.max(m, g.level ?? 0), 0);
+  const lightColor = worst === 0 ? C.green : worst === 1 ? C.cat.amber : C.red;
+  const lightLabel = worst === 0 ? "CALMO" : worst === 1 ? "TENSO" : "CALIENTE";
+
+  // ── Noticias: recientes y con señal primero ──
+  const topNews = useMemo(() => {
+    if (!news) return [];
+    const scored = news.map((n) => {
+      const ageH = n.published_at ? (Date.now() - new Date(n.published_at).getTime()) / 3600000 : 36;
+      // score: relevancia del clasificador − decaimiento por edad + bonus si tiene flecha
+      const score = (n.relevance || 0) - ageH * 1.5 + (n.dolar_dir !== 0 || n.merval_dir !== 0 ? 15 : 0);
+      return { ...n, score, ageH };
+    });
+    // dedup laxo por primeras 7 palabras (las cadenas replican titulares)
+    const seen = new Set();
+    const out = [];
+    for (const n of scored.sort((a, b) => b.score - a.score)) {
+      const key = n.title.toLowerCase().split(/\s+/).slice(0, 7).join(" ");
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push(n);
+      if (out.length >= 7) break;
+    }
+    return out;
+  }, [news]);
+
+  const ago = (h) => (h < 1 ? `${Math.max(1, Math.round(h * 60))}m` : h < 24 ? `${Math.round(h)}h` : `${Math.round(h / 24)}d`);
+  const Tag = ({ txt, good }) => (
+    <span style={{ fontSize: 8.5, fontWeight: 700, letterSpacing: "0.06em", color: good ? C.green : C.red, border: `1px solid ${good ? C.green : C.red}`, borderRadius: 3, padding: "0px 4px", flexShrink: 0 }}>
+      {txt}
+    </span>
+  );
+
+  return (
+    <div style={{ padding: "12px 16px", display: "flex", flexDirection: "column", gap: 10, height: "100%" }}>
+      {/* Termómetro en vivo */}
+      <div className="flex items-center" style={{ gap: 10, flexWrap: "wrap", border: `1px solid ${C.border}`, borderRadius: 6, padding: "8px 10px" }}>
+        <span className="flex items-center" style={{ gap: 6 }}>
+          <span style={{ width: 9, height: 9, borderRadius: "50%", background: lightColor, boxShadow: `0 0 6px ${lightColor}` }} />
+          <span style={{ fontSize: 11, fontWeight: 700, color: lightColor }}>{lightLabel}</span>
+        </span>
+        {gauges.map((g) => (
+          <span key={g.label} style={{ fontSize: 10.5, color: C.dim }}>
+            {g.label}{" "}
+            <span style={{ fontWeight: 700, fontVariantNumeric: "tabular-nums", color: g.level === 2 ? C.red : g.level === 1 ? C.cat.amber : C.text }}>
+              {g.value}
+            </span>
+          </span>
+        ))}
+        {gauges.length === 0 && <span style={{ fontSize: 10.5, color: C.dim }}>esperando datos de FX…</span>}
+      </div>
+
+      {/* Noticias */}
+      {loading ? (
+        <div className="flex items-center justify-center" style={{ minHeight: 160 }}>
+          <Loader2 size={18} color={C.muted} className="eco-spin" strokeWidth={1.5} />
+        </div>
+      ) : error ? (
+        <div style={{ fontSize: 11, color: C.red }}>Error leyendo noticias: {error}</div>
+      ) : topNews.length === 0 ? (
+        <div style={{ fontSize: 11, color: C.muted }}>Sin noticias de mercado en las últimas 36 horas.</div>
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column" }}>
+          {topNews.map((n) => (
+            <a key={n.link} href={n.link} target="_blank" rel="noopener noreferrer"
+              className="flex items-start"
+              style={{ gap: 8, padding: "6px 2px", borderTop: `1px solid ${C.border}`, textDecoration: "none" }}>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 11.5, color: C.text, lineHeight: 1.4 }}>{n.title}</div>
+                <div style={{ fontSize: 9.5, color: C.dim, marginTop: 2 }}>{n.source} · hace {ago(n.ageH)}</div>
+              </div>
+              <div className="flex" style={{ gap: 4, paddingTop: 2 }}>
+                {n.dolar_dir === 1 && <Tag txt="USD↑" good={false} />}
+                {n.dolar_dir === -1 && <Tag txt="USD↓" good={true} />}
+                {n.merval_dir === 1 && <Tag txt="MERVAL↑" good={true} />}
+                {n.merval_dir === -1 && <Tag txt="MERVAL↓" good={false} />}
+              </div>
+            </a>
+          ))}
+        </div>
+      )}
+
+      <div style={{ fontSize: 10, color: C.dim, lineHeight: 1.5, marginTop: "auto" }}>
+        Termómetro: mercado en vivo (brechas y futuros — plata real, no opiniones). Flechas: clasificación
+        automática de Midas por palabras clave; <span style={{ color: C.red }}>USD↑</span> = la noticia presiona
+        el dólar. Sin señal clara, sin flecha. Fuente: Google News (medios AR), cada 30 min.
+      </div>
+    </div>
+  );
+}
 function loadDashboardOrder(allIds) {
   let saved = [];
   try { saved = JSON.parse(localStorage.getItem(DASHBOARD_ORDER_LS_KEY) || "[]"); } catch (e) { saved = []; }
@@ -20634,6 +20790,7 @@ function DashboardModule() {
             { id: "carry", title: "Carry Trade · Top TEA", render: ({ expanded }) => <CarryTradeWidget expanded={expanded} /> },
             { id: "macro", title: "Indicadores Macro", render: ({ expanded }) => <BcraIndicatorsWidget expanded={expanded} /> },
             { id: "rem-dolar", title: "REM vs Realidad · Dólar", render: () => <RemVsRealWidget futurePrices={futurePrices} /> },
+            { id: "pulso", title: "Pulso de Mercado · Noticias", render: () => <MarketPulseWidget fx={fx} dlrCurve={dlrCurve} /> },
             { id: "alertas-activas", title: "Alertas activas", render: () => (
               <div style={{ height: "100%", minHeight: 240, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 8, padding: "20px 24px", textAlign: "center" }}>
                 <span style={{ fontSize: 10, color: C.dim, letterSpacing: "0.18em", textTransform: "uppercase", fontWeight: 600 }}>Próximamente</span>
