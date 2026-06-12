@@ -20664,10 +20664,14 @@ function DolarCompassWidget({ fx, dlrCurve }) {
   // diferir 5+ pts de la de Matriz solo por el spot usado (caso real 12/06:
   // Matriz 16% vs Midas 21,8% con la MISMA fórmula). El segundo contrato
   // diluye esa sensibilidad a un tercio.
-  const front = useMemo(() => {
-    if (!dlrCurve?.points) return null;
+  const { front, frontShort } = useMemo(() => {
+    if (!dlrCurve?.points) return { front: null, frontShort: null };
     const alive = dlrCurve.points.filter((p) => p.expiryDays > 0 && p.tnaImplicitaPct != null);
-    return alive.find((p) => p.expiryDays >= 30) || alive[0] || null;
+    const f = alive.find((p) => p.expiryDays >= 30) || alive[0] || null;
+    // El contrato más corto se muestra como dato (para ver la brecha de
+    // tasas a lo largo de la curva), pero NO define la señal.
+    const s = f && alive[0] && alive[0].ticker !== f.ticker ? alive[0] : null;
+    return { front: f, frontShort: s };
   }, [dlrCurve]);
   const caucion = dlrCurve?.caucionRate ?? null;
 
@@ -20675,24 +20679,32 @@ function DolarCompassWidget({ fx, dlrCurve }) {
   const signals = useMemo(() => {
     const out = [];
 
-    // 1) Carry: caución − implícita del corto
+    // 1) Carry: caución − implícita del contrato señal (≥30d). El corto se
+    // muestra aparte como dato, para ver la brecha de tasas en la curva.
     if (front && caucion != null && front.vsCaucion != null) {
       const gap = front.vsCaucion; // caución − implícita (pts)
       const fair = spot > 0 ? spot * (1 + (caucion / 100) * (front.expiryDays / 365)) : null;
+      const shortInfo = frontShort
+        ? ` ${frontShort.ticker} (${frontShort.expiryDays}d): implícita ${fmtN(frontShort.tnaImplicitaPct)}% — hipersensible al spot, solo informativo.`
+        : "";
       if (gap >= 2) {
         out.push({
           tone: "buy",
-          title: `Futuro corto BARATO vs tasas (${front.ticker}: implícita ${fmtN(front.tnaImplicitaPct)}% vs caución ${fmtN(caucion)}%)`,
-          detail: `Estar comprado cuesta ${fmtN(gap)} pts menos que lo que rinde el peso. ${fair ? `Nivelaría con caución en $ ${fmtN(fair, 1)} (hoy $ ${fmtN(front.price, 1)}).` : ""} Ojo: el gap puede cerrar por suba del futuro, baja del spot o baja de caución — y suele persistir por oferta exportadora en la parte corta.`,
+          title: `Futuro BARATO vs tasas (${front.ticker}: implícita ${fmtN(front.tnaImplicitaPct)}% vs caución ${fmtN(caucion)}%)`,
+          detail: `Estar comprado cuesta ${fmtN(gap)} pts menos que lo que rinde el peso. ${fair ? `Nivelaría con caución en $ ${fmtN(fair, 1)} (hoy $ ${fmtN(front.price, 1)}).` : ""} Ojo: el gap puede cerrar por suba del futuro, baja del spot o baja de caución — y suele persistir por oferta exportadora en la parte corta.${shortInfo}`,
         });
       } else if (gap <= -2) {
         out.push({
           tone: "sell",
-          title: `Futuro corto CARO vs tasas (${front.ticker}: implícita ${fmtN(front.tnaImplicitaPct)}% vs caución ${fmtN(caucion)}%)`,
-          detail: `El vendedor captura ${fmtN(-gap)} pts sobre la caución: cash & carry (comprar contado + vender futuro) paga más que el peso.`,
+          title: `Futuro CARO vs tasas (${front.ticker}: implícita ${fmtN(front.tnaImplicitaPct)}% vs caución ${fmtN(caucion)}%)`,
+          detail: `El vendedor captura ${fmtN(-gap)} pts sobre la caución: cash & carry (comprar contado + vender futuro) paga más que el peso.${shortInfo}`,
         });
       } else {
-        out.push({ tone: "flat", title: `Carry neutral (${front.ticker}: implícita ${fmtN(front.tnaImplicitaPct)}% ≈ caución ${fmtN(caucion)}%)`, detail: "Sin ventaja de tasa para ninguno de los dos lados." });
+        out.push({
+          tone: "flat",
+          title: `Carry neutral (${front.ticker}: implícita ${fmtN(front.tnaImplicitaPct)}% ≈ caución ${fmtN(caucion)}%)`,
+          detail: `Sin ventaja de tasa para ninguno de los dos lados.${shortInfo}`,
+        });
       }
     }
 
@@ -20735,7 +20747,7 @@ function DolarCompassWidget({ fx, dlrCurve }) {
     }
 
     return out;
-  }, [front, caucion, spot, mep, ccl, remModel]);
+  }, [front, frontShort, caucion, spot, mep, ccl, remModel]);
 
   // Síntesis: carry + momentum definen el sesgo en futuros
   const bias = useMemo(() => {
