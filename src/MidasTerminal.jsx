@@ -20850,6 +20850,9 @@ function DolarCompassWidget({ fx, dlrCurve, remIpc }) {
             </span>
           </div>
           <div style={{ position: "relative", height: 10, borderRadius: 5, background: `linear-gradient(90deg, ${C.green} 0%, ${C.cat.yellow} 55%, ${C.red} 100%)`, opacity: 0.9 }}>
+            {/* tick de la MITAD de la banda */}
+            <div style={{ position: "absolute", top: -2, bottom: -2, left: "calc(50% - 1px)", width: 2, background: "rgba(255,255,255,0.45)" }} />
+            {/* marcador del spot */}
             <div style={{
               position: "absolute", top: -3, bottom: -3,
               left: `calc(${(band.pos * 100).toFixed(1)}% - 2px)`,
@@ -20857,9 +20860,13 @@ function DolarCompassWidget({ fx, dlrCurve, remIpc }) {
               boxShadow: "0 0 6px rgba(255,255,255,0.9)",
             }} />
           </div>
-          <div className="flex justify-between" style={{ marginTop: 5 }}>
+          <div className="flex items-baseline justify-between" style={{ marginTop: 5 }}>
             <span style={{ fontSize: 9.5, color: C.dim, fontVariantNumeric: "tabular-nums" }}>
               al piso −{(((spot - band.piso) / spot) * 100).toFixed(1)}%
+            </span>
+            <span style={{ fontSize: 9.5, color: C.muted, fontVariantNumeric: "tabular-nums" }}>
+              mitad <span style={{ color: C.text, fontWeight: 700 }}>$ {fmtN((band.piso + band.techo) / 2, 0)}</span>
+              <span style={{ color: C.dim }}> ({spot >= (band.piso + band.techo) / 2 ? "+" : "−"}{Math.abs((spot / ((band.piso + band.techo) / 2) - 1) * 100).toFixed(1)}% del spot)</span>
             </span>
             <span style={{ fontSize: 9.5, color: C.dim, fontVariantNumeric: "tabular-nums" }}>
               al techo +{(((band.techo - spot) / spot) * 100).toFixed(1)}%
