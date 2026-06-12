@@ -9140,7 +9140,7 @@ function ValuationToggle({ value, onChange }) {
  */
 function computeRealizedTodayContado(positions, bondPrices, stockPrices, futurePrices, fciPrices, valuationCurrency, fx) {
   if (!fx || !positions || !isTradingDayAndMarketOpened()) return 0;
-  const all = consolidatePositions(positions, bondPrices, futurePrices, fciPrices);
+  const all = consolidatePositions(positions, bondPrices, futurePrices, fciPrices, stockPrices);
   const closedToday = filterClosedToToday(all.filter((g) => g.isClosed), futurePrices);
   let sum = 0;
   for (const g of closedToday) {
@@ -9547,7 +9547,7 @@ function TotalCard({ positions, fx, bondPrices, futurePrices, stockPrices, fciPr
 function DistributionCard({ positions, fx, bondPrices, futurePrices, stockPrices, fciPrices, valuationCurrency, balanceByCurrency, iolCashByCurrency, futureAdjLookup, view, onViewChange }) {
   // Vista "Instrumentos": donut con categorías + cash como una porción más.
   const instrumentSlices = useMemo(() => {
-    const groups = groupByCategory(positions, fx, valuationCurrency, bondPrices, fciPrices);
+    const groups = groupByCategory(positions, fx, valuationCurrency, bondPrices, fciPrices, stockPrices);
 
     // Cash agregado: convertimos cada moneda a la valuationCurrency y sumamos.
     let cashTotal = 0;
@@ -9617,7 +9617,7 @@ function DistributionCard({ positions, fx, bondPrices, futurePrices, stockPrices
   // porción aparte "Efectivo". Los colores son los del catálogo de
   // brokers, para que el donut matchee los badges de la tabla.
   const brokerSlices = useMemo(() => {
-    const byBroker = groupByBroker(positions, fx, valuationCurrency, bondPrices, fciPrices);
+    const byBroker = groupByBroker(positions, fx, valuationCurrency, bondPrices, fciPrices, stockPrices);
 
     // Cash disponible de IOL → suma al bucket de IOL.
     let iolCash = 0;
@@ -11153,7 +11153,7 @@ function computePortfolioTotals(positions, fx, valuationCurrency, bondPrices, fu
   // Sumando linealmente, el total queda correcto porque las cerradas
   // aportan SOLO el P&L (sin doble-contar capital).
   if (consolidableSplitPositions.length > 0) {
-    const groups = consolidatePositions(consolidableSplitPositions, bondPrices, futurePrices);
+    const groups = consolidatePositions(consolidableSplitPositions, bondPrices, futurePrices, undefined, stockPrices);
     for (const g of groups) {
       if (g.valueAtMarket == null) {
         unvalued++;
@@ -11275,7 +11275,7 @@ function computePortfolioTotals(positions, fx, valuationCurrency, bondPrices, fu
 }
 
 
-function groupByCategory(positions, fx, valuationCurrency, bondPrices, fciPrices) {
+function groupByCategory(positions, fx, valuationCurrency, bondPrices, fciPrices, stockPrices) {
   const result = {};
 
   // Excluir futuros (su valor es solo P&L mark-to-market, no es wealth
@@ -11289,7 +11289,7 @@ function groupByCategory(positions, fx, valuationCurrency, bondPrices, fciPrices
   // arregla el bug de que una venta del mismo ticker SUMABA al donut
   // en lugar de restar (porque positionValueAtMarket no respeta
   // operation_type='sell').
-  const groups = consolidatePositions(nonFuture, bondPrices, undefined, fciPrices);
+  const groups = consolidatePositions(nonFuture, bondPrices, undefined, fciPrices, stockPrices);
   for (const g of groups) {
     if (g.valueAtMarket == null) continue;
     const v = convertValue(g.valueAtMarket, g.currency || "ARS", valuationCurrency, fx);
@@ -11300,14 +11300,14 @@ function groupByCategory(positions, fx, valuationCurrency, bondPrices, fciPrices
   return result;
 }
 
-function groupByCurrency(positions, fx, valuationCurrency, bondPrices) {
+function groupByCurrency(positions, fx, valuationCurrency, bondPrices, stockPrices) {
   const result = {};
 
   // Mismo criterio: futuros excluidos del breakdown por moneda.
   const nonFuture = positions.filter((p) => p.instrument_type !== "future");
 
   // Vista consolidada — ver groupByCategory para detalle del fix.
-  const groups = consolidatePositions(nonFuture, bondPrices);
+  const groups = consolidatePositions(nonFuture, bondPrices, undefined, undefined, stockPrices);
   for (const g of groups) {
     if (g.valueAtMarket == null) continue;
     const v = convertValue(g.valueAtMarket, g.currency || "ARS", valuationCurrency, fx);
@@ -11330,7 +11330,7 @@ function groupByCurrency(positions, fx, valuationCurrency, bondPrices) {
  * broker por separado. Futuros excluidos, igual criterio que las otras
  * vistas del donut.
  */
-function groupByBroker(positions, fx, valuationCurrency, bondPrices, fciPrices) {
+function groupByBroker(positions, fx, valuationCurrency, bondPrices, fciPrices, stockPrices) {
   const result = {};
   const nonFuture = positions.filter((p) => p.instrument_type !== "future");
 
@@ -11341,7 +11341,7 @@ function groupByBroker(positions, fx, valuationCurrency, bondPrices, fciPrices) 
   }
 
   for (const [broker, ps] of Object.entries(byBroker)) {
-    const groups = consolidatePositions(ps, bondPrices, undefined, fciPrices);
+    const groups = consolidatePositions(ps, bondPrices, undefined, fciPrices, stockPrices);
     let sum = 0;
     for (const g of groups) {
       if (g.valueAtMarket == null) continue;
@@ -11734,7 +11734,7 @@ function getPositionMaturity(p) {
  * @param {Object} bondPrices  Mapa ticker → { price } de useBondPrices
  * @returns {Array} grupos consolidados, ordenados por valor de mercado desc
  */
-function consolidatePositions(positions, bondPrices, futurePrices, fciPrices) {
+function consolidatePositions(positions, bondPrices, futurePrices, fciPrices, stockPrices) {
   if (!positions?.length) return [];
 
   // Tipos donde NO consolidamos: cada operación queda individual.
@@ -12174,6 +12174,17 @@ function consolidatePositions(positions, bondPrices, futurePrices, fciPrices) {
           : entrySource === "mae_intraday" || entrySource === "mae_close"
             ? "mae"
             : "market";
+    } else if (
+      (g.instrument_type === "stock" || g.instrument_type === "cedear") &&
+      stockPrices &&
+      stockPrices[(g.ticker || "").toUpperCase().trim()]?.price > 0
+    ) {
+      // Acciones/CEDEARs: feed data912 (useStockPrices). Sin esta rama caían
+      // SIEMPRE a `ppp` (costo): ticker_isBondLike no cubre equity y la
+      // cadena nunca consultaba stockPrices. Latente hasta que Pablo cargó
+      // los primeros CEDEARs (11/06/2026) — nadie había tenido equity antes.
+      currentPrice = stockPrices[(g.ticker || "").toUpperCase().trim()].price;
+      priceSource = "data912";
     } else if (
       g.instrument_type === "fci" &&
       fciPrices &&
@@ -12933,7 +12944,7 @@ function computeDailyPnlByTicker(positions, bondPrices, futurePrices, stockPrice
     if (conv != null) add(ticker, conv);
   }
   try {
-    const all = consolidatePositions(positions, bondPrices, futurePrices, fciPrices);
+    const all = consolidatePositions(positions, bondPrices, futurePrices, fciPrices, stockPrices);
     const closedToday = filterClosedToToday(all.filter((g) => g.isClosed), futurePrices);
     for (const g of closedToday) {
       if (g.instrument_type === "future") continue; // futuros ya están en el MTM de arriba
@@ -14822,8 +14833,8 @@ function ConsolidatedSection({
   // Después separamos en `open` y `closed` para que cada una vaya a su
   // propia sección.
   const allConsolidated = useMemo(
-    () => consolidatePositions(filteredPositions, bondPrices, futurePrices, fciPrices),
-    [filteredPositions, bondPrices, futurePrices, fciPrices]
+    () => consolidatePositions(filteredPositions, bondPrices, futurePrices, fciPrices, stockPrices),
+    [filteredPositions, bondPrices, futurePrices, fciPrices, stockPrices]
   );
 
   // Modal state para acreditación de ajustes futuros pendientes.
