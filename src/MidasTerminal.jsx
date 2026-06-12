@@ -20604,24 +20604,41 @@ function MarketPulseWidget({ fx, dlrCurve }) {
   const lightColor = worst === 0 ? C.green : worst === 1 ? C.cat.amber : C.red;
   const lightLabel = worst === 0 ? "CALMO" : worst === 1 ? "TENSO" : "CALIENTE";
 
-  // ── Noticias: recientes y con señal primero ──
+  // ── Noticias: recientes y con señal primero, agrupadas por HISTORIA ──
+  // Los medios replican el mismo hecho con palabras distintas ("treparon" /
+  // "volaron" / "se dispararon"). Dos titulares son la misma historia si:
+  //   (a) comparten ≥50% de sus palabras significativas, O
+  //   (b) comparten ≥3 palabras significativas Y tienen las mismas flechas
+  //       (dolar_dir y merval_dir) Y al menos un tema en común.
+  // El representante es el de mejor score y suma cuántos medios lo replican
+  // (dupCount) — la replicación en sí es señal de importancia.
   const topNews = useMemo(() => {
     if (!news) return [];
+    const STOP = new Set(["de","la","el","en","y","a","los","las","un","una","del","al","por","con","se","que","su","para","mas","tras","hasta","como","fue","es","ya","hoy","ante","sobre","este","esta","tres","dos","entre","desde","nivel","valor"]);
+    const tokensOf = (t) => new Set(
+      (t || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+        .replace(/[^a-z0-9n\s]/g, " ").split(/\s+/)
+        .filter((w) => w.length > 2 && !STOP.has(w))
+    );
     const scored = news.map((n) => {
       const ageH = n.published_at ? (Date.now() - new Date(n.published_at).getTime()) / 3600000 : 36;
-      // score: relevancia del clasificador − decaimiento por edad + bonus si tiene flecha
       const score = (n.relevance || 0) - ageH * 1.5 + (n.dolar_dir !== 0 || n.merval_dir !== 0 ? 15 : 0);
-      return { ...n, score, ageH };
-    });
-    // dedup laxo por primeras 7 palabras (las cadenas replican titulares)
-    const seen = new Set();
+      return { ...n, score, ageH, toks: tokensOf(n.title) };
+    }).sort((a, b) => b.score - a.score);
+
     const out = [];
-    for (const n of scored.sort((a, b) => b.score - a.score)) {
-      const key = n.title.toLowerCase().split(/\s+/).slice(0, 7).join(" ");
-      if (seen.has(key)) continue;
-      seen.add(key);
-      out.push(n);
-      if (out.length >= 7) break;
+    for (const n of scored) {
+      const dup = out.find((o) => {
+        let inter = 0;
+        for (const w of n.toks) if (o.toks.has(w)) inter++;
+        const overlap = inter / Math.max(1, Math.min(n.toks.size, o.toks.size));
+        if (overlap >= 0.5) return true;
+        const sameDirs = o.dolar_dir === n.dolar_dir && o.merval_dir === n.merval_dir;
+        const sharedTopic = (o.topics || []).some((t) => (n.topics || []).includes(t));
+        return inter >= 3 && sameDirs && sharedTopic;
+      });
+      if (dup) { dup.dupCount = (dup.dupCount || 1) + 1; continue; }
+      if (out.length < 7) { n.dupCount = 1; out.push(n); }
     }
     return out;
   }, [news]);
@@ -20669,7 +20686,10 @@ function MarketPulseWidget({ fx, dlrCurve }) {
               style={{ gap: 8, padding: "6px 2px", borderTop: `1px solid ${C.border}`, textDecoration: "none" }}>
               <div style={{ flex: 1, minWidth: 0 }}>
                 <div style={{ fontSize: 11.5, color: C.text, lineHeight: 1.4 }}>{n.title}</div>
-                <div style={{ fontSize: 9.5, color: C.dim, marginTop: 2 }}>{n.source} · hace {ago(n.ageH)}</div>
+                <div style={{ fontSize: 9.5, color: C.dim, marginTop: 2 }}>
+                  {n.source} · hace {ago(n.ageH)}
+                  {n.dupCount > 1 && <span style={{ color: C.muted, fontWeight: 600 }}> · lo replican {n.dupCount} medios</span>}
+                </div>
               </div>
               <div className="flex" style={{ gap: 4, paddingTop: 2 }}>
                 {n.dolar_dir === 1 && <Tag txt="USD↑" good={false} />}
