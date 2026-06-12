@@ -7119,6 +7119,27 @@ function useFciPrices(positions) {
                 : ((price - prevVcp) / prevVcp) * 100;
           }
 
+          // VCP PROYECTADO al día de hoy (devengado estimado). fci_quotes
+          // trae el último VCP OFICIAL (típicamente T-1); Cocos muestra el
+          // devengado de HOY → quedaba un gap de ~1 día de tasa (~0,09%/día
+          // en money market ≈ $90k en la cartera de LP, detectado 12/06 en
+          // la conciliación al peso). Proyectamos vcp × (1+tasa_diaria)^días
+          // SOLO si: hay par consecutivo para derivar la tasa, el dato tiene
+          // ≤5 días, y el fondo es estable (|tasa| < 0,5%/día — un FCI de
+          // equity no se proyecta: sería inventar precio).
+          let finalPrice = price;
+          let estimated = false;
+          if (previousClose != null && previousClose > 0) {
+            const gapDias = Math.max(1, Math.round(diasEntre(row.fecha_actual, row.fecha_anterior)));
+            const dailyG = Math.pow(price / previousClose, 1 / gapDias) - 1;
+            const todayAR = new Date().toLocaleDateString("en-CA", { timeZone: "America/Argentina/Buenos_Aires" });
+            const ahead = Math.round(diasEntre(todayAR, row.fecha_actual));
+            if (ahead >= 1 && ahead <= 5 && Number.isFinite(dailyG) && Math.abs(dailyG) < 0.005) {
+              finalPrice = price * Math.pow(1 + dailyG, ahead);
+              estimated = true;
+            }
+          }
+
           // Indexamos por ticker NORMALIZADO (trim + UPPER). Los
           // consumidores (resolvePositionPrice, computeDailyPnL,
           // consolidatePositions) normalizan el ticker a mayúsculas, y el
@@ -7126,7 +7147,9 @@ function useFciPrices(positions) {
           // Sin esta normalización la clave nunca matcheaba y el FCI
           // quedaba sin valuar, mostrándose como "—".
           map[String(row.clave).trim().toUpperCase()] = {
-            price,
+            price: finalPrice,
+            vcpOficial: price,
+            estimated,
             previousClose,
             changePct,
             priceDate: row.fecha_actual || null,
@@ -10471,7 +10494,87 @@ function buildFutureAdjLookup(pendingAdjustments, confirmedAdjustments) {
     for (const adj of pendingAdjustments) upsert(adj);
   }
 
+  // Último settle ACREDITADO por ticker (solo confirmed — pending no movió
+  // caja todavía). Es la base del P&L "no acreditado" settle-based: todo lo
+  // anterior a este settle ya está en la caja; lo posterior, no.
+  const tickerConfirmed = new Map();
+  if (Array.isArray(confirmedAdjustments)) {
+    for (const adj of confirmedAdjustments) {
+      const tk = (adj?.ticker || "").toUpperCase().trim();
+      const cs = Number(adj?.curr_settle);
+      if (!tk || !adj.adjustment_date || !Number.isFinite(cs)) continue;
+      const prev = tickerConfirmed.get(tk);
+      if (!prev || adj.adjustment_date > prev.date) {
+        tickerConfirmed.set(tk, { date: adj.adjustment_date, settle: cs });
+      }
+    }
+  }
+  lookup.tickerConfirmed = tickerConfirmed;
+
   return lookup;
+}
+
+/**
+ * P&L NO ACREDITADO de un grupo consolidado de futuros, settle-based.
+ *
+ * Reemplaza la fórmula vieja `g.pnl − Σ actual_amount` (lifetime − acreditado),
+ * que dejaba un FANTASMA permanente: el P&L de la historia previa a la carga
+ * de adjustments (scalps abr-jun/26) está dentro de g.pnl pero su cash entró
+ * a la caja vía la conciliación del 10/06, no vía adjustments → nunca se
+ * neteaba (~+1,9M de patrimonio inflado; Cocos 144,1M vs Midas 146,0M, 12/06).
+ *
+ * Fórmula nueva, por operación CRUDA del grupo:
+ *   uncredited = Σ (precio_actual − base_op) × signo × qty × mult
+ *   base_op = settle del último adjustment CONFIRMADO del ticker, si la op
+ *             es anterior o igual a esa fecha (su MTM hasta ahí ya está en
+ *             caja); el precio de entrada de la op si es posterior.
+ *
+ * Esto resuelve TODOS los casos con una sola expresión:
+ *   - lote viejo abierto: (precio − settle_conf) × qty  → MTM desde el settle
+ *   - lote nuevo (post-confirmación): (precio − entrada) × qty
+ *   - round-trip viejo (ambas patas ≤ fecha): se cancela → 0 (ya cobrado)
+ *   - round-trip cerrado después: queda (venta − settle_conf) × qty = el
+ *     realizado pendiente de acreditar
+ *   - sin adjustments confirmados del ticker: base = entrada para todo
+ *     (nada se acreditó aún) — igual al lifetime, que es lo correcto ahí.
+ *
+ * Devuelve null si no hay precio utilizable.
+ */
+function computeFutureUncreditedPnl(g, futureAdjLookup) {
+  const price = Number(g?.currentPrice);
+  if (!Number.isFinite(price) || price <= 0) return null;
+  const mult = FUTURE_MULTIPLIER_DEFAULT;
+  const tc = futureAdjLookup?.tickerConfirmed?.get((g.ticker || "").toUpperCase().trim()) || null;
+  let sum = 0;
+  for (const op of g.operations || []) {
+    if (!op) continue;
+    const qty = Number(op.quantity) || 0;
+    if (!qty) continue;
+
+    // Grupos CERRADOS: sus operations son pares sintéticos (closed_pair).
+    // Cada pata se basa por separado: la anterior al último settle
+    // acreditado va al settle (ya cobrada hasta ahí); la posterior, a su
+    // precio. Par viejo → 0; cerrado hoy → realizado pendiente de acreditar.
+    if (op.isSynthetic) {
+      if (op.operation_type !== "closed_pair") continue;
+      const buyDate = op.closeSide === "buy" ? op.entry_date : (op.openDate || op.entry_date);
+      const sellDate = op.closeSide === "sell" ? op.entry_date : (op.openDate || op.entry_date);
+      const baseBuy = (tc && buyDate && buyDate <= tc.date) ? tc.settle : Number(op.entry_price);
+      const baseSell = (tc && sellDate && sellDate <= tc.date) ? tc.settle : Number(op.sell_price);
+      if (Number.isFinite(baseBuy) && Number.isFinite(baseSell)) {
+        sum += (baseSell - baseBuy) * qty * mult;
+      }
+      continue;
+    }
+
+    const sign = op.operation_type === "sell" ? -1 : 1;
+    const base = (tc && op.entry_date && op.entry_date <= tc.date)
+      ? tc.settle
+      : Number(op.entry_price);
+    if (!Number.isFinite(base)) continue;
+    sum += (price - base) * sign * qty * mult;
+  }
+  return sum;
 }
 
 /**
@@ -11107,21 +11210,18 @@ function computePortfolioTotals(positions, fx, valuationCurrency, bondPrices, fu
       // (realizado + no realizado). El costo es 0.
       if (g.pnl == null) continue;
 
-      // Si tenemos lookup, calculamos el P&L acreditado del grupo
-      // sumando los realizedPnL de cada operation (position_id) que
-      // forma parte del grupo consolidado. Este monto ya está en cash
-      // y NO debe sumarse al valor de la cartera (sería doble-conteo).
-      // Lo guardamos aparte para el P&L "vs costo".
-      let groupRealizedPnL = 0;
-      if (futureAdjLookup && Array.isArray(g.operations)) {
-        for (const op of g.operations) {
-          const entry = futureAdjLookup.get(op.id);
-          if (entry?.realizedPnL) groupRealizedPnL += entry.realizedPnL;
-        }
+      // P&L NO acreditado settle-based (ver computeFutureUncreditedPnl):
+      // lo único que el futuro aporta al patrimonio es el MTM que la caja
+      // todavía no recibió. Todo lo demás (ajustes confirmados + historia
+      // previa a la carga) YA está dentro del cash — sumarlo acá duplica
+      // (fantasma de +1,9M detectado 12/06 contra Cocos).
+      const nonAcreditedPnL = computeFutureUncreditedPnl(g, futureAdjLookup);
+      if (nonAcreditedPnL == null) {
+        unvalued++;
+        continue;
       }
-      // P&L NO acreditado = total contable - acreditado en cash.
-      // Eso es lo que aporta al patrimonio neto hoy.
-      const nonAcreditedPnL = g.pnl - groupRealizedPnL;
+      // Para el P&L "histórico" del card: lo acreditado = lifetime − no acreditado.
+      const groupRealizedPnL = g.pnl - nonAcreditedPnL;
 
       const convertedNonAcredited = convertValue(nonAcreditedPnL, g.currency || "ARS", valuationCurrency, fx);
       const convertedRealized = convertValue(groupRealizedPnL, g.currency || "ARS", valuationCurrency, fx);
@@ -11645,23 +11745,12 @@ function computeLiquidityBreakdown(positions, fx, valuationCurrency, windowKey, 
             if (g.netQty === 0) continue;    // neteo total → idem
             if (!Number.isFinite(g.pnl)) continue;
 
-            // P&L acreditado del grupo: SUM(realizedPnL) de cada op del
-            // grupo según el lookup. Si no hay lookup (caso edge), queda
-            // 0 y sumamos el P&L total contable — equivalente al
-            // comportamiento anterior del código antes del modelo
-            // no-acreditado.
-            let groupRealizedPnL = 0;
-            if (futureAdjLookup && Array.isArray(g.operations)) {
-              for (const op of g.operations) {
-                if (!op || !op.id) continue;
-                const entry = futureAdjLookup.get(op.id);
-                if (entry && Number.isFinite(entry.realizedPnL)) {
-                  groupRealizedPnL += entry.realizedPnL;
-                }
-              }
-            }
-            const nonAcreditedPnL = g.pnl - groupRealizedPnL;
-            if (Number.isFinite(nonAcreditedPnL)) {
+            // Settle-based (computeFutureUncreditedPnl): mismo modelo que el
+            // patrimonio — solo el MTM que la caja todavía no recibió. La
+            // fórmula vieja (lifetime − Σ actual_amount) arrastraba la
+            // historia previa a la carga de adjustments como "por cobrar".
+            const nonAcreditedPnL = computeFutureUncreditedPnl(g, futureAdjLookup);
+            if (nonAcreditedPnL != null && Number.isFinite(nonAcreditedPnL)) {
               result["ARS"] += nonAcreditedPnL;
             }
           }
