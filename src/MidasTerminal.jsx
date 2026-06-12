@@ -20624,8 +20624,148 @@ function NavCurveSection({ userId, C, compact = false }) {
 const DASHBOARD_ORDER_LS_KEY = "midas:dashboard-order-v1";
 const DASHBOARD_WIDGET_IDS = [
   "curva-dlr", "cobertura-dlr", "mi-cobertura", "fx", "resumen",
-  "flujo", "nav", "carry", "macro", "rem-dolar", "pulso", "brujula", "alertas-activas",
+  "flujo", "nav", "carry", "macro", "rem-dolar", "pulso", "brujula", "banda", "alertas-activas",
 ];
+
+/* ─────────────── Banda Cambiaria · Termómetros (Dashboard) ───────────────
+ * Un termómetro de posición-en-banda por cada dólar (spot, MEP, CCL, blue)
+ * contra la banda de HOY, y abajo las proyecciones (REM ámbar, REM Midas
+ * verde, futuro DLR teal) — cada mes contra LA BANDA PROYECTADA DE ESE MES
+ * (al día 15; piso/techo vía projectBand: crawl 1% hasta dic-25, luego
+ * inflación T-2 del REM). Esa es la comparación honesta: un dólar de
+ * noviembre no se mide contra la banda de junio.
+ */
+function BandaThermoWidget({ fx, dlrCurve, remIpc }) {
+  const { rem, real } = useRemVsReal();
+  const remModel = useMemo(() => buildRemVsRealModel(rem, real, 3), [rem, real]);
+
+  const fmtN = (n, d = 0) => Number(n).toLocaleString("es-AR", { minimumFractionDigits: d, maximumFractionDigits: d });
+  const fmtMonth = (m) => {
+    const meses = ["ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sep", "oct", "nov", "dic"];
+    return `${meses[+m.slice(5, 7) - 1]}-${m.slice(2, 4)}`;
+  };
+
+  const todayAR = new Date().toLocaleDateString("en-CA", { timeZone: "America/Argentina/Buenos_Aires" });
+  const bandFor = (dateIso) => {
+    try {
+      const piso = projectBand(dateIso, "floor", remIpc || {});
+      const techo = projectBand(dateIso, "ceiling", remIpc || {});
+      return techo > piso ? { piso, techo } : null;
+    } catch (e) { return null; }
+  };
+  const bandToday = useMemo(() => bandFor(todayAR), [remIpc, todayAR]); // eslint-disable-line
+
+  const spot = fx?.mayorista?.mid ?? null;
+  const dollars = [
+    ["SPOT", spot],
+    ["MEP", fx?.mep?.mid ?? null],
+    ["CCL", fx?.ccl?.mid ?? null],
+    ["BLUE", fx?.blue?.mid ?? null],
+  ].filter(([, v]) => v > 0);
+
+  // Proyecciones: una barra por mes pronosticado, contra la banda de ese mes
+  const monthRows = useMemo(() => {
+    if (!remModel?.future?.length) return [];
+    const ABBR = ["ENE", "FEB", "MAR", "ABR", "MAY", "JUN", "JUL", "AGO", "SEP", "OCT", "NOV", "DIC"];
+    return remModel.future.map((f) => {
+      const b = bandFor(f.m + "-15");
+      if (!b) return null;
+      const tk = `DLR${ABBR[+f.m.slice(5, 7) - 1]}${f.m.slice(2, 4)}`;
+      const fut = dlrCurve?.byTicker?.get(tk)?.price ?? null;
+      const markers = [
+        { label: "REM", value: f.remFut, color: C.cat.amber },
+        { label: "REM Midas", value: f.remCorr, color: C.green },
+        ...(fut > 0 ? [{ label: "Futuro", value: fut, color: C.cat.teal }] : []),
+      ].filter((mk) => mk.value > 0);
+      return { m: f.m, ...b, markers };
+    }).filter(Boolean);
+  }, [remModel, dlrCurve, remIpc]); // eslint-disable-line
+
+  // Barra reutilizable: gradiente piso→techo, tick en la mitad, marcadores
+  const Bar = ({ piso, techo, markers, height = 9 }) => (
+    <div style={{ position: "relative", height, borderRadius: height / 2, background: `linear-gradient(90deg, ${C.green} 0%, ${C.cat.yellow} 55%, ${C.red} 100%)`, opacity: 0.9, flex: 1 }}>
+      <div style={{ position: "absolute", top: -2, bottom: -2, left: "calc(50% - 1px)", width: 2, background: "rgba(255,255,255,0.4)" }} />
+      {markers.map((mk, i) => {
+        const pos = Math.min(1, Math.max(0, (mk.value - piso) / (techo - piso)));
+        return mk.dot ? (
+          <div key={i} title={`${mk.label}: $ ${fmtN(mk.value, 1)}`} style={{
+            position: "absolute", top: "50%", transform: "translateY(-50%)",
+            left: `calc(${(pos * 100).toFixed(1)}% - 5px)`,
+            width: 10, height: 10, borderRadius: "50%", background: mk.color,
+            border: "1.5px solid rgba(10,14,22,0.9)", boxShadow: `0 0 5px ${mk.color}`,
+          }} />
+        ) : (
+          <div key={i} title={`${mk.label}: $ ${fmtN(mk.value, 1)}`} style={{
+            position: "absolute", top: -3, bottom: -3,
+            left: `calc(${(pos * 100).toFixed(1)}% - 2px)`,
+            width: 4, borderRadius: 2, background: mk.color || C.text,
+            boxShadow: "0 0 6px rgba(255,255,255,0.85)",
+          }} />
+        );
+      })}
+    </div>
+  );
+
+  return (
+    <div style={{ padding: "12px 16px", display: "flex", flexDirection: "column", gap: 10, height: "100%" }}>
+      {/* HOY: cada dólar contra la banda vigente */}
+      {bandToday && (
+        <div>
+          <div className="flex items-baseline justify-between" style={{ marginBottom: 8 }}>
+            <span style={{ fontSize: 9.5, color: C.green, fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>PISO $ {fmtN(bandToday.piso)}</span>
+            <span style={{ fontSize: 10, color: C.dim, textTransform: "uppercase", letterSpacing: "0.12em" }}>banda de hoy · mitad $ {fmtN((bandToday.piso + bandToday.techo) / 2)}</span>
+            <span style={{ fontSize: 9.5, color: C.red, fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>TECHO $ {fmtN(bandToday.techo)}</span>
+          </div>
+          {dollars.map(([label, v]) => {
+            const pos = Math.min(1, Math.max(0, (v - bandToday.piso) / (bandToday.techo - bandToday.piso)));
+            return (
+              <div key={label} className="flex items-center" style={{ gap: 10, marginBottom: 7 }}>
+                <span style={{ fontSize: 10, color: C.muted, width: 92, flexShrink: 0 }}>
+                  <span style={{ fontWeight: 700, color: C.text }}>{label}</span>{" "}
+                  <span style={{ fontVariantNumeric: "tabular-nums" }}>$ {fmtN(v, 1)}</span>
+                </span>
+                <Bar piso={bandToday.piso} techo={bandToday.techo} markers={[{ label, value: v }]} />
+                <span style={{ fontSize: 10, color: pos > 0.85 ? C.red : pos > 0.65 ? C.cat.amber : C.muted, width: 36, textAlign: "right", fontVariantNumeric: "tabular-nums", flexShrink: 0 }}>
+                  {Math.round(pos * 100)}%
+                </span>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {/* PROYECCIÓN: cada mes contra la banda de SU mes */}
+      {monthRows.length > 0 && (
+        <div>
+          <div className="flex items-center" style={{ gap: 10, marginBottom: 8, flexWrap: "wrap" }}>
+            <span style={{ fontSize: 10, color: C.dim, textTransform: "uppercase", letterSpacing: "0.12em" }}>proyección · vs banda de cada mes</span>
+            {[["REM", C.cat.amber], ["REM Midas", C.green], ["Futuro", C.cat.teal]].map(([l, c]) => (
+              <span key={l} className="flex items-center" style={{ gap: 4, fontSize: 9.5, color: C.muted }}>
+                <span style={{ width: 8, height: 8, borderRadius: "50%", background: c }} /> {l}
+              </span>
+            ))}
+          </div>
+          {monthRows.map((r) => (
+            <div key={r.m} className="flex items-center" style={{ gap: 10, marginBottom: 7 }}>
+              <span style={{ fontSize: 10, color: C.text, fontWeight: 700, width: 92, flexShrink: 0 }}>
+                {fmtMonth(r.m)}{" "}
+                <span style={{ fontSize: 8.5, color: C.dim, fontWeight: 400, fontVariantNumeric: "tabular-nums" }}>{fmtN(r.piso)}–{fmtN(r.techo)}</span>
+              </span>
+              <Bar piso={r.piso} techo={r.techo} markers={r.markers.map((mk) => ({ ...mk, dot: true }))} />
+              <span style={{ width: 36, flexShrink: 0 }} />
+            </div>
+          ))}
+        </div>
+      )}
+
+      <div style={{ fontSize: 10, color: C.dim, lineHeight: 1.5, marginTop: "auto" }}>
+        Verde = piso (zona donde el BCRA compra) · rojo = techo (zona donde defiende) · tick blanco = mitad.
+        Las proyecciones se miden contra la banda proyectada de su propio mes (al día 15; crawl 1%/mes hasta dic-25, luego inflación T-2 del REM — misma cuenta que el módulo Bandas).
+        Pasá el mouse por un punto para ver su valor.
+      </div>
+    </div>
+  );
+}
 
 /* ─────────────── Brújula Dólar (Dashboard) ───────────────
  * Tablero de VALOR RELATIVO entre los dólares: junta en una pantalla lo
@@ -21179,6 +21319,7 @@ function DashboardModule() {
             { id: "rem-dolar", title: "REM vs Realidad · Dólar", render: () => <RemVsRealWidget futurePrices={futurePrices} /> },
             { id: "pulso", title: "Pulso de Mercado · Noticias", render: () => <MarketPulseWidget fx={fx} dlrCurve={dlrCurve} /> },
             { id: "brujula", title: "Brújula Dólar · ¿Qué está barato?", render: () => <DolarCompassWidget fx={fx} dlrCurve={dlrCurve} remIpc={remIpc} /> },
+            { id: "banda", title: "Banda Cambiaria · Termómetros", render: () => <BandaThermoWidget fx={fx} dlrCurve={dlrCurve} remIpc={remIpc} /> },
             { id: "alertas-activas", title: "Alertas activas", render: () => (
               <div style={{ height: "100%", minHeight: 240, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 8, padding: "20px 24px", textAlign: "center" }}>
                 <span style={{ fontSize: 10, color: C.dim, letterSpacing: "0.18em", textTransform: "uppercase", fontWeight: 600 }}>Próximamente</span>
