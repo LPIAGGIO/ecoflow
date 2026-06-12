@@ -20624,8 +20624,175 @@ function NavCurveSection({ userId, C, compact = false }) {
 const DASHBOARD_ORDER_LS_KEY = "midas:dashboard-order-v1";
 const DASHBOARD_WIDGET_IDS = [
   "curva-dlr", "cobertura-dlr", "mi-cobertura", "fx", "resumen",
-  "flujo", "nav", "carry", "macro", "rem-dolar", "pulso", "alertas-activas",
+  "flujo", "nav", "carry", "macro", "rem-dolar", "pulso", "brujula", "alertas-activas",
 ];
+
+/* ─────────────── Brújula Dólar (Dashboard) ───────────────
+ * Tablero de VALOR RELATIVO entre los dólares: junta en una pantalla lo
+ * que LP miraba por separado para decidir rumbo (12/06/2026):
+ *   1. NIVEL: spot vs lo que esperaba el consenso (REM del mes en curso).
+ *   2. PRECIO RELATIVO: brecha MEP/blue vs oficial, canje CCL/MEP.
+ *   3. TASA: TNA implícita del futuro corto vs caución → el costo real de
+ *      estar comprado/vendido, y a qué precio "nivelaría" con la tasa.
+ *   4. SÍNTESIS: lecturas mecánicas con las reglas A LA VISTA (cada señal
+ *      muestra el número que la dispara). No es recomendación: es el mapa
+ *      de qué está caro y qué barato contra qué.
+ *
+ * Clave conceptual (pregunta de LP que originó esto): "spot arriba del
+ * REM" (nivel fuerte) y "TNA implícita abajo de caución" (pendiente
+ * barata) NO se contradicen — juntos = "el dólar empuja y el mercado te
+ * cobra poco por la suba que falta". El gap de tasa puede cerrarse por
+ * 3 lados (futuro sube / spot baja / caución baja) y suele PERSISTIR por
+ * oferta estructural de exportadores en la parte corta.
+ */
+function DolarCompassWidget({ fx, dlrCurve }) {
+  const { rem, real } = useRemVsReal();
+  const remModel = useMemo(() => buildRemVsRealModel(rem, real, 3), [rem, real]);
+
+  const fmtN = (n, d = 1) => Number(n).toLocaleString("es-AR", { minimumFractionDigits: d, maximumFractionDigits: d });
+  const fmtPct = (x, d = 1) => `${x >= 0 ? "+" : ""}${x.toFixed(d)}%`;
+
+  const spot = fx?.mayorista?.mid ?? null;
+  const mep = fx?.mep?.mid ?? null;
+  const ccl = fx?.ccl?.mid ?? null;
+  const blue = fx?.blue?.mid ?? null;
+
+  // Futuro corto vivo con tasa (saltea el ancla spot, expiryDays 0)
+  const front = useMemo(() => {
+    if (!dlrCurve?.points) return null;
+    return dlrCurve.points.find((p) => p.expiryDays > 0 && p.tnaImplicitaPct != null) || null;
+  }, [dlrCurve]);
+  const caucion = dlrCurve?.caucionRate ?? null;
+
+  // ── Señales con regla explícita ──
+  const signals = useMemo(() => {
+    const out = [];
+
+    // 1) Carry: caución − implícita del corto
+    if (front && caucion != null && front.vsCaucion != null) {
+      const gap = front.vsCaucion; // caución − implícita (pts)
+      const fair = spot > 0 ? spot * (1 + (caucion / 100) * (front.expiryDays / 365)) : null;
+      if (gap >= 2) {
+        out.push({
+          tone: "buy",
+          title: `Futuro corto BARATO vs tasas (${front.ticker}: implícita ${fmtN(front.tnaImplicitaPct)}% vs caución ${fmtN(caucion)}%)`,
+          detail: `Estar comprado cuesta ${fmtN(gap)} pts menos que lo que rinde el peso. ${fair ? `Nivelaría con caución en $ ${fmtN(fair, 1)} (hoy $ ${fmtN(front.price, 1)}).` : ""} Ojo: el gap puede cerrar por suba del futuro, baja del spot o baja de caución — y suele persistir por oferta exportadora en la parte corta.`,
+        });
+      } else if (gap <= -2) {
+        out.push({
+          tone: "sell",
+          title: `Futuro corto CARO vs tasas (${front.ticker}: implícita ${fmtN(front.tnaImplicitaPct)}% vs caución ${fmtN(caucion)}%)`,
+          detail: `El vendedor captura ${fmtN(-gap)} pts sobre la caución: cash & carry (comprar contado + vender futuro) paga más que el peso.`,
+        });
+      } else {
+        out.push({ tone: "flat", title: `Carry neutral (${front.ticker}: implícita ${fmtN(front.tnaImplicitaPct)}% ≈ caución ${fmtN(caucion)}%)`, detail: "Sin ventaja de tasa para ninguno de los dos lados." });
+      }
+    }
+
+    // 2) Nivel: spot vs consenso del mes (REM)
+    const cm = remModel?.curMonth;
+    if (cm && cm.rem != null && cm.estClose > 0) {
+      const dev = (cm.estClose / cm.rem - 1) * 100;
+      if (dev >= 0.5) {
+        out.push({
+          tone: "buy",
+          title: `El dólar le gana al consenso (${fmtPct(dev)}: mes va a ~$ ${fmtN(cm.estClose, 0)} vs REM $ ${fmtN(cm.rem, 0)})`,
+          detail: "Momentum del nivel a favor — y el patrón del régimen de bandas es que el consenso subestima. Viento de cola para posiciones compradas.",
+        });
+      } else if (dev <= -0.5) {
+        out.push({
+          tone: "sell",
+          title: `El dólar viene DEBAJO del consenso (${fmtPct(dev)})`,
+          detail: "El nivel sorprende a la baja — viento en contra para comprados; el carry del vendedor se cobra tranquilo.",
+        });
+      } else {
+        out.push({ tone: "flat", title: `Spot en línea con el consenso (${fmtPct(dev)})`, detail: "Sin sorpresa de nivel este mes." });
+      }
+    }
+
+    // 3) Brecha MEP vs oficial
+    if (spot > 0 && mep > 0) {
+      const b = (mep / spot - 1) * 100;
+      if (b < 0) out.push({ tone: "buy", title: `MEP BARATO: cotiza DEBAJO del oficial (${fmtPct(b)})`, detail: "Anomalía: dolarizarse por MEP sale más barato que el mayorista. Suele durar poco." });
+      else if (b <= 2.5) out.push({ tone: "flat", title: `Brecha MEP normal (${fmtPct(b)})`, detail: "Sin trade de brecha: los dos dólares dicen lo mismo." });
+      else if (b <= 5) out.push({ tone: "warn", title: `Brecha MEP tensa (${fmtPct(b)})`, detail: "El MEP se adelanta al oficial — o comprime (MEP caro para entrar) o el oficial la sigue. Mirar el semáforo de régimen." });
+      else out.push({ tone: "sell", title: `Brecha MEP ALTA (${fmtPct(b)})`, detail: "Estrés cambiario: el paralelo le está gritando al oficial. Cualquier número de esta pantalla puede quedar viejo rápido." });
+    }
+
+    // 4) Canje CCL/MEP
+    if (mep > 0 && ccl > 0) {
+      const cj = (ccl / mep - 1) * 100;
+      if (Math.abs(cj) <= 2.5) out.push({ tone: "flat", title: `Canje CCL/MEP normal (${fmtPct(cj)})`, detail: "Girar dólares al exterior cuesta lo habitual." });
+      else if (cj > 2.5) out.push({ tone: "warn", title: `Canje caro (${fmtPct(cj)})`, detail: "Sacar dólares afuera está caro (demanda de fuga); traerlos del exterior, barato — a favor de quien repatría." });
+      else out.push({ tone: "warn", title: `Canje negativo (${fmtPct(cj)})`, detail: "CCL debajo del MEP: anomalía — conviene canjear hacia afuera." });
+    }
+
+    return out;
+  }, [front, caucion, spot, mep, ccl, remModel]);
+
+  // Síntesis: carry + momentum definen el sesgo en futuros
+  const bias = useMemo(() => {
+    const tones = signals.slice(0, 2).map((s) => s.tone);
+    const buys = tones.filter((t) => t === "buy").length;
+    const sells = tones.filter((t) => t === "sell").length;
+    if (buys === 2) return { label: "SESGO COMPRADOR en futuros cortos", color: C.green, sub: "carry barato + nivel empujando" };
+    if (sells === 2) return { label: "SESGO VENDEDOR (cash & carry)", color: C.red, sub: "carry caro + nivel planchado" };
+    if (buys === 1 && sells === 0) return { label: "Sesgo levemente comprador", color: C.green, sub: "una señal a favor, la otra neutral" };
+    if (sells === 1 && buys === 0) return { label: "Sesgo levemente vendedor", color: C.cat.amber, sub: "una señal en contra, la otra neutral" };
+    if (buys && sells) return { label: "SEÑALES CRUZADAS", color: C.cat.amber, sub: "carry y nivel apuntan distinto — sin sesgo" };
+    return { label: "Sin sesgo claro", color: C.dim, sub: "todo en zona neutral" };
+  }, [signals]);
+
+  const toneColor = { buy: C.green, sell: C.red, warn: C.cat.amber, flat: C.dim };
+
+  return (
+    <div style={{ padding: "12px 16px", display: "flex", flexDirection: "column", gap: 10, height: "100%" }}>
+      {/* Niveles */}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 8 }}>
+        {[
+          ["Spot (mayorista)", spot, null],
+          ["MEP", mep, spot > 0 && mep > 0 ? (mep / spot - 1) * 100 : null],
+          ["CCL", ccl, spot > 0 && ccl > 0 ? (ccl / spot - 1) * 100 : null],
+          ["Blue", blue, spot > 0 && blue > 0 ? (blue / spot - 1) * 100 : null],
+        ].map(([label, v, b]) => (
+          <div key={label} style={{ border: `1px solid ${C.border}`, borderRadius: 6, padding: "7px 9px" }}>
+            <div style={{ fontSize: 9, color: C.dim, textTransform: "uppercase", letterSpacing: "0.1em" }}>{label}</div>
+            <div style={{ fontSize: 14, fontWeight: 700, color: C.text, fontVariantNumeric: "tabular-nums" }}>
+              {v != null ? `$ ${fmtN(v, v >= 1000 ? 1 : 2)}` : "—"}
+            </div>
+            {b != null && (
+              <div style={{ fontSize: 9.5, color: Math.abs(b) > 4 ? C.red : Math.abs(b) > 2.5 ? C.cat.amber : C.dim, fontVariantNumeric: "tabular-nums" }}>
+                {fmtPct(b)} vs oficial
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
+
+      {/* Sesgo */}
+      <div className="flex items-center" style={{ gap: 8, border: `1px solid ${bias.color === C.dim ? C.border : bias.color}`, borderRadius: 6, padding: "8px 10px" }}>
+        <span style={{ width: 9, height: 9, borderRadius: "50%", background: bias.color, boxShadow: `0 0 6px ${bias.color}`, flexShrink: 0 }} />
+        <span style={{ fontSize: 11.5, fontWeight: 700, color: bias.color }}>{bias.label}</span>
+        <span style={{ fontSize: 10.5, color: C.dim }}>{bias.sub}</span>
+      </div>
+
+      {/* Señales */}
+      <div style={{ display: "flex", flexDirection: "column" }}>
+        {signals.map((s, i) => (
+          <div key={i} style={{ padding: "6px 2px", borderTop: `1px solid ${C.border}` }}>
+            <div style={{ fontSize: 11, fontWeight: 600, color: toneColor[s.tone] }}>{s.title}</div>
+            <div style={{ fontSize: 10.5, color: C.muted, lineHeight: 1.5, marginTop: 2 }}>{s.detail}</div>
+          </div>
+        ))}
+        {signals.length === 0 && <div style={{ fontSize: 11, color: C.dim, padding: 12 }}>Esperando datos de FX y futuros…</div>}
+      </div>
+
+      <div style={{ fontSize: 10, color: C.dim, lineHeight: 1.5, marginTop: "auto" }}>
+        Lecturas mecánicas de precios relativos (las reglas y los números que las disparan están a la vista) — es el mapa de qué está caro contra qué, no una recomendación. Umbrales: carry ±2 pts vs caución; nivel ±0,5% vs REM del mes; brecha 2,5/5%.
+      </div>
+    </div>
+  );
+}
 
 /* ─────────────── Pulso de Mercado (Dashboard) ───────────────
  * Noticias de mercado clasificadas (tabla market_news, la llena el worker
@@ -20903,6 +21070,7 @@ function DashboardModule() {
             { id: "macro", title: "Indicadores Macro", render: ({ expanded }) => <BcraIndicatorsWidget expanded={expanded} /> },
             { id: "rem-dolar", title: "REM vs Realidad · Dólar", render: () => <RemVsRealWidget futurePrices={futurePrices} /> },
             { id: "pulso", title: "Pulso de Mercado · Noticias", render: () => <MarketPulseWidget fx={fx} dlrCurve={dlrCurve} /> },
+            { id: "brujula", title: "Brújula Dólar · ¿Qué está barato?", render: () => <DolarCompassWidget fx={fx} dlrCurve={dlrCurve} /> },
             { id: "alertas-activas", title: "Alertas activas", render: () => (
               <div style={{ height: "100%", minHeight: 240, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 8, padding: "20px 24px", textAlign: "center" }}>
                 <span style={{ fontSize: 10, color: C.dim, letterSpacing: "0.18em", textTransform: "uppercase", fontWeight: 600 }}>Próximamente</span>
