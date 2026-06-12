@@ -22858,22 +22858,33 @@ function RemTvChart({ series, useLog, rangeYears, height = 420 }) {
       timeScale: { borderColor: C.border, timeVisible: false },
       crosshair: { mode: 0 },
     });
-    const mk = (color, opts = {}) => chart.addLineSeries({ color, lineWidth: 2, priceLineVisible: false, lastValueVisible: false, ...opts });
-    const sReal = mk(C.text, { lastValueVisible: true });
-    const sRem = mk(C.accent);
-    const sFut = mk(C.cat.amber, { lineStyle: 2 });
-    const sCorr = mk(C.green, { lineStyle: 2 });
-    sReal.setData(series.real);
-    sRem.setData(series.rem);
-    sFut.setData(series.fut);
-    sCorr.setData(series.corr);
+    // Series declarativas: solo se crean las que traen datos (los toggles
+    // del módulo pasan [] para las apagadas).
+    const defs = [
+      ["real", "Real (oficial)", C.text, { lastValueVisible: true }],
+      ["rem", series.remLabel || "REM", C.accent, {}],
+      ["fut", "REM últ. encuesta", C.cat.amber, { lineStyle: 2 }],
+      ["corr", "Est. Midas", C.green, { lineStyle: 2 }],
+      ["dlr", "Futuros DLR (hoy)", C.cat.teal, {}],
+    ];
+    const entries = [];
+    let lastTime = null;
+    for (const [key, label, color, opts] of defs) {
+      const data = series[key];
+      if (!data || !data.length) continue;
+      const s = chart.addLineSeries({ color, lineWidth: 2, priceLineVisible: false, lastValueVisible: false, ...opts });
+      s.setData(data);
+      entries.push([label, s, color]);
+      const t = data[data.length - 1].time;
+      if (!lastTime || t > lastTime) lastTime = t;
+    }
+    if (!entries.length) { chart.remove(); return; }
 
     // ventana inicial según el rango elegido (la data completa queda
     // disponible para alejar con la rueda)
-    if (rangeYears >= 10 || !series.real.length) {
+    if (rangeYears >= 10 || !lastTime) {
       chart.timeScale().fitContent();
     } else {
-      const lastTime = (series.fut.length ? series.fut[series.fut.length - 1] : series.real[series.real.length - 1]).time;
       const from = new Date();
       from.setFullYear(from.getFullYear() - rangeYears);
       chart.timeScale().setVisibleRange({ from: from.toISOString().slice(0, 10), to: lastTime });
@@ -22882,12 +22893,6 @@ function RemTvChart({ series, useLog, rangeYears, height = 420 }) {
     // leyenda en vivo bajo el crosshair
     const legend = legendRef.current;
     const fmtL = (v) => Number(v).toLocaleString("es-AR", { maximumFractionDigits: 1 });
-    const entries = [
-      ["Real", sReal, C.text],
-      [series.remLabel || "REM", sRem, C.accent],
-      ["REM últ. encuesta", sFut, C.cat.amber],
-      ["Corregido", sCorr, C.green],
-    ];
     chart.subscribeCrosshairMove((param) => {
       if (!legend) return;
       if (!param || !param.time || !param.seriesData) { legend.innerHTML = ""; return; }
@@ -23065,6 +23070,7 @@ function buildRemVsRealModel(rem, real, horizon) {
 function RemVsRealWidget({ futurePrices = {} }) {
   const { rem, real, error, loading } = useRemVsReal();
   const model = useMemo(() => buildRemVsRealModel(rem, real, 3), [rem, real]);
+  const [showHow, setShowHow] = useState(false);
 
   const fmtN = (n, d = 0) => Number(n).toLocaleString("es-AR", { minimumFractionDigits: d, maximumFractionDigits: d });
   const fmtMonth = (m) => {
@@ -23198,8 +23204,35 @@ function RemVsRealWidget({ futurePrices = {} }) {
         );
       })()}
 
+      {/* Cómo se calcula Est. Midas (expandible) */}
+      <div>
+        <button
+          onClick={() => setShowHow((v) => !v)}
+          style={{ background: "transparent", border: "none", padding: 0, cursor: "pointer", fontSize: 10.5, color: C.accent, fontWeight: 600 }}
+        >
+          {showHow ? "▾ ocultar" : "▸ ¿cómo se calcula Est. Midas?"}
+        </button>
+        {showHow && (
+          <div style={{ fontSize: 10.5, color: C.muted, lineHeight: 1.65, marginTop: 6, border: `1px solid ${C.border}`, borderRadius: 6, padding: "8px 10px" }}>
+            Cálculo propio de Midas (no lo publica nadie), en 3 pasos: (1) comparamos los pronósticos del REM desde 2016 contra el dólar que después ocurrió;
+            (2) eso da el <em>sesgo</em> de cada plazo en el régimen actual; (3) lo aplicamos a la última encuesta:
+            {" "}<span style={{ color: C.green }}>Est. Midas = REM ÷ (1 + sesgo)</span>.
+            {(() => {
+              const parts = [];
+              for (let h = 1; h <= 6; h++) {
+                const s = model.stats?.[h];
+                const use = s?.era && s.era.n >= 6 ? s.era : s?.all;
+                if (use) parts.push(`${h}m ${use.bias >= 0 ? "+" : ""}${(use.bias * 100).toFixed(1)}%`);
+              }
+              return parts.length ? <> Sesgos hoy: <span style={{ fontVariantNumeric: "tabular-nums" }}>{parts.join(" · ")}</span> (negativo = el REM se queda corto → se corrige para arriba).</> : null;
+            })()}
+            {" "}Vale mientras el régimen sea este — por eso el semáforo.
+          </div>
+        )}
+      </div>
+
       <div style={{ fontSize: 10, color: C.dim, lineHeight: 1.5, marginTop: "auto" }}>
-        <strong style={{ color: C.muted }}>Est. Midas</strong> = cálculo propio de esta app (no lo publica nadie): la encuesta {fmtMonth(model.lastSurvey.slice(0, 7))} del REM ajustada por el error promedio que el REM viene teniendo en el régimen actual, medido contra 10 años de datos oficiales.
+        <strong style={{ color: C.muted }}>Est. Midas</strong> = la encuesta {fmtMonth(model.lastSurvey.slice(0, 7))} del REM ajustada por el error histórico del REM (cálculo de Midas).
         {st ? ` A 3m el REM erra ±${(st.mae * 100).toFixed(1)}% típico.` : ""}{" "}
         <span style={{ color: C.red }}>vs REM rojo</span> = el futuro pricea más devaluación que el consenso.
         Ojo: el futuro liquida contra el A3500 de fin de mes; el REM pronostica el promedio mensual (~medio mes de crawl de diferencia).
@@ -23215,6 +23248,47 @@ function RemTcModule() {
   const [horizon, setHorizon] = useState(3);   // 1 | 3 | 6 meses
   const [rangeYears, setRangeYears] = useState(10); // 10 | 5 | 2
   const model = useMemo(() => buildRemVsRealModel(rem, real, horizon), [rem, real, horizon]);
+
+  // Curva de futuros DLR de HOY, mapeada al mes de cada contrato. La curva
+  // HISTÓRICA (qué decía el futuro hace N meses) se está acumulando sola en
+  // futures_settlements_history desde may-2026 — no hay archivo público
+  // gratuito de 10 años; cuando junte meses se agrega como serie extra.
+  const dlrTickersRem = useMemo(
+    () => DLR_REGISTRY.filter((c) => daysToExpiry(c.maturityDate) > 0).map((c) => c.ticker),
+    []
+  );
+  const remFuturesState = useFuturePrices(dlrTickersRem);
+  const marketOpenRem = isActiveMarketWindow();
+  const dlrSeries = useMemo(() => {
+    const prices = remFuturesState?.prices || {};
+    const pts = [];
+    for (const c of DLR_REGISTRY) {
+      if (daysToExpiry(c.maturityDate) <= 0) continue;
+      const fp = prices[c.ticker];
+      if (!fp || fp.error) continue;
+      const live = fp.last != null ? Number(fp.last) : null;
+      const settle = fp.settlement != null ? Number(fp.settlement) : null;
+      const v = marketOpenRem ? (live ?? settle) : (settle ?? live);
+      if (v == null || !Number.isFinite(v)) continue;
+      pts.push({ time: c.maturityDate.slice(0, 7) + "-01", value: v });
+    }
+    return pts.sort((a, b) => (a.time < b.time ? -1 : 1));
+  }, [remFuturesState, marketOpenRem]);
+
+  // Qué curvas se ven (combinables): Real / REM hace Nm / REM últ. encuesta /
+  // Est. Midas / Futuros DLR.
+  const [show, setShow] = useState({ real: true, rem: true, fut: true, corr: true, dlr: true });
+  const chartSeries = useMemo(() => {
+    if (!model) return null;
+    return {
+      real: show.real ? model.tv.real : [],
+      rem: show.rem ? model.tv.rem : [],
+      fut: show.fut ? model.tv.fut : [],
+      corr: show.corr ? model.tv.corr : [],
+      dlr: show.dlr ? dlrSeries : [],
+      remLabel: model.tv.remLabel,
+    };
+  }, [model, show, dlrSeries]);
 
   const fmtN = (n, d = 0) => Number(n).toLocaleString("es-AR", { minimumFractionDigits: d, maximumFractionDigits: d });
   const fmtPct = (x, d = 1) => `${x >= 0 ? "+" : ""}${(x * 100).toFixed(d)}%`;
@@ -23297,7 +23371,36 @@ function RemTcModule() {
               </div>
               <span style={{ fontSize: 10, color: C.dim }}>rueda = zoom · arrastrar = mover · doble clic eje = reset</span>
             </div>
-            <RemTvChart series={model.tv} useLog={useLog} rangeYears={rangeYears} height={400} />
+            {/* Selector de curvas: tildá cuáles ver (combinables) */}
+            <div className="flex items-center" style={{ gap: 6, marginBottom: 10, flexWrap: "wrap" }}>
+              {[
+                ["real", "Real (oficial)", C.text],
+                ["rem", `REM hace ${horizon}m`, C.accent],
+                ["fut", "REM últ. encuesta", C.cat.amber],
+                ["corr", "Est. Midas", C.green],
+                ["dlr", "Futuros DLR (hoy)", C.cat.teal],
+              ].map(([key, label, color]) => (
+                <button
+                  key={key}
+                  onClick={() => setShow((s) => ({ ...s, [key]: !s[key] }))}
+                  style={{
+                    display: "inline-flex", alignItems: "center", gap: 6,
+                    padding: "3px 9px", fontSize: 10.5, fontWeight: 600, cursor: "pointer",
+                    border: `1px solid ${show[key] ? color : C.border}`,
+                    background: show[key] ? "rgba(255,255,255,0.04)" : "transparent",
+                    color: show[key] ? color : C.dim, borderRadius: 4,
+                    opacity: show[key] ? 1 : 0.65,
+                  }}
+                >
+                  <span style={{ width: 8, height: 8, borderRadius: 2, background: show[key] ? color : "transparent", border: `1px solid ${color}`, flexShrink: 0 }} />
+                  {label}
+                </button>
+              ))}
+              {show.dlr && dlrSeries.length === 0 && (
+                <span style={{ fontSize: 10, color: C.dim }}>futuros DLR: sin datos del feed ahora</span>
+              )}
+            </div>
+            <RemTvChart series={chartSeries} useLog={useLog} rangeYears={rangeYears} height={400} />
           </div>
 
           {/* Subgráfico: error % mes a mes */}
@@ -23368,6 +23471,51 @@ function RemTcModule() {
               </table>
             </div>
           )}
+
+          {/* Cómo se calcula Est. Midas — transparencia total del método */}
+          <div style={{ border: `1px solid ${C.border}`, borderRadius: 6, background: C.panel, padding: 16, marginBottom: 14 }}>
+            <div style={{ fontSize: 11, color: C.text, fontWeight: 600, marginBottom: 8 }}>
+              ¿Cómo se calcula "Est. Midas" y por qué?
+            </div>
+            <div style={{ fontSize: 11, color: C.muted, lineHeight: 1.7 }}>
+              <strong style={{ color: C.text }}>Qué es:</strong> un cálculo propio de Midas — no lo publica el BCRA ni ninguna consultora.
+              <br />
+              <strong style={{ color: C.text }}>Cómo:</strong> (1) tomamos TODOS los pronósticos que el REM hizo desde 2016 y los comparamos contra el dólar que después ocurrió;
+              (2) eso da el <em>sesgo</em> de cada plazo en el régimen actual — cuánto y para dónde le vienen errando;
+              (3) aplicamos ese sesgo a la última encuesta: <span style={{ color: C.green, fontFamily: "monospace" }}>Est. Midas = REM ÷ (1 + sesgo del plazo)</span>.
+              {(() => {
+                const parts = [];
+                for (let h = 1; h <= 6; h++) {
+                  const s = model.stats?.[h];
+                  const use = s?.era && s.era.n >= 6 ? s.era : s?.all;
+                  if (use) parts.push(`${h}m ${use.bias >= 0 ? "+" : ""}${(use.bias * 100).toFixed(1)}%`);
+                }
+                return parts.length ? (
+                  <>
+                    <br />
+                    <strong style={{ color: C.text }}>Sesgos medidos hoy (régimen de bandas):</strong>{" "}
+                    <span style={{ fontVariantNumeric: "tabular-nums" }}>{parts.join(" · ")}</span>
+                    {" "}(positivo = el REM pronostica de más → se corrige para abajo; negativo = se queda corto → se corrige para arriba).
+                  </>
+                ) : null;
+              })()}
+              {model.future.length > 0 && (() => {
+                const f = model.future[model.future.length - 1];
+                return (
+                  <>
+                    <br />
+                    <strong style={{ color: C.text }}>Ejemplo con datos de hoy:</strong> para {fmtMonth(f.m)} el REM dice $ {fmtN(f.remFut)};
+                    a ese plazo viene errando {f.remCorr > f.remFut ? "quedándose corto" : "pronosticando de más"};
+                    corregido queda $ {fmtN(f.remCorr)}.
+                  </>
+                );
+              })()}
+              <br />
+              <strong style={{ color: C.text }}>Por qué:</strong> si un pronosticador erra siempre parecido, ajustar por su error histórico da un pronóstico mejor que el original
+              (el clásico amigo que avisa "llego 8:00" y siempre cae 8:10). La corrección vale <em>mientras el régimen cambiario sea este</em>:
+              si el semáforo de riesgo deja el verde, el historial reciente pierde validez y Est. Midas también.
+            </div>
+          </div>
 
           <div style={{ fontSize: 11, color: C.dim, lineHeight: 1.6 }}>
             Lectura de 10 años de datos: el REM es <strong style={{ color: C.muted }}>casi insesgado en promedio</strong> pero
