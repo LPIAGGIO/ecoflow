@@ -20657,10 +20657,17 @@ function DolarCompassWidget({ fx, dlrCurve }) {
   const ccl = fx?.ccl?.mid ?? null;
   const blue = fx?.blue?.mid ?? null;
 
-  // Futuro corto vivo con tasa (saltea el ancla spot, expiryDays 0)
+  // Contrato para la señal de carry: el primero con ≥30 días. El más corto
+  // (ej. JUN26 a 18 días) NO sirve de termómetro: con pocos días, cada peso
+  // de spot mueve ~1,4 pts de TNA anualizada, y el spot de dolarapi tiene
+  // punta ancha y se actualiza con rezago → la "implícita" del corto puede
+  // diferir 5+ pts de la de Matriz solo por el spot usado (caso real 12/06:
+  // Matriz 16% vs Midas 21,8% con la MISMA fórmula). El segundo contrato
+  // diluye esa sensibilidad a un tercio.
   const front = useMemo(() => {
     if (!dlrCurve?.points) return null;
-    return dlrCurve.points.find((p) => p.expiryDays > 0 && p.tnaImplicitaPct != null) || null;
+    const alive = dlrCurve.points.filter((p) => p.expiryDays > 0 && p.tnaImplicitaPct != null);
+    return alive.find((p) => p.expiryDays >= 30) || alive[0] || null;
   }, [dlrCurve]);
   const caucion = dlrCurve?.caucionRate ?? null;
 
@@ -20789,6 +20796,8 @@ function DolarCompassWidget({ fx, dlrCurve }) {
 
       <div style={{ fontSize: 10, color: C.dim, lineHeight: 1.5, marginTop: "auto" }}>
         Lecturas mecánicas de precios relativos (las reglas y los números que las disparan están a la vista) — es el mapa de qué está caro contra qué, no una recomendación. Umbrales: carry ±2 pts vs caución; nivel ±0,5% vs REM del mes; brecha 2,5/5%.
+        {" "}El carry usa el primer contrato con ≥30 días (el más corto es hipersensible al spot: ±$1 ≈ ±1,4 pts de TNA) y el spot de dolarapi
+        {spot != null ? ` ($ ${fmtN(spot, 1)})` : ""}, que puede atrasar contra el último operado de MAE — ante diferencia con Matriz, mandá el de Matriz.
       </div>
     </div>
   );
