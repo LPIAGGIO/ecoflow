@@ -22875,7 +22875,7 @@ function RemTvChart({ series, useLog, rangeYears, height = 420 }) {
       ["real", "Real (oficial)", C.text, { lastValueVisible: true }],
       ["rem", series.remLabel || "REM", C.accent, {}],
       ["fut", "REM últ. encuesta", C.cat.amber, { lineStyle: 2 }],
-      ["corr", "Est. Midas", C.green, { lineStyle: 2 }],
+      ["corr", "REM Midas", C.green, { lineStyle: 2 }],
       ["dlr", "Futuros DLR (hoy)", C.cat.teal, {}],
     ];
     const entries = [];
@@ -23128,38 +23128,22 @@ function RemVsRealWidget({ futurePrices = {} }) {
           <div style={{ fontSize: 9.5, color: C.dim, textTransform: "uppercase", letterSpacing: "0.12em", marginBottom: 6 }}>
             {fmtMonth(cur.m)} en curso · mayorista prom. mensual
           </div>
-          <div className="flex items-baseline" style={{ gap: 16, flexWrap: "wrap" }}>
-            <div style={{ fontSize: 11, color: C.dim }}>
-              REM ({fmtMonth(model.lastSurvey.slice(0, 7))}) decía{" "}
-              <span style={{ fontSize: 15, fontWeight: 700, color: C.cat.amber, fontVariantNumeric: "tabular-nums" }}>
-                {cur.rem != null ? `$ ${fmtN(cur.rem)}` : "—"}
-              </span>
-            </div>
-            <div style={{ fontSize: 11, color: C.dim }}>
-              va{" "}
-              <span style={{ fontSize: 15, fontWeight: 700, color: C.text, fontVariantNumeric: "tabular-nums" }}>
-                $ {fmtN(cur.mtd, 1)}
-              </span>{" "}
-              ({cur.daysIn} ruedas)
-            </div>
-            <div style={{ fontSize: 11, color: C.dim }}>
-              prom. mes est.{" "}
-              <span style={{ fontSize: 15, fontWeight: 700, color: C.green, fontVariantNumeric: "tabular-nums" }}>
-                $ {fmtN(cur.estClose)}
-              </span>
-            </div>
-            {(() => {
-              const fut = dlrForMonth(cur.m);
-              return fut != null ? (
-                <div style={{ fontSize: 11, color: C.dim }}>
-                  futuro DLR (fin de mes){" "}
-                  <span style={{ fontSize: 15, fontWeight: 700, color: C.accent, fontVariantNumeric: "tabular-nums" }}>
-                    $ {fmtN(fut, 1)}
-                  </span>{" "}
-                  <span style={{ fontSize: 9.5 }}>{marketOpen ? "live" : "settle"}</span>
-                </div>
-              ) : null;
-            })()}
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "6px 12px" }}>
+            {[
+              ["REM decía", cur.rem != null ? `$ ${fmtN(cur.rem)}` : "—", C.cat.amber, null],
+              [`va (${cur.daysIn} ruedas)`, `$ ${fmtN(cur.mtd, 1)}`, C.text, null],
+              ["prom. mes est.", `$ ${fmtN(cur.estClose)}`, C.green, null],
+              (() => {
+                const fut = dlrForMonth(cur.m);
+                return fut != null ? ["futuro (fin de mes)", `$ ${fmtN(fut, 1)}`, C.accent, marketOpen ? "live" : "settle"] : null;
+              })(),
+            ].filter(Boolean).map(([label, value, color, tag]) => (
+              <div key={label} style={{ fontSize: 10.5, color: C.dim }}>
+                {label}{" "}
+                <span style={{ fontSize: 14.5, fontWeight: 700, color, fontVariantNumeric: "tabular-nums" }}>{value}</span>
+                {tag ? <span style={{ fontSize: 9 }}> {tag}</span> : null}
+              </div>
+            ))}
           </div>
         </div>
       )}
@@ -23170,7 +23154,7 @@ function RemVsRealWidget({ futurePrices = {} }) {
           <tr style={{ color: C.dim, fontSize: 9.5, textTransform: "uppercase", letterSpacing: "0.1em" }}>
             <th style={{ textAlign: "left", padding: "3px 6px" }}>Mes</th>
             <th style={{ textAlign: "right", padding: "3px 6px" }}>REM {fmtMonth(model.lastSurvey.slice(0, 7))}</th>
-            <th style={{ textAlign: "right", padding: "3px 6px" }}>Est. Midas</th>
+            <th style={{ textAlign: "right", padding: "3px 6px" }}>REM Midas</th>
             <th style={{ textAlign: "right", padding: "3px 6px" }}>Futuro {marketOpen ? "· live" : "· settle"}</th>
             <th style={{ textAlign: "right", padding: "3px 6px" }}>vs REM</th>
           </tr>
@@ -23196,38 +23180,43 @@ function RemVsRealWidget({ futurePrices = {} }) {
         </tbody>
       </table>
 
-      {/* Semáforo de riesgo de régimen (dispersión del consenso) */}
+      {/* Semáforo: ¿hay señales de un cambio brusco del dólar? (mide si las
+          consultoras siguen de acuerdo entre sí — antes de los quiebres
+          anticipables se desalinean meses antes, ej. dic-23) */}
       {model.regime && (() => {
         const lv = model.regime.level;
         const color = lv === "verde" ? C.green : lv === "amarillo" ? C.cat.amber : C.red;
         const label = lv === "verde" ? "VERDE" : lv === "amarillo" ? "AMARILLO" : "ROJO";
+        const texto =
+          lv === "verde"
+            ? "las consultoras coinciden entre sí: sin señales de salto del dólar — los pronósticos de arriba son confiables"
+            : lv === "amarillo"
+              ? "las consultoras se están desalineando: posible cambio de escenario — usar los pronósticos con cautela"
+              : "desacuerdo extremo entre consultoras: riesgo de quiebre — no confiar en ningún pronóstico de arriba";
         return (
           <div className="flex items-center" style={{ gap: 8, border: `1px solid ${C.border}`, borderRadius: 6, padding: "7px 10px" }}>
             <span style={{ width: 9, height: 9, borderRadius: "50%", background: color, flexShrink: 0, boxShadow: `0 0 6px ${color}` }} />
-            <span style={{ fontSize: 11, color: C.text, fontWeight: 600 }}>
-              Riesgo de régimen: <span style={{ color }}>{label}</span>
-            </span>
-            <span style={{ fontSize: 10.5, color: C.dim }}>
-              desacuerdo entre consultoras en percentil {Math.round(model.regime.pctl * 100)} de 10 años
-              {lv !== "verde" ? " — los rangos históricos subestiman el riesgo" : ""}
+            <span style={{ fontSize: 10.5, color: C.dim, lineHeight: 1.45 }}>
+              <span style={{ color: C.text, fontWeight: 600 }}>¿Riesgo de salto? <span style={{ color }}>{label}</span></span>
+              {" — "}{texto}.
             </span>
           </div>
         );
       })()}
 
-      {/* Cómo se calcula Est. Midas (expandible) */}
+      {/* Cómo se calcula REM Midas (expandible) */}
       <div>
         <button
           onClick={() => setShowHow((v) => !v)}
           style={{ background: "transparent", border: "none", padding: 0, cursor: "pointer", fontSize: 10.5, color: C.accent, fontWeight: 600 }}
         >
-          {showHow ? "▾ ocultar" : "▸ ¿cómo se calcula Est. Midas?"}
+          {showHow ? "▾ ocultar" : "▸ ¿cómo se calcula REM Midas?"}
         </button>
         {showHow && (
           <div style={{ fontSize: 10.5, color: C.muted, lineHeight: 1.65, marginTop: 6, border: `1px solid ${C.border}`, borderRadius: 6, padding: "8px 10px" }}>
             Cálculo propio de Midas (no lo publica nadie), en 3 pasos: (1) comparamos los pronósticos del REM desde 2016 contra el dólar que después ocurrió;
             (2) eso da el <em>sesgo</em> de cada plazo en el régimen actual; (3) lo aplicamos a la última encuesta:
-            {" "}<span style={{ color: C.green }}>Est. Midas = REM ÷ (1 + sesgo)</span>.
+            {" "}<span style={{ color: C.green }}>REM Midas = REM ÷ (1 + sesgo)</span>.
             {(() => {
               const parts = [];
               for (let h = 1; h <= 6; h++) {
@@ -23237,18 +23226,17 @@ function RemVsRealWidget({ futurePrices = {} }) {
               }
               return parts.length ? <> Sesgos hoy: <span style={{ fontVariantNumeric: "tabular-nums" }}>{parts.join(" · ")}</span> (negativo = el REM se queda corto → se corrige para arriba).</> : null;
             })()}
-            {" "}Vale mientras el régimen sea este — por eso el semáforo.
+            {" "}Vale mientras el régimen sea este. El semáforo vigila justamente eso: cuando las consultoras
+            se desalinean fuerte (como 6 meses antes de dic-23), se viene un cambio y los pronósticos dejan de valer
+            (los shocks súbitos tipo 2018 no los ve nadie).
+            {st ? ` A 3m el REM erra ±${(st.mae * 100).toFixed(1)}% típico.` : ""}
           </div>
         )}
       </div>
 
       <div style={{ fontSize: 10, color: C.dim, lineHeight: 1.5, marginTop: "auto" }}>
-        <strong style={{ color: C.muted }}>Est. Midas</strong> = la encuesta {fmtMonth(model.lastSurvey.slice(0, 7))} del REM ajustada por el error histórico del REM (cálculo de Midas).
-        {st ? ` A 3m el REM erra ±${(st.mae * 100).toFixed(1)}% típico.` : ""}{" "}
-        <span style={{ color: C.red }}>vs REM rojo</span> = el futuro pricea más devaluación que el consenso.
-        Ojo: el futuro liquida contra el A3500 de fin de mes; el REM pronostica el promedio mensual (~medio mes de crawl de diferencia).
-        El semáforo (dispersión del REM, mensual) detecta quiebres anticipables — avisó dic-23 con 6 meses; los shocks súbitos tipo 2018 no los ve.
-        Detalle: Estadísticas BCRA → REM.
+        <span style={{ color: C.red }}>vs REM rojo</span> = el futuro pricea más devaluación que el consenso
+        (el futuro apunta a fin de mes; el REM al promedio del mes). Detalle y método: Estadísticas BCRA → REM.
       </div>
     </div>
   );
@@ -23287,7 +23275,7 @@ function RemTcModule() {
   }, [remFuturesState, marketOpenRem]);
 
   // Qué curvas se ven (combinables): Real / REM hace Nm / REM últ. encuesta /
-  // Est. Midas / Futuros DLR.
+  // REM Midas / Futuros DLR.
   const [show, setShow] = useState({ real: true, rem: true, fut: true, corr: true, dlr: true });
   const chartSeries = useMemo(() => {
     if (!model) return null;
@@ -23388,7 +23376,7 @@ function RemTcModule() {
                 ["real", "Real (oficial)", C.text],
                 ["rem", `REM hace ${horizon}m`, C.accent],
                 ["fut", "REM últ. encuesta", C.cat.amber],
-                ["corr", "Est. Midas", C.green],
+                ["corr", "REM Midas", C.green],
                 ["dlr", "Futuros DLR (hoy)", C.cat.teal],
               ].map(([key, label, color]) => (
                 <button
@@ -23447,7 +23435,7 @@ function RemTcModule() {
                   <tr style={{ color: C.dim, fontSize: 10, textTransform: "uppercase", letterSpacing: "0.1em" }}>
                     <th style={{ textAlign: "left", padding: "4px 8px" }}>Mes</th>
                     <th style={{ textAlign: "right", padding: "4px 8px" }}>REM mediana</th>
-                    <th style={{ textAlign: "right", padding: "4px 8px" }}>Est. Midas (REM corregido)</th>
+                    <th style={{ textAlign: "right", padding: "4px 8px" }}>REM Midas (cálculo propio)</th>
                     <th style={{ textAlign: "right", padding: "4px 8px" }}>± error típico</th>
                   </tr>
                 </thead>
@@ -23483,17 +23471,17 @@ function RemTcModule() {
             </div>
           )}
 
-          {/* Cómo se calcula Est. Midas — transparencia total del método */}
+          {/* Cómo se calcula REM Midas — transparencia total del método */}
           <div style={{ border: `1px solid ${C.border}`, borderRadius: 6, background: C.panel, padding: 16, marginBottom: 14 }}>
             <div style={{ fontSize: 11, color: C.text, fontWeight: 600, marginBottom: 8 }}>
-              ¿Cómo se calcula "Est. Midas" y por qué?
+              ¿Cómo se calcula "REM Midas" y por qué?
             </div>
             <div style={{ fontSize: 11, color: C.muted, lineHeight: 1.7 }}>
               <strong style={{ color: C.text }}>Qué es:</strong> un cálculo propio de Midas — no lo publica el BCRA ni ninguna consultora.
               <br />
               <strong style={{ color: C.text }}>Cómo:</strong> (1) tomamos TODOS los pronósticos que el REM hizo desde 2016 y los comparamos contra el dólar que después ocurrió;
               (2) eso da el <em>sesgo</em> de cada plazo en el régimen actual — cuánto y para dónde le vienen errando;
-              (3) aplicamos ese sesgo a la última encuesta: <span style={{ color: C.green, fontFamily: "monospace" }}>Est. Midas = REM ÷ (1 + sesgo del plazo)</span>.
+              (3) aplicamos ese sesgo a la última encuesta: <span style={{ color: C.green, fontFamily: "monospace" }}>REM Midas = REM ÷ (1 + sesgo del plazo)</span>.
               {(() => {
                 const parts = [];
                 for (let h = 1; h <= 6; h++) {
@@ -23524,7 +23512,7 @@ function RemTcModule() {
               <br />
               <strong style={{ color: C.text }}>Por qué:</strong> si un pronosticador erra siempre parecido, ajustar por su error histórico da un pronóstico mejor que el original
               (el clásico amigo que avisa "llego 8:00" y siempre cae 8:10). La corrección vale <em>mientras el régimen cambiario sea este</em>:
-              si el semáforo de riesgo deja el verde, el historial reciente pierde validez y Est. Midas también.
+              si el semáforo de riesgo deja el verde, el historial reciente pierde validez y REM Midas también.
             </div>
           </div>
 
