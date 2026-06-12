@@ -404,6 +404,14 @@ async function generateAdjustments(positions, endSettleDate) {
       }
       if (validLotCount === 0) continue;
 
+      // Posicion NETEADA EN CERO sin movimiento: round-trip cerrado en dias
+      // anteriores (ambas patas con base = settle previo -> estimado exacto 0).
+      // Generar la fila solo mete ruido en el modal de acreditacion ("0 x 1000,
+      // estimado +0") — caso real LP 12/06: SEP26 cerrado el 08/06 seguia
+      // generando filas vacias el 09 y el 10. Un round-trip cerrado HOY si
+      // pasa (totalSignedQty 0 pero estimado != 0 = realizado intradia).
+      if (totalSignedQty === 0 && Math.abs(totalEstimated) < 1) continue;
+
       // avg ponderado de bases. Si totalSignedQty == 0 (round-trip que neteo
       // ese mismo dia, edge), no hay un display sensato; usamos prevOfficial
       // o currSettle como fallback.
