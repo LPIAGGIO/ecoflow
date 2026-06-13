@@ -24302,7 +24302,7 @@ function PnlPorInstrumentoModule() {
 
   const fmtQ = (n) => Number(n).toLocaleString("es-AR", { maximumFractionDigits: 2 });
   const fmtP = (n) => (n == null ? "—" : Number(n).toLocaleString("es-AR", { minimumFractionDigits: 2, maximumFractionDigits: 4 }));
-  const fmtM = (n) => `${n >= 0 ? "+" : "−"}$ ${Math.abs(n).toLocaleString("es-AR", { maximumFractionDigits: 0 })}`;
+  const fmtM = (n) => `${n >= 0 ? "+$" : "−$"}${Math.abs(n).toLocaleString("es-AR", { maximumFractionDigits: 0 })}`;
   const TYPE_LABEL = { future: "Futuro", bond_ars: "Bono ARS", bond_usd: "Bono USD", on: "ON", stock: "Acción", cedear: "CEDEAR", fci: "FCI", usd: "USD", crypto: "Crypto", option: "Opción" };
   const tickerLabel = (r) => r.type === "fci" ? r.ticker.split("|")[0] : r.ticker;
 
@@ -24318,7 +24318,7 @@ function PnlPorInstrumentoModule() {
   };
 
   return (
-    <div style={{ padding: "24px 32px", maxWidth: 1100, margin: "0 auto" }}>
+    <div style={{ padding: "24px 32px", maxWidth: 1280, margin: "0 auto" }}>
       <div className="flex items-start justify-between" style={{ marginBottom: 16, gap: 12 }}>
         <div>
           <h1 style={{ fontSize: 22, fontWeight: 600, color: C.text, letterSpacing: "-0.01em", margin: 0 }}>
@@ -24372,7 +24372,7 @@ function PnlPorInstrumentoModule() {
               {shown.map((r) => {
                 const cur = r.currency !== "ARS" ? ` ${r.currency}` : "";
                 const cell = (v, bold) => (
-                  <td style={{ padding: "7px 10px", textAlign: "right", fontVariantNumeric: "tabular-nums", fontWeight: bold ? 700 : 600, color: v > 0 ? C.green : v < 0 ? C.red : C.dim }}>
+                  <td style={{ padding: "7px 10px", textAlign: "right", fontVariantNumeric: "tabular-nums", fontWeight: bold ? 700 : 600, whiteSpace: "nowrap", color: v > 0 ? C.green : v < 0 ? C.red : C.dim }}>
                     {v !== 0 ? `${fmtM(v)}${cur}` : "—"}
                   </td>
                 );
@@ -24402,7 +24402,7 @@ function PnlPorInstrumentoModule() {
               <tr style={{ borderTop: `2px solid ${C.border}`, background: "rgba(255,255,255,0.02)" }}>
                 <td colSpan={6} style={{ padding: "8px 10px", fontSize: 11, color: C.muted, fontWeight: 600 }}>Total (ARS)</td>
                 {[totReal, totUnreal, totTotal].map((v, i) => (
-                  <td key={i} style={{ padding: "8px 10px", textAlign: "right", fontVariantNumeric: "tabular-nums", fontWeight: 700, color: v > 0 ? C.green : v < 0 ? C.red : C.dim }}>{fmtM(v)}</td>
+                  <td key={i} style={{ padding: "8px 10px", textAlign: "right", fontVariantNumeric: "tabular-nums", fontWeight: 700, whiteSpace: "nowrap", color: v > 0 ? C.green : v < 0 ? C.red : C.dim }}>{fmtM(v)}</td>
                 ))}
               </tr>
             </tfoot>
