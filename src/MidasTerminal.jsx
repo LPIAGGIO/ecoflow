@@ -24231,6 +24231,18 @@ function PnlPorInstrumentoModule() {
   const { positions, loading, error } = useUserPositions();
   const [typeFilter, setTypeFilter] = useState("all");
 
+  // Precios en vivo: sin esto el "no realizado" (P&L de lo abierto a mercado)
+  // sale 0 y los instrumentos abiertos quedaban en "—". Mismos hooks que la
+  // cartera, una sola contabilidad.
+  const bondPrices = useBondPrices()?.prices || {};
+  const stockPrices = useStockPrices()?.prices || {};
+  const fciPrices = useFciPrices(positions)?.prices || {};
+  const futureTickers = useMemo(
+    () => Array.from(new Set((positions || []).filter((p) => p.instrument_type === "future").map((p) => (p.ticker || "").toUpperCase().trim()))),
+    [positions]
+  );
+  const futurePrices = useFuturePrices(futureTickers)?.prices || {};
+
   const rows = useMemo(() => {
     if (!positions?.length) return [];
     const acc = new Map();
@@ -24243,7 +24255,7 @@ function PnlPorInstrumentoModule() {
         type: p.instrument_type, ticker: tk,
         currency: p.entry_currency || "ARS",
         buyQty: 0, buyNot: 0, sellQty: 0, sellNot: 0,
-        first: null, last: null, realized: 0, ops: 0,
+        first: null, last: null, realized: 0, total: 0, hasPnl: false, priceSource: null, ops: 0,
       };
       const qty = Number(p.quantity) || 0;
       const px = Number(p.entry_price) || 0;
@@ -24256,13 +24268,18 @@ function PnlPorInstrumentoModule() {
       }
       acc.set(key, e);
     }
-    // Realizado histórico desde la consolidada (suma filas open+closed del ticker)
+    // Realizado + TOTAL (realizado + no realizado a mercado) desde la
+    // consolidada — misma contabilidad que la cartera. Un ticker con cierre
+    // parcial vuelve como 2 filas (open + closed); sumamos las dos.
     try {
-      const groups = consolidatePositions(positions.filter((p) => p.instrument_type !== "caucion"));
+      const groups = consolidatePositions(positions.filter((p) => p.instrument_type !== "caucion"), bondPrices, futurePrices, fciPrices, stockPrices);
       for (const g of groups || []) {
-        if (!g || g.realizedPnl == null || !Number.isFinite(Number(g.realizedPnl))) continue;
+        if (!g) continue;
         const e = acc.get(g.instrument_type + "|" + (g.ticker || "").toUpperCase().trim());
-        if (e) e.realized += Number(g.realizedPnl);
+        if (!e) continue;
+        if (g.realizedPnl != null && Number.isFinite(Number(g.realizedPnl))) e.realized += Number(g.realizedPnl);
+        if (g.pnl != null && Number.isFinite(Number(g.pnl))) { e.total += Number(g.pnl); e.hasPnl = true; }
+        if (g.priceSource && g.priceSource !== "cost") e.priceSource = g.priceSource;
       }
     } catch (err) { console.warn("[PnlPorInstrumento] consolidate falló:", err); }
 
@@ -24271,12 +24288,17 @@ function PnlPorInstrumentoModule() {
       pppBuy: e.buyQty > 0 ? e.buyNot / e.buyQty : null,
       pppSell: e.sellQty > 0 ? e.sellNot / e.sellQty : null,
       open: e.buyQty - e.sellQty,
-    })).sort((a, b) => Math.abs(b.realized) - Math.abs(a.realized) || (a.ticker < b.ticker ? -1 : 1));
-  }, [positions]);
+      unrealized: e.total - e.realized,
+      atMarket: e.priceSource != null, // hay precio de mercado para lo abierto
+    })).sort((a, b) => Math.abs(b.total) - Math.abs(a.total) || (a.ticker < b.ticker ? -1 : 1));
+  }, [positions, bondPrices, futurePrices, fciPrices, stockPrices]);
 
   const presentTypes = useMemo(() => Array.from(new Set(rows.map((r) => r.type))), [rows]);
   const shown = typeFilter === "all" ? rows : rows.filter((r) => r.type === typeFilter);
-  const totalArs = shown.filter((r) => (r.currency || "ARS") === "ARS").reduce((s, r) => s + r.realized, 0);
+  const arsRows = shown.filter((r) => (r.currency || "ARS") === "ARS");
+  const totReal = arsRows.reduce((s, r) => s + r.realized, 0);
+  const totUnreal = arsRows.reduce((s, r) => s + r.unrealized, 0);
+  const totTotal = arsRows.reduce((s, r) => s + r.total, 0);
 
   const fmtQ = (n) => Number(n).toLocaleString("es-AR", { maximumFractionDigits: 2 });
   const fmtP = (n) => (n == null ? "—" : Number(n).toLocaleString("es-AR", { minimumFractionDigits: 2, maximumFractionDigits: 4 }));
@@ -24285,8 +24307,8 @@ function PnlPorInstrumentoModule() {
   const tickerLabel = (r) => r.type === "fci" ? r.ticker.split("|")[0] : r.ticker;
 
   const downloadCsv = () => {
-    const head = "tipo;ticker;moneda;ops;desde;hasta;qty_comprada;ppp_compra;qty_vendida;ppp_venta;abierto;realizado";
-    const lines = shown.map((r) => [TYPE_LABEL[r.type] || r.type, tickerLabel(r), r.currency, r.ops, r.first || "", r.last || "", r.buyQty, r.pppBuy ?? "", r.sellQty, r.pppSell ?? "", r.open, r.realized.toFixed(2)].join(";"));
+    const head = "tipo;ticker;moneda;ops;desde;hasta;qty_comprada;ppp_compra;qty_vendida;ppp_venta;abierto;realizado;no_realizado;total";
+    const lines = shown.map((r) => [TYPE_LABEL[r.type] || r.type, tickerLabel(r), r.currency, r.ops, r.first || "", r.last || "", r.buyQty, r.pppBuy ?? "", r.sellQty, r.pppSell ?? "", r.open, r.realized.toFixed(2), r.unrealized.toFixed(2), r.total.toFixed(2)].join(";"));
     const blob = new Blob(["﻿" + [head, ...lines].join("\n")], { type: "text/csv;charset=utf-8" });
     const a = document.createElement("a");
     a.href = URL.createObjectURL(blob);
@@ -24303,7 +24325,7 @@ function PnlPorInstrumentoModule() {
             P&L por Instrumento
           </h1>
           <p style={{ fontSize: 12, color: C.muted, margin: "6px 0 0 0" }}>
-            Histórico por ticker: PPP de compra y de venta, posición abierta y resultado realizado. Incluye instrumentos ya cerrados.
+            Histórico por ticker: PPP de compra y de venta, y el P&L completo — <strong style={{ color: C.muted }}>realizado</strong> (cerrado) + <strong style={{ color: C.muted }}>no realizado</strong> (lo abierto a mercado) = <strong style={{ color: C.text }}>total</strong>. Incluye instrumentos cerrados y abiertos.
           </p>
         </div>
         <button onClick={downloadCsv}
@@ -24342,30 +24364,46 @@ function PnlPorInstrumentoModule() {
                 <th style={{ textAlign: "right", padding: "8px 10px" }}>PPP venta</th>
                 <th style={{ textAlign: "right", padding: "8px 10px" }}>Abierto</th>
                 <th style={{ textAlign: "right", padding: "8px 10px" }}>Realizado</th>
+                <th style={{ textAlign: "right", padding: "8px 10px" }}>No realiz.</th>
+                <th style={{ textAlign: "right", padding: "8px 10px" }}>Total</th>
               </tr>
             </thead>
             <tbody>
-              {shown.map((r) => (
-                <tr key={r.type + r.ticker} style={{ borderTop: `1px solid ${C.border}` }}>
-                  <td style={{ padding: "7px 10px" }}>
-                    <span style={{ color: C.text, fontWeight: 600 }}>{tickerLabel(r)}</span>{" "}
-                    <span style={{ fontSize: 9.5, color: C.dim }}>{TYPE_LABEL[r.type] || r.type} · {r.ops} ops · {r.first?.slice(2).replaceAll("-", "/")} → {r.last?.slice(2).replaceAll("-", "/")}</span>
+              {shown.map((r) => {
+                const cur = r.currency !== "ARS" ? ` ${r.currency}` : "";
+                const cell = (v, bold) => (
+                  <td style={{ padding: "7px 10px", textAlign: "right", fontVariantNumeric: "tabular-nums", fontWeight: bold ? 700 : 600, color: v > 0 ? C.green : v < 0 ? C.red : C.dim }}>
+                    {v !== 0 ? `${fmtM(v)}${cur}` : "—"}
                   </td>
-                  <td style={{ padding: "7px 10px", textAlign: "right", fontVariantNumeric: "tabular-nums", color: C.muted }}>{fmtQ(r.buyQty)}</td>
-                  <td style={{ padding: "7px 10px", textAlign: "right", fontVariantNumeric: "tabular-nums", color: C.text }}>{fmtP(r.pppBuy)}</td>
-                  <td style={{ padding: "7px 10px", textAlign: "right", fontVariantNumeric: "tabular-nums", color: C.muted }}>{r.sellQty > 0 ? fmtQ(r.sellQty) : "—"}</td>
-                  <td style={{ padding: "7px 10px", textAlign: "right", fontVariantNumeric: "tabular-nums", color: C.text }}>{fmtP(r.pppSell)}</td>
-                  <td style={{ padding: "7px 10px", textAlign: "right", fontVariantNumeric: "tabular-nums", color: r.open === 0 ? C.dim : C.muted }}>{r.open === 0 ? "cerrado" : fmtQ(r.open)}</td>
-                  <td style={{ padding: "7px 10px", textAlign: "right", fontVariantNumeric: "tabular-nums", fontWeight: 700, color: r.realized > 0 ? C.green : r.realized < 0 ? C.red : C.dim }}>
-                    {r.realized !== 0 ? `${fmtM(r.realized)} ${r.currency !== "ARS" ? r.currency : ""}` : "—"}
-                  </td>
-                </tr>
-              ))}
+                );
+                return (
+                  <tr key={r.type + r.ticker} style={{ borderTop: `1px solid ${C.border}` }}>
+                    <td style={{ padding: "7px 10px" }}>
+                      <span style={{ color: C.text, fontWeight: 600 }}>{tickerLabel(r)}</span>{" "}
+                      <span style={{ fontSize: 9.5, color: C.dim }}>{TYPE_LABEL[r.type] || r.type} · {r.ops} ops · {r.first?.slice(2).replaceAll("-", "/")} → {r.last?.slice(2).replaceAll("-", "/")}</span>
+                    </td>
+                    <td style={{ padding: "7px 10px", textAlign: "right", fontVariantNumeric: "tabular-nums", color: C.muted }}>{fmtQ(r.buyQty)}</td>
+                    <td style={{ padding: "7px 10px", textAlign: "right", fontVariantNumeric: "tabular-nums", color: C.text }}>{fmtP(r.pppBuy)}</td>
+                    <td style={{ padding: "7px 10px", textAlign: "right", fontVariantNumeric: "tabular-nums", color: C.muted }}>{r.sellQty > 0 ? fmtQ(r.sellQty) : "—"}</td>
+                    <td style={{ padding: "7px 10px", textAlign: "right", fontVariantNumeric: "tabular-nums", color: C.text }}>{fmtP(r.pppSell)}</td>
+                    <td style={{ padding: "7px 10px", textAlign: "right", fontVariantNumeric: "tabular-nums", color: r.open === 0 ? C.dim : C.muted }}>
+                      {r.open === 0 ? "cerrado" : (
+                        <>{fmtQ(r.open)}{!r.atMarket && r.unrealized === 0 && <span style={{ color: C.dim, fontSize: 9 }}> ·s/precio</span>}</>
+                      )}
+                    </td>
+                    {cell(r.realized, false)}
+                    {cell(r.unrealized, false)}
+                    {cell(r.total, true)}
+                  </tr>
+                );
+              })}
             </tbody>
             <tfoot>
               <tr style={{ borderTop: `2px solid ${C.border}`, background: "rgba(255,255,255,0.02)" }}>
-                <td colSpan={6} style={{ padding: "8px 10px", fontSize: 11, color: C.muted, fontWeight: 600 }}>Total realizado (ARS)</td>
-                <td style={{ padding: "8px 10px", textAlign: "right", fontVariantNumeric: "tabular-nums", fontWeight: 700, color: totalArs > 0 ? C.green : totalArs < 0 ? C.red : C.dim }}>{fmtM(totalArs)}</td>
+                <td colSpan={6} style={{ padding: "8px 10px", fontSize: 11, color: C.muted, fontWeight: 600 }}>Total (ARS)</td>
+                {[totReal, totUnreal, totTotal].map((v, i) => (
+                  <td key={i} style={{ padding: "8px 10px", textAlign: "right", fontVariantNumeric: "tabular-nums", fontWeight: 700, color: v > 0 ? C.green : v < 0 ? C.red : C.dim }}>{fmtM(v)}</td>
+                ))}
               </tr>
             </tfoot>
           </table>
@@ -24373,8 +24411,8 @@ function PnlPorInstrumentoModule() {
       )}
 
       <div style={{ fontSize: 11, color: C.dim, lineHeight: 1.6, marginTop: 12 }}>
-        Realizado = misma contabilidad que la cartera (LIFO en futuros, PPP en contado, con multiplicadores aplicados) — solo lo cerrado, no incluye el resultado de lo abierto.
-        Cauciones excluidas. <strong style={{ color: C.muted }}>Solo aparece lo cargado en Midas</strong>: tus futuros de abril-mayo (DLR ABR26/MAY26) no están cargados — importá el CSV de Matriz de ese período (Cartera → Importar CSV; no duplica) y este reporte los suma solo.
+        <strong style={{ color: C.muted }}>Realizado</strong> = lo cerrado (cobrado). <strong style={{ color: C.muted }}>No realizado</strong> = lo abierto valuado a precio de mercado de ahora (varía minuto a minuto). <strong style={{ color: C.text }}>Total</strong> = todo lo ganado/perdido en ese instrumento desde que lo operás. Misma contabilidad que la cartera (LIFO en futuros, PPP en contado, multiplicadores aplicados). Cauciones excluidas.
+        {" "}<strong style={{ color: C.muted }}>Solo aparece lo cargado en Midas</strong>: tus futuros de abril-mayo (DLR ABR26/MAY26) no están cargados — importá el CSV de Matriz de ese período (Cartera → Importar CSV; no duplica) y este reporte los suma solo.
       </div>
     </div>
   );
