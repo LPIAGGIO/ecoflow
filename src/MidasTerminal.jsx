@@ -24302,6 +24302,9 @@ function PnlPorInstrumentoModule() {
 
   const fmtQ = (n) => Number(n).toLocaleString("es-AR", { maximumFractionDigits: 2 });
   const fmtP = (n) => (n == null ? "—" : Number(n).toLocaleString("es-AR", { minimumFractionDigits: 2, maximumFractionDigits: 4 }));
+  // ISO "2026-06-04" → "04/06/26" (DD/MM/AA). Antes hacía slice(2) → "26/06/04"
+  // (parecía YY/MM/DD invertido).
+  const fmtFecha = (iso) => (iso && iso.length >= 10 ? `${iso.slice(8, 10)}/${iso.slice(5, 7)}/${iso.slice(2, 4)}` : "");
   const fmtM = (n) => `${n >= 0 ? "+$" : "−$"}${Math.abs(n).toLocaleString("es-AR", { maximumFractionDigits: 0 })}`;
   const TYPE_LABEL = { future: "Futuro", bond_ars: "Bono ARS", bond_usd: "Bono USD", on: "ON", stock: "Acción", cedear: "CEDEAR", fci: "FCI", usd: "USD", crypto: "Crypto", option: "Opción" };
   const tickerLabel = (r) => r.type === "fci" ? r.ticker.split("|")[0] : r.ticker;
@@ -24380,7 +24383,7 @@ function PnlPorInstrumentoModule() {
                   <tr key={r.type + r.ticker} style={{ borderTop: `1px solid ${C.border}` }}>
                     <td style={{ padding: "7px 10px" }}>
                       <span style={{ color: C.text, fontWeight: 600 }}>{tickerLabel(r)}</span>{" "}
-                      <span style={{ fontSize: 9.5, color: C.dim }}>{TYPE_LABEL[r.type] || r.type} · {r.ops} ops · {r.first?.slice(2).replaceAll("-", "/")} → {r.last?.slice(2).replaceAll("-", "/")}</span>
+                      <span style={{ fontSize: 9.5, color: C.dim }}>{TYPE_LABEL[r.type] || r.type} · {r.ops} ops · {fmtFecha(r.first)} → {fmtFecha(r.last)}</span>
                     </td>
                     <td style={{ padding: "7px 10px", textAlign: "right", fontVariantNumeric: "tabular-nums", color: C.muted }}>{fmtQ(r.buyQty)}</td>
                     <td style={{ padding: "7px 10px", textAlign: "right", fontVariantNumeric: "tabular-nums", color: C.text }}>{fmtP(r.pppBuy)}</td>
