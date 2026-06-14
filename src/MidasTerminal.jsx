@@ -24245,15 +24245,27 @@ function RemTcModule() {
 //   El MENOR CCL implícito gana para comprar; el MAYOR para vender (con bid).
 //   CCL_ref = mediana del CCL implícito (mid) de los líquidos de referencia.
 // ═══════════════════════════════════════════════════════════════════════
+// Ratios DERIVADOS de la data historica (cedear_fv_log, 78k filas) anclando
+// a AAPL=20 y usando que el CCL es comun a todos en cada instante: la
+// mediana del ratio implicito por simbolo converge al oficial promediando
+// el ruido. Corrige splits que la siembra a ojo erraba (GOOGL 58, AVGO 39,
+// MU 5). SOLO se muestran papeles de esta tabla — nada de derivar a ciegas
+// (eso cruzaba simbolos homonimos no equivalentes → desvios de +395%).
 const EJEC_RATIOS = {
   AAPL: 20, MSFT: 30, NVDA: 24, AMZN: 144, META: 24, TSLA: 15, AMD: 10, KO: 5,
   MELI: 120, NFLX: 48, BABA: 9, V: 18, MA: 33, JPM: 15, PYPL: 8, INTC: 5,
   QQQ: 20, SPY: 60, WMT: 18, JNJ: 15, COIN: 27, PLTR: 3, MSTR: 20, GLOB: 18,
-  CRM: 18, ORCL: 3, AVGO: 24, MU: 8, GOOGL: 29, DIS: 12,
+  CRM: 18, ORCL: 3, AVGO: 39, MU: 5, GOOGL: 58, NU: 2, RKLB: 12, TQQQ: 25,
+  ASTS: 15, ADBE: 44, VIST: 3, CRWV: 27, IREN: 12, RGTI: 2, QCOM: 11, MCD: 24,
+  NBIS: 27, IBM: 15, OKLO: 28, CEG: 45, UNH: 33, XP: 4, NKE: 12, UPST: 5,
+  ARM: 27, ASML: 146, RIOT: 3, COPX: 14, HUT: 5, PAGS: 3, NIO: 4, NOW: 171,
+  SNDK: 170, QCOM_: 11,
 };
-const EJEC_CORE = ["AAPL", "MSFT", "NVDA", "AMZN", "META", "KO", "MELI", "QQQ", "SPY", "JNJ", "V", "AMD"];
-const EJEC_GRID = [1, 2, 3, 4, 5, 6, 7, 8, 10, 12, 15, 16, 18, 20, 24, 25, 30, 33, 35, 40, 48, 60, 72, 90, 120, 144, 150, 200];
-const ejecSnap = (x) => EJEC_GRID.reduce((a, b) => Math.abs(b - x) < Math.abs(a - x) ? b : a, EJEC_GRID[0]);
+const EJEC_CORE = ["AAPL", "MSFT", "NVDA", "AMZN", "META", "KO", "MELI", "NFLX", "AMD", "GLOB", "INTC", "MSTR"];
+// limites de sanidad: un desvio real de ejecucion es chico; arriba de esto
+// es dato podrido (pata stale / cruce raro), no oportunidad. Idem spread.
+const EJEC_MAX_DEV = 4;     // % de desvio maximo plausible
+const EJEC_MAX_SPREAD = 6;  // % de spread maximo por pata
 const ejecMedian = (arr) => { const a = arr.filter(Number.isFinite).sort((x, y) => x - y); if (!a.length) return null; const m = a.length >> 1; return a.length % 2 ? a[m] : (a[m - 1] + a[m]) / 2; };
 
 function EjecucionInteligenteModule() {
@@ -24307,16 +24319,20 @@ function EjecucionInteligenteModule() {
       const cBid = num(c.px_bid), cAsk = num(c.px_ask), uBid = num(u.px_bid), uAsk = num(u.px_ask);
       const cMid = mid(cBid, cAsk), uMid = mid(uBid, uAsk) || num(u.c);
       if (!cMid || !uMid) continue;
-      let ratio = EJEC_RATIOS[sym];
-      if (!ratio) ratio = ejecSnap(uMid * ref / cMid);
-      if (!ratio) continue;
+      const ratio = EJEC_RATIOS[sym];
+      if (!ratio) continue; // solo papeles con ratio conocido (sin derivar a ciegas)
       const cclImplMid = ratio * cMid / uMid;
       const devPct = (cclImplMid / ref - 1) * 100;
       const cSpread = (cBid && cAsk) ? (cAsk - cBid) / cMid * 100 : null;
       const uSpread = (uBid && uAsk) ? (uAsk - uBid) / uMid * 100 : null;
+      // sanidad: un desvío real es chico; arriba de los límites es dato
+      // podrido (pata stale / cruce raro), no oportunidad → se descarta.
+      if (Math.abs(devPct) > EJEC_MAX_DEV) continue;
+      if (cSpread != null && cSpread > EJEC_MAX_SPREAD) continue;
+      if (uSpread != null && uSpread > EJEC_MAX_SPREAD) continue;
       out.push({
         sym, ratio, cclImplMid, devPct, edgeAbs: Math.abs(devPct),
-        cSpread, uSpread, cVol: num(c.v) || 0, seeded: !!EJEC_RATIOS[sym],
+        cSpread, uSpread, cVol: num(c.v) || 0,
         buyCedear: cclImplMid < ref, sellCedear: cclImplMid > ref,
       });
     }
@@ -24391,7 +24407,6 @@ function EjecucionInteligenteModule() {
                 <tr key={r.sym} style={{ borderBottom: `1px solid ${C.border}` }}>
                   <td style={{ padding: "8px 12px", fontWeight: 700, color: C.text }}>
                     {r.sym}
-                    {!r.seeded && <span title="ratio derivado de la data" style={{ marginLeft: 5, fontSize: 9, color: C.dim }}>~</span>}
                   </td>
                   <td style={{ padding: "8px 12px" }}><RouteBadge cedear={r.buyCedear} save={r.edgeAbs} /></td>
                   <td style={{ padding: "8px 12px" }}><RouteBadge cedear={r.sellCedear} save={r.edgeAbs} /></td>
@@ -24409,7 +24424,7 @@ function EjecucionInteligenteModule() {
       )}
 
       <p style={{ fontSize: 11, color: C.dim, margin: "12px 2px 0", lineHeight: 1.5, maxWidth: 880 }}>
-        <strong style={{ color: C.muted }}>Cómo leerlo:</strong> el <strong>desvío</strong> es cuánto se aparta el CCL implícito del CEDEAR del CCL de referencia. Si el CEDEAR está <span style={{ color: "#34d399" }}>barato</span> (desvío −) conviene comprarlo y vender el papel USA; si está <span style={{ color: "#f87171" }}>caro</span> (desvío +), al revés. El <strong>ahorro</strong> es esa diferencia, antes de spreads — por eso conviene cuando supera el spread de la ruta. Ratios marcados con <span style={{ color: C.dim }}>~</span> son derivados de la data (verificar antes de operar grande).
+        <strong style={{ color: C.muted }}>Cómo leerlo:</strong> el <strong>desvío</strong> es cuánto se aparta el CCL implícito del CEDEAR del CCL de referencia. Si el CEDEAR está <span style={{ color: "#34d399" }}>barato</span> (desvío −) conviene comprarlo y vender el papel USA; si está <span style={{ color: "#f87171" }}>caro</span> (desvío +), al revés. El <strong>ahorro</strong> es esa diferencia, antes de spreads — por eso conviene cuando supera el spread de la ruta. Solo se listan papeles con ratio verificado contra la data; se ocultan desvíos mayores a {EJEC_MAX_DEV}% o spreads ilíquidos (dato no confiable, no oportunidad).
       </p>
     </div>
   );
