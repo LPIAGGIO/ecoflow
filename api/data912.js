@@ -17,6 +17,7 @@ const SOURCES = {
   letras:   "https://data912.com/live/arg_notes",
   acciones: "https://data912.com/live/arg_stocks",
   cedears:  "https://data912.com/live/arg_cedears",
+  usa:      "https://data912.com/live/usa_stocks",
 };
 
 export default async function handler(req, res) {

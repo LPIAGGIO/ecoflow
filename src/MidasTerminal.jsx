@@ -241,6 +241,7 @@ const NAV = [
     children: [
       { id: "libro-operaciones", label: "Libro de operaciones", icon: BookOpen },
       { id: "pnl-instrumento", label: "P&L por Instrumento", icon: BarChart3 },
+      { id: "ejecucion-cedear", label: "Ejecución CEDEAR/USA", icon: Repeat },
     ],
   },
 ];
@@ -990,6 +991,8 @@ function MidasApp() {
               <RemTcModule key={active} />
             ) : active === "pnl-instrumento" ? (
               <PnlPorInstrumentoModule key={active} />
+            ) : active === "ejecucion-cedear" ? (
+              <EjecucionInteligenteModule key={active} />
             ) : active === "desarbitrajes" ? (
               <DesarbitrajesModule key={active} />
             ) : active === "flujo-posiciones" ? (
@@ -24227,6 +24230,191 @@ function RemTcModule() {
  * Los PPP salen de las operaciones crudas (Σ qty×precio / Σ qty por lado).
  * Cauciones se excluyen (no son trading de un instrumento).
  */
+// ═══════════════════════════════════════════════════════════════════════
+// Ejecución Inteligente — CEDEAR (BCBA) vs papel USA directo (NYSE/NASDAQ).
+//
+// Para una exposición que YA vas a tomar o soltar, elige la ruta más barata.
+// NO es arbitraje (no apuesta a que el desvío revierta — eso ya lo medimos y
+// el spread se lo come): compara, AHORA, el costo de operar el CEDEAR contra
+// dolarizar al CCL y operar el papel USA. Con 0 comisión en Cocos el costo es
+// el spread, así que elegir bien la ruta es plata directa al bolsillo.
+//
+//   Comprar 1 acción de exposición:
+//     vía CEDEAR → ratio × c_ask pesos   → CCL implícito = ratio×c_ask/u_ask
+//     vía USA    → u_ask USD             → cuesta u_ask × CCL_ref pesos
+//   El MENOR CCL implícito gana para comprar; el MAYOR para vender (con bid).
+//   CCL_ref = mediana del CCL implícito (mid) de los líquidos de referencia.
+// ═══════════════════════════════════════════════════════════════════════
+const EJEC_RATIOS = {
+  AAPL: 20, MSFT: 30, NVDA: 24, AMZN: 144, META: 24, TSLA: 15, AMD: 10, KO: 5,
+  MELI: 120, NFLX: 48, BABA: 9, V: 18, MA: 33, JPM: 15, PYPL: 8, INTC: 5,
+  QQQ: 20, SPY: 60, WMT: 18, JNJ: 15, COIN: 27, PLTR: 3, MSTR: 20, GLOB: 18,
+  CRM: 18, ORCL: 3, AVGO: 24, MU: 8, GOOGL: 29, DIS: 12,
+};
+const EJEC_CORE = ["AAPL", "MSFT", "NVDA", "AMZN", "META", "KO", "MELI", "QQQ", "SPY", "JNJ", "V", "AMD"];
+const EJEC_GRID = [1, 2, 3, 4, 5, 6, 7, 8, 10, 12, 15, 16, 18, 20, 24, 25, 30, 33, 35, 40, 48, 60, 72, 90, 120, 144, 150, 200];
+const ejecSnap = (x) => EJEC_GRID.reduce((a, b) => Math.abs(b - x) < Math.abs(a - x) ? b : a, EJEC_GRID[0]);
+const ejecMedian = (arr) => { const a = arr.filter(Number.isFinite).sort((x, y) => x - y); if (!a.length) return null; const m = a.length >> 1; return a.length % 2 ? a[m] : (a[m - 1] + a[m]) / 2; };
+
+function EjecucionInteligenteModule() {
+  const [ced, setCed] = useState({});
+  const [usa, setUsa] = useState({});
+  const [loading, setLoading] = useState(true);
+  const [lastFetch, setLastFetch] = useState(null);
+  const [q, setQ] = useState("");
+  const [tick, setTick] = useState(0);
+
+  useEffect(() => {
+    let mounted = true;
+    const run = async () => {
+      try {
+        setLoading(true);
+        const [cR, uR] = await Promise.all([
+          fetch(`/api/data912?type=cedears&_=${Date.now()}`),
+          fetch(`/api/data912?type=usa&_=${Date.now()}`),
+        ]);
+        const cArr = cR.ok ? await cR.json() : [];
+        const uArr = uR.ok ? await uR.json() : [];
+        if (!mounted) return;
+        const cm = {}; for (const x of cArr) if (x?.symbol) cm[String(x.symbol).toUpperCase()] = x;
+        const um = {}; for (const x of uArr) if (x?.symbol) um[String(x.symbol).toUpperCase()] = x;
+        setCed(cm); setUsa(um); setLastFetch(new Date()); setLoading(false);
+      } catch { if (mounted) setLoading(false); }
+    };
+    run();
+    const id = setInterval(run, 30000);
+    return () => { mounted = false; clearInterval(id); };
+  }, [tick]);
+
+  const { rows, cclRef, marketOpen } = useMemo(() => {
+    const num = (x) => { const n = Number(x); return Number.isFinite(n) && n > 0 ? n : null; };
+    const mid = (a, b) => (a && b ? (a + b) / 2 : (a || b || null));
+    const cclPool = [];
+    for (const sym of EJEC_CORE) {
+      const c = ced[sym], u = usa[sym], r = EJEC_RATIOS[sym];
+      if (!c || !u || !r) continue;
+      const cMid = mid(num(c.px_bid), num(c.px_ask));
+      const uMid = mid(num(u.px_bid), num(u.px_ask)) || num(u.c);
+      if (cMid && uMid) cclPool.push(r * cMid / uMid);
+    }
+    const ref = ejecMedian(cclPool);
+    const open = cclPool.length >= 3;
+    if (!ref) return { rows: [], cclRef: null, marketOpen: open };
+    const out = [];
+    for (const sym of Object.keys(ced)) {
+      const c = ced[sym], u = usa[sym];
+      if (!u) continue;
+      const cBid = num(c.px_bid), cAsk = num(c.px_ask), uBid = num(u.px_bid), uAsk = num(u.px_ask);
+      const cMid = mid(cBid, cAsk), uMid = mid(uBid, uAsk) || num(u.c);
+      if (!cMid || !uMid) continue;
+      let ratio = EJEC_RATIOS[sym];
+      if (!ratio) ratio = ejecSnap(uMid * ref / cMid);
+      if (!ratio) continue;
+      const cclImplMid = ratio * cMid / uMid;
+      const devPct = (cclImplMid / ref - 1) * 100;
+      const cSpread = (cBid && cAsk) ? (cAsk - cBid) / cMid * 100 : null;
+      const uSpread = (uBid && uAsk) ? (uAsk - uBid) / uMid * 100 : null;
+      out.push({
+        sym, ratio, cclImplMid, devPct, edgeAbs: Math.abs(devPct),
+        cSpread, uSpread, cVol: num(c.v) || 0, seeded: !!EJEC_RATIOS[sym],
+        buyCedear: cclImplMid < ref, sellCedear: cclImplMid > ref,
+      });
+    }
+    out.sort((a, b) => b.edgeAbs - a.edgeAbs);
+    return { rows: out, cclRef: ref, marketOpen: open };
+  }, [ced, usa]);
+
+  const filtered = q ? rows.filter((r) => r.sym.includes(q.toUpperCase())) : rows;
+  const fmtN = (n, d = 2) => (n == null ? "—" : Number(n).toLocaleString("es-AR", { minimumFractionDigits: d, maximumFractionDigits: d }));
+  const CED = "#34d399", US = "#60a5fa";
+  const RouteBadge = ({ cedear, save }) => (
+    <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+      <span style={{ padding: "2px 7px", fontSize: 10, fontWeight: 700, borderRadius: 3, color: cedear ? CED : US, background: cedear ? "rgba(52,211,153,0.12)" : "rgba(96,165,250,0.12)" }}>
+        {cedear ? "CEDEAR" : "Papel USA"}
+      </span>
+      <span style={{ fontSize: 11, color: C.muted, fontVariantNumeric: "tabular-nums" }}>
+        ahorrás {fmtN(save, 2)}%
+      </span>
+    </span>
+  );
+
+  return (
+    <div style={{ padding: "24px 32px", maxWidth: 1180, margin: "0 auto" }}>
+      <div className="flex items-start justify-between" style={{ marginBottom: 16, gap: 12 }}>
+        <div>
+          <h1 style={{ fontSize: 22, fontWeight: 600, color: C.text, letterSpacing: "-0.01em", margin: 0 }}>
+            Ejecución Inteligente
+          </h1>
+          <p style={{ fontSize: 12, color: C.muted, margin: "6px 0 0 0", maxWidth: 760 }}>
+            Para una exposición que ya vas a tomar o soltar, cuál ruta es más barata <strong style={{ color: CED }}>CEDEAR (BCBA)</strong> o el <strong style={{ color: US }}>papel USA directo (NYSE/NASDAQ)</strong>. No es arbitraje: es no regalar el spread al entrar o salir. Ordenado por dónde más ahorrás.
+          </p>
+        </div>
+        <button onClick={() => setTick((t) => t + 1)}
+          style={{ padding: "6px 12px", fontSize: 11, fontWeight: 600, cursor: "pointer", border: `1px solid ${C.border}`, background: "transparent", color: C.muted, borderRadius: 4, whiteSpace: "nowrap" }}>
+          Actualizar
+        </button>
+      </div>
+
+      <div className="flex items-center" style={{ gap: 12, marginBottom: 14, flexWrap: "wrap" }}>
+        <div style={{ fontSize: 12, color: C.muted }}>
+          CCL de referencia: <strong style={{ color: C.text, fontVariantNumeric: "tabular-nums" }}>{cclRef ? fmtN(cclRef, 1) : "—"}</strong>
+        </div>
+        <div style={{ fontSize: 11, color: marketOpen ? "#34d399" : C.dim }}>
+          {marketOpen ? "● mercado abierto" : "○ mercado cerrado (último cierre)"}
+        </div>
+        <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Buscar ticker…"
+          style={{ marginLeft: "auto", padding: "5px 10px", fontSize: 12, background: "transparent", color: C.text, border: `1px solid ${C.border}`, borderRadius: 4, outline: "none", width: 160 }} />
+      </div>
+
+      {loading && !rows.length ? (
+        <div style={{ padding: 40, textAlign: "center", color: C.muted, fontSize: 13 }}>Cargando precios…</div>
+      ) : !cclRef ? (
+        <div style={{ padding: 40, textAlign: "center", color: C.muted, fontSize: 13 }}>
+          Sin libro de precios para calcular el CCL de referencia. Probá durante la rueda (11–17 ART).
+        </div>
+      ) : (
+        <div style={{ overflowX: "auto", border: `1px solid ${C.border}`, borderRadius: 6 }}>
+          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+            <thead>
+              <tr style={{ borderBottom: `1px solid ${C.border}`, color: C.dim, textAlign: "left" }}>
+                <th style={{ padding: "9px 12px", fontWeight: 600 }}>Ticker</th>
+                <th style={{ padding: "9px 12px", fontWeight: 600 }}>Para COMPRAR</th>
+                <th style={{ padding: "9px 12px", fontWeight: 600 }}>Para VENDER</th>
+                <th style={{ padding: "9px 12px", fontWeight: 600, textAlign: "right" }}>CCL CEDEAR</th>
+                <th style={{ padding: "9px 12px", fontWeight: 600, textAlign: "right" }}>Desvío</th>
+                <th style={{ padding: "9px 12px", fontWeight: 600, textAlign: "right" }}>Spread CEDEAR</th>
+                <th style={{ padding: "9px 12px", fontWeight: 600, textAlign: "right" }}>Spread USA</th>
+              </tr>
+            </thead>
+            <tbody>
+              {filtered.slice(0, 60).map((r) => (
+                <tr key={r.sym} style={{ borderBottom: `1px solid ${C.border}` }}>
+                  <td style={{ padding: "8px 12px", fontWeight: 700, color: C.text }}>
+                    {r.sym}
+                    {!r.seeded && <span title="ratio derivado de la data" style={{ marginLeft: 5, fontSize: 9, color: C.dim }}>~</span>}
+                  </td>
+                  <td style={{ padding: "8px 12px" }}><RouteBadge cedear={r.buyCedear} save={r.edgeAbs} /></td>
+                  <td style={{ padding: "8px 12px" }}><RouteBadge cedear={r.sellCedear} save={r.edgeAbs} /></td>
+                  <td style={{ padding: "8px 12px", textAlign: "right", fontVariantNumeric: "tabular-nums", color: C.muted }}>{fmtN(r.cclImplMid, 1)}</td>
+                  <td style={{ padding: "8px 12px", textAlign: "right", fontVariantNumeric: "tabular-nums", color: r.devPct >= 0 ? "#f87171" : "#34d399" }}>
+                    {r.devPct >= 0 ? "+" : "−"}{fmtN(Math.abs(r.devPct), 2)}%
+                  </td>
+                  <td style={{ padding: "8px 12px", textAlign: "right", fontVariantNumeric: "tabular-nums", color: C.dim }}>{fmtN(r.cSpread, 2)}%</td>
+                  <td style={{ padding: "8px 12px", textAlign: "right", fontVariantNumeric: "tabular-nums", color: C.dim }}>{fmtN(r.uSpread, 2)}%</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      <p style={{ fontSize: 11, color: C.dim, margin: "12px 2px 0", lineHeight: 1.5, maxWidth: 880 }}>
+        <strong style={{ color: C.muted }}>Cómo leerlo:</strong> el <strong>desvío</strong> es cuánto se aparta el CCL implícito del CEDEAR del CCL de referencia. Si el CEDEAR está <span style={{ color: "#34d399" }}>barato</span> (desvío −) conviene comprarlo y vender el papel USA; si está <span style={{ color: "#f87171" }}>caro</span> (desvío +), al revés. El <strong>ahorro</strong> es esa diferencia, antes de spreads — por eso conviene cuando supera el spread de la ruta. Ratios marcados con <span style={{ color: C.dim }}>~</span> son derivados de la data (verificar antes de operar grande).
+      </p>
+    </div>
+  );
+}
+
 function PnlPorInstrumentoModule() {
   const { positions, loading, error } = useUserPositions();
   const [typeFilter, setTypeFilter] = useState("all");
