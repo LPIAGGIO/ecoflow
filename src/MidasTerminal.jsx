@@ -24275,6 +24275,7 @@ function EjecucionInteligenteModule() {
   const [lastFetch, setLastFetch] = useState(null);
   const [q, setQ] = useState("");
   const [tick, setTick] = useState(0);
+  const [sort, setSort] = useState({ key: "edge", dir: "desc" });
 
   useEffect(() => {
     let mounted = true;
@@ -24341,8 +24342,20 @@ function EjecucionInteligenteModule() {
   }, [ced, usa]);
 
   const filtered = q ? rows.filter((r) => r.sym.includes(q.toUpperCase())) : rows;
+  const ejecVal = (r, k) => k === "sym" ? r.sym : k === "ccl" ? r.cclImplMid : k === "dev" ? r.devPct : k === "cspr" ? (r.cSpread ?? -1) : k === "uspr" ? (r.uSpread ?? -1) : r.edgeAbs;
+  const sorted = [...filtered].sort((a, b) => {
+    const va = ejecVal(a, sort.key), vb = ejecVal(b, sort.key);
+    const d = typeof va === "string" ? va.localeCompare(vb) : (va - vb);
+    return sort.dir === "asc" ? d : -d;
+  });
+  const onSort = (k) => setSort((s) => s.key === k ? { key: k, dir: s.dir === "asc" ? "desc" : "asc" } : { key: k, dir: k === "sym" ? "asc" : "desc" });
   const fmtN = (n, d = 2) => (n == null ? "—" : Number(n).toLocaleString("es-AR", { minimumFractionDigits: d, maximumFractionDigits: d }));
   const CED = "#34d399", US = "#60a5fa";
+  const Th = ({ k, label, right }) => (
+    <th onClick={() => onSort(k)} style={{ padding: "9px 12px", fontWeight: 600, textAlign: right ? "right" : "left", cursor: "pointer", userSelect: "none", whiteSpace: "nowrap", color: sort.key === k ? C.text : C.dim }}>
+      {label}{sort.key === k ? (sort.dir === "asc" ? " ▲" : " ▼") : ""}
+    </th>
+  );
   const RouteBadge = ({ cedear, save }) => (
     <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
       <span style={{ padding: "2px 7px", fontSize: 10, fontWeight: 700, borderRadius: 3, color: cedear ? CED : US, background: cedear ? "rgba(52,211,153,0.12)" : "rgba(96,165,250,0.12)" }}>
@@ -24392,18 +24405,18 @@ function EjecucionInteligenteModule() {
         <div style={{ overflowX: "auto", border: `1px solid ${C.border}`, borderRadius: 6 }}>
           <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
             <thead>
-              <tr style={{ borderBottom: `1px solid ${C.border}`, color: C.dim, textAlign: "left" }}>
-                <th style={{ padding: "9px 12px", fontWeight: 600 }}>Ticker</th>
-                <th style={{ padding: "9px 12px", fontWeight: 600 }}>Para COMPRAR</th>
-                <th style={{ padding: "9px 12px", fontWeight: 600 }}>Para VENDER</th>
-                <th style={{ padding: "9px 12px", fontWeight: 600, textAlign: "right" }}>CCL CEDEAR</th>
-                <th style={{ padding: "9px 12px", fontWeight: 600, textAlign: "right" }}>Desvío</th>
-                <th style={{ padding: "9px 12px", fontWeight: 600, textAlign: "right" }}>Spread CEDEAR</th>
-                <th style={{ padding: "9px 12px", fontWeight: 600, textAlign: "right" }}>Spread USA</th>
+              <tr style={{ borderBottom: `1px solid ${C.border}` }}>
+                <Th k="sym" label="Ticker" />
+                <Th k="edge" label="Para COMPRAR" />
+                <Th k="edge" label="Para VENDER" />
+                <Th k="ccl" label="CCL CEDEAR" right />
+                <Th k="dev" label="Desvío" right />
+                <Th k="cspr" label="Spread CEDEAR" right />
+                <Th k="uspr" label="Spread USA" right />
               </tr>
             </thead>
             <tbody>
-              {filtered.slice(0, 60).map((r) => (
+              {sorted.slice(0, 60).map((r) => (
                 <tr key={r.sym} style={{ borderBottom: `1px solid ${C.border}` }}>
                   <td style={{ padding: "8px 12px", fontWeight: 700, color: C.text }}>
                     {r.sym}
